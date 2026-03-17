@@ -2846,7 +2846,7 @@ def show_login():
 
 # ==================== 智能组图页面 ====================
 def show_combo_page():
-    st.markdown('<div class="page-title">🖼️ 批量出图</div>', unsafe_allow_html=True)
+    st.markdown('<div class="page-title">1 批量出图</div>', unsafe_allow_html=True)
     st.markdown('<div class="info-card">适合批量卖点图、主图、尺寸图。按步骤完成即可。</div>', unsafe_allow_html=True)
     
     s = get_settings()
@@ -3175,7 +3175,7 @@ def show_combo_page():
 
 # ==================== 快速出图页面 ====================
 def show_smart_page():
-    st.markdown('<div class="page-title">⚡ 快速出图</div>', unsafe_allow_html=True)
+    st.markdown('<div class="page-title">2 快速出图</div>', unsafe_allow_html=True)
     st.markdown('<div class="info-card">更少步骤，适合快速做单批图片。</div>', unsafe_allow_html=True)
     
     s = get_settings()
@@ -3351,7 +3351,7 @@ Aspect: {aspect}"""
 
 # ==================== 标题生成页面 ====================
 def show_title_page():
-    st.markdown('<div class="page-title">🏷️ 智能标题生成 (中英双语)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="page-title">3 标题优化</div>', unsafe_allow_html=True)
     
     api_key = st.session_state.own_api_key if st.session_state.use_own_key else get_next_api_key()
     
@@ -3498,7 +3498,7 @@ def show_title_page():
 def show_image_translate_page():
     st.markdown('''
     <div class="translate-header">
-        <div class="translate-logo">AT</div>
+        <div class="translate-logo">4</div>
         <div>
             <div class="translate-title">4 图片翻译</div>
             <div class="translate-subtitle">批量翻译 · 英文出图 · 简化下载</div>
