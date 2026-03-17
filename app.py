@@ -98,7 +98,7 @@ def get_rate_limit_hint(api_key: str = ""):
             "provider": "Vertex Express",
             "image_parallelism": 1,
             "text_parallelism": 2,
-            "note": "图片请求建议低并发，避免触发项目级限速。"
+            "note": "图片请求建议低并发，速率限制按项目计，不按单个 Key 计。"
         }
     return {
         "provider": "Gemini API",
