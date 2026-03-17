@@ -1,0 +1,7 @@
+# SSL 证书目录
+
+将您的 SSL 证书文件放置于此目录：
+- cert.pem 或 fullchain.pem - 证书文件
+- key.pem 或 privkey.pem - 私钥文件
+
+然后取消 docker-compose.yml 和 nginx/nginx.conf 中相关注释。

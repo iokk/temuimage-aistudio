@@ -1,0 +1,36 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+
+# Data (mounted as volume)
+data/
+
+# Config
+.env
+docker-compose.override.yml
+
+# Docs
+*.md
+!README.md
+
+# Nginx (separate service)
+nginx/
+
+# Scripts
+deploy.sh
+deploy.bat
+Makefile

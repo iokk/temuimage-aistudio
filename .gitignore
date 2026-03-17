@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 数据和配置
+data/
+*.json
+!.env.example
+.env
+output/
+tmp/
+*.zip
+*.tar
+*.gz
+temu.joolhome.com
+
+# Docker
+docker-compose.override.yml
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# SSL证书
+nginx/ssl/*.pem
+nginx/ssl/*.crt
+nginx/ssl/*.key
