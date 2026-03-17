@@ -1,14 +1,16 @@
-# 🍌 TEMU 电商智能作图系统 V15.3.8
+# 🍌 TEMU AI Studio V1.0.0
 
-> 新增图片翻译模块 - 电商图片文字翻译 + 翻译出图
+> V1.0 收敛版：批量出图、快速出图、图片翻译、Vertex Express 支持
 
-## ✨ V15.3.8 优化内容
+## ✨ V1.0.0 版本说明
 
 | 功能 | 说明 |
 |------|------|
-| 模型统一 | 所有出图链路固定为 `🍌 Nano Banana 2`（`gemini-3.1-flash-image-preview`） |
-| 速率稳定性 | 增加请求并发闸门 + 抖动退避重试，降低 429/503/504 波动 |
-| 出图统计 | 新增后台累计/今日出图指标，前台页底显示“今日已出图” |
+| 模型统一 | 所有出图链路固定为 `🍌 Nano Banana 2` |
+| API 兼容 | 支持 Gemini API Key 与 Vertex Express Key |
+| 速率稳定性 | 增加请求并发闸门 + 抖动退避重试 |
+| 界面收敛 | 导航与页面标题更简洁，面向实际出图流程 |
+| 出图统计 | 后台累计/今日出图指标，前台页底显示“今日已出图” |
 
 ## ✨ V15.3.7 优化内容
 
@@ -117,6 +119,26 @@
 - 支持恢复默认模板
 
 ## 📦 部署说明（简化版）
+
+### GitHub → Zeabur 拉取部署
+
+推荐做法：
+
+1. 代码推送到 GitHub 仓库
+2. 在 Zeabur 新建服务并连接该仓库
+3. 在服务变量里写入：
+
+```bash
+SYSTEM_API_KEYS_FIXED=AQ.xxxxx
+SYSTEM_API_KEYS_SYNC_MODE=replace
+GOOGLE_GENAI_USE_VERTEXAI=true
+ADMIN_PASSWORD_FIXED=你的管理员密码
+USER_PASSWORD_FIXED=你的用户密码
+ALLOW_PASSWORDLESS_USER_LOGIN=true
+PORT=8501
+```
+
+这样后续只需要 `git push`，Zeabur 就能直接拉取更新。
 
 ### 一键启动（推荐）
 

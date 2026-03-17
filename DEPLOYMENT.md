@@ -1,4 +1,4 @@
-# TEMU 部署与发布检查清单
+# TEMU AI Studio V1.0.0 部署与发布检查清单
 
 ## 1) 本地发布前检查
 
@@ -39,6 +39,14 @@ ZEABUR_TOKEN=你的token ./scripts/deploy-zeabur.sh --project temu-v15 --service
 ```
 
 说明：脚本默认会使用“瘦身上传上下文”，减少无关文件上传，提升部署速度。
+
+### 2.1.1) GitHub 拉取部署（推荐）
+
+如果你已经把代码放到 GitHub：
+
+1. 在 Zeabur 新建服务并连接 GitHub 仓库
+2. 在环境变量里写入固定值
+3. 后续只需要 `git push`
 
 ### 2.2) Zeabur 固定值注入（免重复填写）
 

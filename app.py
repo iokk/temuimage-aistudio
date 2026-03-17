@@ -1,48 +1,6 @@
 """
-🍌 TEMU 电商智能作图系统 V15.3.8
-新增图片翻译模块 - 电商图片文字翻译 + 翻译出图
-核心作者: 企鹅 & 小明
-商业订阅: 企鹅 & Jerry
-
-V15.3.8 更新内容:
-1. 全局出图模型锁定为 Nano Banana 2
-2. 新增请求并发闸门与抖动退避，提升高并发稳定性
-3. 新增今日出图统计（后台与前台页底）
-
-V15.3.7 更新内容:
-1. 新增固定凭据/固定API Key 启动注入，重部署无需重复手填
-2. 系统服务支持用户免密登录（可配置）
-3. 管理后台权限收敛为管理员独占
-
-V15.3.6 更新内容:
-1. 图片生成与图片翻译默认模型升级为 Nano Banana 2
-2. 识别旧模型默认配置并自动迁移到 Nano Banana 2
-3. 增强超时提示与重试稳定性
-
-V15.3.4 更新内容:
-1. 图片翻译结果页简化为译后图勾选下载
-2. 移除原图下载与格式切换，减少卡顿
-3. 批量 ZIP 改为按需打包，避免重复重算
-
-V15.3.3 更新内容:
-1. 图片翻译默认使用 Pro，提高准确度
-2. 翻译自动分批，保留总量硬限制
-3. 智能组图/快速出图流程指引与UI细节优化
-
-V15.3.2 更新内容:
-1. 增强稳定性提示与参考图建议
-2. 新增会话清理入口，便于异常恢复
-
-V15.3.0 新增内容:
-1. 电商图片翻译模块（文本提取 + 翻译出图）
-2. 图片翻译独立页面
-
-V15.2.1 修复内容:
-1. 修复 thinking_level 兼容性问题 - gemini-2.5-flash-image 不支持此参数
-2. 图片生成后正确显示和下载
-3. 增加详细错误日志
-4. 文件重命名包含类型名称
-5. 标题模板优化为中英双语
+TEMU AI Studio V1.0.0
+Vertex Express + Nano Banana 2 image workflow
 """
 
 import streamlit as st
@@ -63,10 +21,10 @@ from google import genai
 from google.genai import types
 
 # ==================== 配置常量 ====================
-APP_VERSION = "V15.3.8"
+APP_VERSION = "V1.0.0"
 APP_AUTHOR = "企鹅 & 小明"
 APP_COMMERCIAL = "安得跨境 企鹅&Jerry nowdn.com"
-APP_NAME = "TEMU 电商智能作图系统"
+APP_NAME = "TEMU AI Studio"
 
 DATA_DIR = Path("/app/data") if os.path.exists("/app/data") else Path("./data")
 DATA_DIR.mkdir(exist_ok=True)
@@ -133,6 +91,21 @@ def should_use_vertex_express(api_key: str = "") -> bool:
     if _env_flag("GOOGLE_GENAI_USE_VERTEXAI", False):
         return True
     return is_vertex_express_key(api_key)
+
+def get_rate_limit_hint(api_key: str = ""):
+    if should_use_vertex_express(api_key):
+        return {
+            "provider": "Vertex Express",
+            "image_parallelism": 1,
+            "text_parallelism": 2,
+            "note": "图片请求建议低并发，避免触发项目级限速。"
+        }
+    return {
+        "provider": "Gemini API",
+        "image_parallelism": 2,
+        "text_parallelism": 2,
+        "note": "建议控制中低并发，优先稳定成功率。"
+    }
 
 def create_genai_client(api_key: str, http_options=None):
     kwargs = {"api_key": api_key}
@@ -755,6 +728,15 @@ def get_next_api_key():
     keys_data["current_index"] = (idx + 1) % len(valid)
     save_api_keys(keys_data)
     return valid[idx].get("key")
+
+def peek_system_api_key():
+    keys_data = get_api_keys()
+    keys = keys_data.get("keys", [])
+    now = datetime.now().isoformat()
+    valid = [k for k in keys if k.get("enabled", True) and (not k.get("expires") or k.get("expires") > now)]
+    if not valid:
+        return ""
+    return valid[0].get("key", "")
 
 # ==================== 文件存储 ====================
 def _get_storage_settings():
@@ -2730,8 +2712,8 @@ def show_login():
     st.markdown(f'<p style="text-align:center;color:#64748b;margin-bottom:1.5rem">{APP_VERSION} · {APP_AUTHOR}</p>', unsafe_allow_html=True)
     
     cols = st.columns(4)
-    features = [("🚀", "智能组图", "8种图型+标题生成"), ("🏷️", "标题优化", "中英双语输出"),
-                ("AT", "图片翻译", "文字提取+翻译出图"), ("🛡️", "合规检测", "风险词自动过滤")]
+    features = [("🖼️", "批量出图", "批量参考图一键出图"), ("⚡", "快速出图", "更少步骤，直接生成"),
+                ("AT", "图片翻译", "英文翻译和译后图"), ("🛡️", "合规保护", "自动规避高风险词")]
     for col, (icon, title, subtitle) in zip(cols, features):
         col.markdown(f'<div class="feature-card"><span class="feature-icon">{icon}</span><div class="feature-title">{title}</div><div class="feature-desc">{subtitle}</div></div>', unsafe_allow_html=True)
     
@@ -2864,8 +2846,8 @@ def show_login():
 
 # ==================== 智能组图页面 ====================
 def show_combo_page():
-    st.markdown('<div class="page-title">🚀 智能组图工作流</div>', unsafe_allow_html=True)
-    st.markdown('<div class="info-card">按「上传 → 选择类型 → 文案 → 合规 → 出图」顺序完成，系统会自动串联流程。</div>', unsafe_allow_html=True)
+    st.markdown('<div class="page-title">🖼️ 批量出图</div>', unsafe_allow_html=True)
+    st.markdown('<div class="info-card">适合批量卖点图、主图、尺寸图。按步骤完成即可。</div>', unsafe_allow_html=True)
     
     s = get_settings()
     templates = get_templates()["combo_types"]
@@ -2910,6 +2892,9 @@ def show_combo_page():
         
         if st.session_state.session_tokens > 0:
             st.markdown(f'<div class="token-badge">🎯 {st.session_state.session_tokens:,} tokens</div>', unsafe_allow_html=True)
+        active_api_key = st.session_state.own_api_key if st.session_state.use_own_key else peek_system_api_key()
+        rate_hint = get_rate_limit_hint(active_api_key)
+        st.caption(f"{rate_hint['provider']} · {rate_hint['note']}")
     
     # 检查是否有已完成的结果需要显示
     if st.session_state.combo_generation_done and st.session_state.combo_results:
@@ -3190,8 +3175,8 @@ def show_combo_page():
 
 # ==================== 快速出图页面 ====================
 def show_smart_page():
-    st.markdown('<div class="page-title">🎨 快速出图模式</div>', unsafe_allow_html=True)
-    st.markdown('<div class="info-card">上传素材 → 选择类型 → 一键出图，适合快速批量生成。</div>', unsafe_allow_html=True)
+    st.markdown('<div class="page-title">⚡ 快速出图</div>', unsafe_allow_html=True)
+    st.markdown('<div class="info-card">更少步骤，适合快速做单批图片。</div>', unsafe_allow_html=True)
     
     s = get_settings()
     templates = get_templates()["smart_types"]
@@ -3515,12 +3500,12 @@ def show_image_translate_page():
     <div class="translate-header">
         <div class="translate-logo">AT</div>
         <div>
-            <div class="translate-title">电商图片翻译</div>
-            <div class="translate-subtitle">批量翻译 · 合规词 · 对照导出</div>
+            <div class="translate-title">图片翻译</div>
+            <div class="translate-subtitle">批量翻译 · 英文出图 · 简化下载</div>
         </div>
     </div>
     ''', unsafe_allow_html=True)
-    st.markdown("上传电商图片，自动提取图中文字并翻译。可选择生成翻译后图片。")
+    st.markdown("上传图片后可直接生成英文文本和译后图。")
     render_translation_tips()
 
     api_key = st.session_state.own_api_key if st.session_state.use_own_key else get_next_api_key()
@@ -4533,7 +4518,7 @@ def main_app():
         st.markdown(f"### 🍌 {APP_NAME}")
         st.caption(APP_VERSION)
         st.markdown("---")
-        page = st.radio("功能", ["🚀 智能组图", "🎨 快速出图", "🏷️ 标题生成", "AT 图片翻译"], label_visibility="collapsed")
+        page = st.radio("功能", ["🖼️ 批量出图", "⚡ 快速出图", "🏷️ 标题优化", "AT 图片翻译"], label_visibility="collapsed")
         st.markdown("---")
         
         if st.session_state.use_own_key:
@@ -4563,11 +4548,11 @@ def main_app():
                 del st.session_state[k]
             st.rerun()
     
-    if page == "🚀 智能组图":
+    if page == "🖼️ 批量出图":
         show_combo_page()
-    elif page == "🎨 快速出图":
+    elif page == "⚡ 快速出图":
         show_smart_page()
-    elif page == "🏷️ 标题生成":
+    elif page == "🏷️ 标题优化":
         show_title_page()
     else:
         show_image_translate_page()
