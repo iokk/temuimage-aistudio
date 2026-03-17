@@ -170,7 +170,7 @@ DEFAULT_SETTINGS = {
     "translate_max_input": 200,
     "translate_max_file_mb": 7,
     "translate_allowed_formats": "png,jpg,jpeg,webp,heic,heif",
-    "translate_default_output_mode": "文本+翻译图片",
+    "translate_default_output_mode": "生成翻译图片",
     "translate_default_size_strategy": "保留原比例",
     "translate_default_ratio": "1:1",
     "translate_default_ratio_method": "补边(白色)",
@@ -444,7 +444,7 @@ Rules:
 - Keep brand trademark certification logos and legally required product markings unchanged
 - If a text segment is already in target language keep it
 - If target language is English, all rendered text must be US English only with no Chinese/Japanese/Korean characters
-- Use concise, policy-safe ecommerce wording suitable for Amazon/Team规范
+- Use concise, policy-safe ecommerce wording suitable for Amazon and TEMU platform rules
 Output image only."""
 }
 
@@ -1838,8 +1838,8 @@ def clear_translate_runtime_cache(results: list):
 
 def get_translate_style_hint(style_choice: str):
     if style_choice == "北美电商英文（偏营销）":
-        return "North American ecommerce listing English (Amazon-compliant, Team style), persuasive but professional, no slang or colloquial expressions, consistent terminology, US punctuation and units, avoid unsupported absolute claims"
-    return "North American ecommerce listing English (Amazon-compliant, Team style), formal and professional, no slang or colloquial expressions, consistent terminology, US punctuation and units, avoid unsupported absolute claims"
+        return "North American ecommerce listing English (Amazon-compliant, TEMU style), persuasive but professional, no slang or colloquial expressions, consistent terminology, US punctuation and units, avoid unsupported absolute claims"
+    return "North American ecommerce listing English (Amazon-compliant, TEMU style), formal and professional, no slang or colloquial expressions, consistent terminology, US punctuation and units, avoid unsupported absolute claims"
 
 def execute_image_translate_workload(api_key: str, upload_items: list, opts: dict, progress_cb=None, log_cb=None):
     upload_items = upload_items or []
@@ -2267,15 +2267,15 @@ def create_zip_from_results(results: list, titles: list = None) -> bytes:
 # ==================== 样式 ====================
 def apply_style():
     st.markdown("""<style>
-    :root { --primary: #6366f1; --success: #10b981; --warning: #f59e0b; --danger: #ef4444; }
+    :root { --primary: #1677ff; --success: #10b981; --warning: #faad14; --danger: #ff4d4f; }
     html, body, [class*="css"] { font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", "Helvetica Neue", Arial, sans-serif; }
     .block-container { padding-top: 0.75rem; padding-bottom: 1.25rem; }
-    .main-title { font-size: 2.5rem; font-weight: 800; text-align: center; margin: 1rem 0; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .main-title { font-size: 2.5rem; font-weight: 800; text-align: center; margin: 1rem 0; background: linear-gradient(135deg, #1677ff 0%, #36cfc9 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
     .page-title { font-size: 1.75rem; font-weight: 700; margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 3px solid var(--primary); }
     .stButton>button { border-radius: 10px; font-weight: 600; transition: all 0.2s; border: 1px solid #e2e8f0; background: #f8fafc; color: #0f172a; }
     .stButton>button:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15, 23, 42, 0.12); }
-    button[kind="primary"] { background: linear-gradient(135deg, #4f46e5 0%, #06b6d4 100%); color: #fff !important; border: 0 !important; box-shadow: 0 6px 16px rgba(79, 70, 229, 0.35); }
-    button[kind="primary"]:hover { box-shadow: 0 8px 20px rgba(6, 182, 212, 0.35); }
+    button[kind="primary"] { background: linear-gradient(135deg, #1677ff 0%, #36cfc9 100%); color: #fff !important; border: 0 !important; box-shadow: 0 6px 16px rgba(22, 119, 255, 0.28); }
+    button[kind="primary"]:hover { box-shadow: 0 8px 20px rgba(22, 119, 255, 0.24); }
     button[kind="secondary"] { background: #f1f5f9 !important; color: #0f172a !important; border: 1px solid #e2e8f0 !important; }
     .stButton>button:focus { box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.25); }
     [data-testid="stFileUploader"] { border: 2px dashed var(--primary); border-radius: 12px; padding: 1rem; }
@@ -2296,20 +2296,20 @@ def apply_style():
     .image-card { border: 1px solid #e2e8f0; border-radius: 12px; padding: 0.5rem; margin: 0.5rem 0; background: white; }
     .image-label { font-size: 12px; font-weight: 600; color: #6366f1; text-align: center; margin-top: 0.25rem; }
     .translate-header { display: flex; align-items: center; gap: 12px; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 12px 16px; margin-bottom: 14px; }
-    .translate-logo { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg, #4f46e5 0%, #06b6d4 100%); color: #fff; font-weight: 700; display: flex; align-items: center; justify-content: center; font-size: 16px; }
+    .translate-logo { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg, #1677ff 0%, #36cfc9 100%); color: #fff; font-weight: 700; display: flex; align-items: center; justify-content: center; font-size: 16px; }
     .translate-title { font-size: 18px; font-weight: 700; }
     .translate-subtitle { font-size: 12px; color: #64748b; margin-top: 2px; }
     .form-card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 12px 14px; margin-bottom: 12px; box-shadow: 0 1px 6px rgba(15, 23, 42, 0.04); }
     .section-title { font-size: 14px; font-weight: 700; color: #111827; margin: 4px 0 10px 0; display: flex; align-items: center; gap: 8px; }
-    .section-chip { font-size: 11px; color: #4f46e5; background: #eef2ff; border-radius: 999px; padding: 2px 8px; }
+    .section-chip { font-size: 11px; color: #1677ff; background: #e6f4ff; border-radius: 999px; padding: 2px 8px; }
     .guide-card { background: linear-gradient(135deg, #f8fafc 0%, #eef2ff 100%); border: 1px solid #e5e7eb; border-radius: 12px; padding: 10px 12px; font-size: 12px; }
     .thumb-grid img { border-radius: 8px; border: 1px solid #e5e7eb; }
     section[data-testid="stSidebar"] { background: #fbfbfd; }
     .stepper { display: flex; gap: 8px; flex-wrap: wrap; margin: 0.5rem 0 1rem; }
     .step { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 6px 10px; font-size: 12px; display: inline-flex; align-items: center; gap: 6px; color: #334155; }
     .step-num { width: 18px; height: 18px; border-radius: 999px; background: #e2e8f0; color: #0f172a; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; }
-    .step.active { background: linear-gradient(135deg, #eef2ff 0%, #e0f2fe 100%); border-color: #c7d2fe; color: #1e293b; }
-    .step.active .step-num { background: #4f46e5; color: #fff; }
+    .step.active { background: linear-gradient(135deg, #e6f4ff 0%, #f0f5ff 100%); border-color: #91caff; color: #1e293b; }
+    .step.active .step-num { background: #1677ff; color: #fff; }
     </style>""", unsafe_allow_html=True)
 
 def show_footer():
@@ -2712,8 +2712,8 @@ def show_login():
     st.markdown(f'<p style="text-align:center;color:#64748b;margin-bottom:1.5rem">{APP_VERSION} · {APP_AUTHOR}</p>', unsafe_allow_html=True)
     
     cols = st.columns(4)
-    features = [("🖼️", "批量出图", "批量参考图一键出图"), ("⚡", "快速出图", "更少步骤，直接生成"),
-                ("AT", "图片翻译", "英文翻译和译后图"), ("🛡️", "合规保护", "自动规避高风险词")]
+    features = [("1", "批量出图", "批量参考图一键出图"), ("2", "快速出图", "更少步骤，直接生成"),
+                ("3", "标题优化", "中英标题优化"), ("4", "图片翻译", "直接输出英文译后图")]
     for col, (icon, title, subtitle) in zip(cols, features):
         col.markdown(f'<div class="feature-card"><span class="feature-icon">{icon}</span><div class="feature-title">{title}</div><div class="feature-desc">{subtitle}</div></div>', unsafe_allow_html=True)
     
@@ -3500,7 +3500,7 @@ def show_image_translate_page():
     <div class="translate-header">
         <div class="translate-logo">AT</div>
         <div>
-            <div class="translate-title">图片翻译</div>
+            <div class="translate-title">4 图片翻译</div>
             <div class="translate-subtitle">批量翻译 · 英文出图 · 简化下载</div>
         </div>
     </div>
@@ -3722,9 +3722,9 @@ def show_image_translate_page():
             target_prompt = LANGUAGE_PROMPT_NAMES.get(opts.get("target_lang", "en"), "English")
             style_choice = opts.get("style_choice", "北美电商英文（标准）")
             if style_choice == "北美电商英文（偏营销）":
-                style_hint = "North American ecommerce listing English (Amazon-compliant, Team style), persuasive but professional, no slang or colloquial expressions, consistent terminology, US punctuation and units, avoid unsupported absolute claims"
+                style_hint = "North American ecommerce listing English (Amazon-compliant, TEMU style), persuasive but professional, no slang or colloquial expressions, consistent terminology, US punctuation and units, avoid unsupported absolute claims"
             else:
-                style_hint = "North American ecommerce listing English (Amazon-compliant, Team style), formal and professional, no slang or colloquial expressions, consistent terminology, US punctuation and units, avoid unsupported absolute claims"
+                style_hint = "North American ecommerce listing English (Amazon-compliant, TEMU style), formal and professional, no slang or colloquial expressions, consistent terminology, US punctuation and units, avoid unsupported absolute claims"
             layout_hint = "Strictly preserve layout typography and colors" if opts.get("keep_layout", True) else "Minor layout adjustments allowed to improve readability"
             avoid_terms = opts.get("avoid_terms", [])
             size_strategy = opts.get("size_strategy", "保留原比例")
@@ -3898,11 +3898,11 @@ def show_image_translate_page():
         target_lang = st.selectbox("目标语言", target_keys, format_func=lambda x: LANGUAGE_OPTIONS[x], index=default_target, key="img_trans_target")
 
     output_options = ["仅文本翻译", "生成翻译图片", "文本+翻译图片"]
-    default_output = s.get("translate_default_output_mode", "文本+翻译图片")
+    default_output = s.get("translate_default_output_mode", "生成翻译图片")
     output_mode = st.radio(
         "输出模式",
         output_options,
-        index=output_options.index(default_output) if default_output in output_options else 2,
+        index=output_options.index(default_output) if default_output in output_options else 1,
         horizontal=True,
         key="img_trans_mode"
     )
@@ -3931,7 +3931,7 @@ def show_image_translate_page():
     retries_default = int(s.get("translate_english_max_retries", 2))
     retries_default = max(1, min(5, retries_default))
     force_english_output = st.checkbox(
-        "强制英文规范输出（Amazon/Team）",
+        "强制英文规范输出（Amazon/TEMU）",
         value=force_english_default if target_is_english else False,
         disabled=not target_is_english,
         help="目标语言为 English 时，自动校验中文残留并触发重试。",
@@ -4055,7 +4055,7 @@ def show_image_translate_page():
     run_mode = st.radio(
         "执行方式",
         ["前台处理（当前页等待）", "后台排队（可并发）"],
-        index=1,
+        index=0,
         horizontal=True,
         key="img_trans_run_mode"
     )
@@ -4266,7 +4266,7 @@ def show_admin():
             s["translate_default_output_mode"] = st.selectbox(
                 "默认导出模式",
                 ["仅文本翻译", "生成翻译图片", "文本+翻译图片"],
-                index=["仅文本翻译", "生成翻译图片", "文本+翻译图片"].index(s.get("translate_default_output_mode", "文本+翻译图片"))
+                index=["仅文本翻译", "生成翻译图片", "文本+翻译图片"].index(s.get("translate_default_output_mode", "生成翻译图片"))
             )
             s["translate_text_model"] = PRIMARY_IMAGE_MODEL
             st.text_input("文本链路模型（OCR/文本翻译）", MODELS[PRIMARY_IMAGE_MODEL]["name"], disabled=True, key="admin_translate_text_model_locked")
@@ -4518,7 +4518,7 @@ def main_app():
         st.markdown(f"### 🍌 {APP_NAME}")
         st.caption(APP_VERSION)
         st.markdown("---")
-        page = st.radio("功能", ["🖼️ 批量出图", "⚡ 快速出图", "🏷️ 标题优化", "AT 图片翻译"], label_visibility="collapsed")
+        page = st.radio("功能", ["1 批量出图", "2 快速出图", "3 标题优化", "4 图片翻译"], label_visibility="collapsed")
         st.markdown("---")
         
         if st.session_state.use_own_key:
@@ -4548,11 +4548,11 @@ def main_app():
                 del st.session_state[k]
             st.rerun()
     
-    if page == "🖼️ 批量出图":
+    if page == "1 批量出图":
         show_combo_page()
-    elif page == "⚡ 快速出图":
+    elif page == "2 快速出图":
         show_smart_page()
-    elif page == "🏷️ 标题优化":
+    elif page == "3 标题优化":
         show_title_page()
     else:
         show_image_translate_page()
