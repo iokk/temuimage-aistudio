@@ -1,103 +1,50 @@
-# TEMU AI Studio V1.0.0 部署与发布检查清单
+# TEMU AI Studio V1.0.0 部署清单
 
-## 1) 本地发布前检查
+## 1. 本地检查
 
 ```bash
 python3 -m py_compile app.py
-bash -n scripts/deploy-quick.sh
+bash -n scripts/deploy-zeabur.sh
 bash -n scripts/deploy-debian.sh
-bash -n deploy.sh
 ```
 
-## 2) Docker 部署（推荐）
+## 2. GitHub → Zeabur 部署
+
+推荐用于持续更新。
+
+### 步骤
+
+1. 将代码推送到 GitHub
+2. 在 Zeabur 中连接仓库
+3. 配置环境变量
+4. 等待构建并验证健康检查
+
+### 推荐环境变量
 
 ```bash
-./scripts/deploy-quick.sh up
-./scripts/deploy-quick.sh status
-```
-
-健康检查地址：
-
-`http://localhost:8501/_stcore/health`
-
-## 2.1) Zeabur 快速部署（更快上新）
-
-```bash
-ZEABUR_TOKEN=你的token ./scripts/deploy-zeabur.sh --project temu-v15 --service temu-image-gen
-```
-
-后续发布（最快）建议固定 `service-id`：
-
-```bash
-ZEABUR_TOKEN=你的token ./scripts/deploy-zeabur.sh --project temu-v15 --service-id 你的service_id
-```
-
-可选绑定域名：
-
-```bash
-ZEABUR_TOKEN=你的token ./scripts/deploy-zeabur.sh --project temu-v15 --service temu-image-gen --domain your.domain.com
-```
-
-说明：脚本默认会使用“瘦身上传上下文”，减少无关文件上传，提升部署速度。
-
-### 2.1.1) GitHub 拉取部署（推荐）
-
-如果你已经把代码放到 GitHub：
-
-1. 在 Zeabur 新建服务并连接 GitHub 仓库
-2. 在环境变量里写入固定值
-3. 后续只需要 `git push`
-
-### 2.2) Zeabur 固定值注入（免重复填写）
-
-在 Zeabur 服务环境变量添加：
-
-```bash
-SYSTEM_API_KEYS_FIXED=AIza_key_1,AIza_key_2
-# 如使用 Vertex AI Express Key（AQ...），建议同时加上：
+SYSTEM_API_KEYS_FIXED=AQ.xxxxx
+SYSTEM_API_KEYS_SYNC_MODE=replace
 GOOGLE_GENAI_USE_VERTEXAI=true
-SYSTEM_API_KEYS_SYNC_MODE=if_empty
 ADMIN_PASSWORD_FIXED=你的管理员密码
 USER_PASSWORD_FIXED=你的用户密码
 ALLOW_PASSWORDLESS_USER_LOGIN=true
+PORT=8501
 ```
 
-同步策略说明：
-- `if_empty`：仅 Key 池为空时注入（推荐）
-- `merge`：固定 Key 合并到现有池
-- `replace`：每次重启覆盖 Key 池
-
-## 3) 常见问题
-
-- **启动后无法翻译**：检查 `.env` 是否配置 `GOOGLE_API_KEY` 或 `GEMINI_API_KEY`
-- **每次重部署都要重填密码/API Key**：配置 `ADMIN_PASSWORD_FIXED` / `USER_PASSWORD_FIXED` / `SYSTEM_API_KEYS_FIXED`
-- **文本翻译慢**：在管理后台开启“极速文本链路”，并将“文本并发线程数”调到 `2~4`
-- **图片翻译慢**：优先使用 `⚡ Nano Banana Flash`，必要时降低分辨率到 `1K`
-- **批量下载卡顿**：结果页已改为译后图 ZIP 按需缓存，如仍慢请减少单批数量
-- **出图报错 `400 FAILED_PRECONDITION User location is not supported`**：优先改用 Vertex AI Express / Vertex AI 区域端点；若仍走 Gemini API，请切换到受支持地区节点（如 US/JP/SG）。
-
-## 4) 一次可复用的发布流程
+## 3. 原生服务器部署
 
 ```bash
-# 1. 语法检查
-python3 -m py_compile app.py
-
-# 2. 启动容器
-./scripts/deploy-quick.sh up
-
-# 3. 观察日志
-./scripts/deploy-quick.sh logs
-
-# 4. 版本更新后滚动更新
-./scripts/deploy-quick.sh update
+./scripts/deploy-debian.sh install
 ```
 
-## 5) 能否直接推送并部署？
+## 4. 健康检查
 
-可以。建议固定执行：
+```bash
+curl http://localhost:8501/_stcore/health
+```
 
-1. 先跑“本地发布前检查”
-2. 再执行 `./scripts/deploy-quick.sh update`
-3. 检查 `status` 与健康检查接口
+## 5. 常见问题
 
-只要上述 3 步通过，就可以稳定复用这套推送与部署流程。
+- `FAILED_PRECONDITION`：优先改走 Vertex Express / Vertex AI 区域端点
+- 长时间出图慢：降低图片并发，优先 `minimal`
+- 服务卡在 `STARTING`：优先检查服务器容器运行层，而不是先怀疑代码

@@ -21,6 +21,7 @@ data/
 .env
 output/
 tmp/
+release/
 *.zip
 *.tar
 *.gz

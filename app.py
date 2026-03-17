@@ -977,7 +977,7 @@ def format_runtime_error_message(error, max_len=220):
         return "⚠️ 请求超时（DEADLINE_EXCEEDED）。当前任务复杂度较高：请减少参考图数量、保持 1K 分辨率，或稍后重试。"
     return raw[:max_len] if max_len and len(raw) > max_len else raw
 
-# ==================== AI客户端 (V15.2修复版) ====================
+# ==================== AI 客户端 ====================
 class GeminiClient:
     """Gemini Image 客户端（当前锁定 Nano Banana 2）"""
     
