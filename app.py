@@ -57,7 +57,7 @@ MAX_TITLE_EN_CHARS = 250
 
 # ==================== Gemini 3 模型配置 ====================
 MODELS = {
-    "gemini-3.1-flash-image-preview": {
+    "gemini-2.5-flash-image": {
         "name": "🍌 Nano Banana 2",
         "resolutions": ["1K"],
         "max_refs": 5,
@@ -66,8 +66,8 @@ MODELS = {
         "supports_thinking": True
     }
 }
-PRIMARY_IMAGE_MODEL = "gemini-3.1-flash-image-preview"
-LEGACY_IMAGE_MODELS = {"gemini-3-pro-image-preview", "gemini-2.5-flash-image"}
+PRIMARY_IMAGE_MODEL = "gemini-2.5-flash-image"
+LEGACY_IMAGE_MODELS = {"gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview"}
 MODEL_NAME_NANO_BANANA_2 = MODELS[PRIMARY_IMAGE_MODEL]["name"]
 
 try:
