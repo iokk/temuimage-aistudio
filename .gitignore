@@ -22,6 +22,7 @@ data/
 output/
 tmp/
 release/
+deliverables/
 *.zip
 *.tar
 *.gz
