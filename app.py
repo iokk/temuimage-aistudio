@@ -2471,7 +2471,8 @@ def inject_browser_key_persistence():
         <script>
         const mappings = [
           { label: "Gemini / Vertex API Key", storageKey: "temu_ai_studio_login_key" },
-          { label: "中转站 API Key", storageKey: "temu_ai_studio_relay_key" }
+          { label: "中转站 API Key", storageKey: "temu_ai_studio_relay_key" },
+          { label: "中转站 API 地址", storageKey: "temu_ai_studio_relay_base" }
         ];
         function applyPersistence() {
           const doc = window.parent.document;
@@ -2805,6 +2806,7 @@ def render_image_engine_selector(prefix: str, settings: dict):
     )
     relay_model = settings.get("relay_default_image_model", "imagine_x_1")
     relay_key = ""
+    relay_base = settings.get("relay_api_base", RELAY_API_BASE)
     if provider == "Gemini":
         st.caption(f"Gemini 默认模型：{MODELS[PRIMARY_IMAGE_MODEL]['name']}")
     else:
@@ -2825,14 +2827,21 @@ def render_image_engine_selector(prefix: str, settings: dict):
             placeholder="sk-...",
             key=f"{prefix}_relay_key"
         ).strip()
+        relay_base = st.text_input(
+            "中转站 API 地址",
+            value=relay_base,
+            placeholder="https://newapi.aisonnet.org/v1",
+            key=f"{prefix}_relay_base"
+        ).strip().rstrip("/")
         status = RELAY_MODEL_STATUS.get(relay_model, {})
         if status:
             st.markdown(
                 f"<div class='guide-card'><strong style='color:{status.get('color','#1677ff')}'>{status.get('label','未知')}</strong><br>{status.get('note','')}</div>",
                 unsafe_allow_html=True
             )
+        st.caption("支持前台直接改 API 地址和 API Key；浏览器会自动记住。")
         st.caption("当前中转站出图仅接管图片生成，图需分析/标题仍优先走 Gemini。")
-    return provider, relay_model, relay_key
+    return provider, relay_model, relay_key, relay_base
 
 def render_image_translate_settings(prefix: str, model_key: str, default_size: str = "1K"):
     model_info = MODELS.get(model_key, MODELS[PRIMARY_IMAGE_MODEL])
@@ -3096,7 +3105,7 @@ def show_combo_page():
         st.markdown("---")
         st.markdown("#### 🤖 出图模型")
         model_key = PRIMARY_IMAGE_MODEL
-        image_provider, relay_model, relay_key = render_image_engine_selector("combo", s)
+        image_provider, relay_model, relay_key, relay_base = render_image_engine_selector("combo", s)
         st.session_state.combo_model_key = model_key
         
         st.markdown("---")
@@ -3339,7 +3348,7 @@ def show_combo_page():
                     else:
                         if not relay_key:
                             raise Exception("请先输入中转站 API Key")
-                        relay_client = RelayImageClient(relay_key, relay_model, base_url=s.get("relay_api_base", RELAY_API_BASE))
+                        relay_client = RelayImageClient(relay_key, relay_model, base_url=relay_base or s.get("relay_api_base", RELAY_API_BASE))
                         img = relay_client.generate_image(refs, prompt, aspect, size, thinking_level, enforce_english=enforce_en, max_attempts=1)
                         if img is None:
                             raise Exception(relay_client.get_last_error() or "中转站返回空图片")
@@ -3492,7 +3501,7 @@ def show_smart_page():
     
     render_stepper(["上传素材", "选择类型", "生成出图"], 3)
     model = PRIMARY_IMAGE_MODEL
-    image_provider, relay_model, relay_key = render_image_engine_selector("smart", s)
+    image_provider, relay_model, relay_key, relay_base = render_image_engine_selector("smart", s)
     if image_provider == "Gemini":
         aspect, size, thinking_level = render_gemini3_settings("smart", model)
     else:
@@ -3545,7 +3554,7 @@ Aspect: {aspect}"""
                     else:
                         if not relay_key:
                             raise Exception("请先输入中转站 API Key")
-                        relay_client = RelayImageClient(relay_key, relay_model, base_url=s.get("relay_api_base", RELAY_API_BASE))
+                        relay_client = RelayImageClient(relay_key, relay_model, base_url=relay_base or s.get("relay_api_base", RELAY_API_BASE))
                         img = relay_client.generate_image(images, prompt, aspect, size, thinking_level, enforce_english=enforce_en, max_attempts=1)
                         if img is None:
                             raise Exception(relay_client.get_last_error() or "中转站返回空图片")
