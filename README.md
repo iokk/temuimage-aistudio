@@ -59,6 +59,14 @@ https://newapi.aisonnet.org/v1
 - `hunyuan-image-3`
 - `grok-imagine-image`
 
+当前测试状态：
+
+- `imagine_x_1`：不稳定
+- `grok-imagine-image`：不稳定
+- `z-image-turbo`：当前无通道
+- `hunyuan-image-3`：当前无通道
+- `nano-banana-pro-reverse`：当前无通道
+
 说明：
 
 - 批量出图、快速出图已支持 `Gemini / 中转站` 二选一

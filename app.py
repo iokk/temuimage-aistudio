@@ -83,6 +83,13 @@ RELAY_IMAGE_MODELS = {
 RELAY_TEXT_MODELS = {
     "nano-banana-pro-reverse": {"name": "nano-banana-pro-reverse"},
 }
+RELAY_MODEL_STATUS = {
+    "z-image-turbo": {"label": "当前无通道", "color": "#ff4d4f", "note": "实测返回 model_not_found / no available channel"},
+    "imagine_x_1": {"label": "不稳定", "color": "#faad14", "note": "模型存在，但实测出现 generation_error / limited"},
+    "hunyuan-image-3": {"label": "当前无通道", "color": "#ff4d4f", "note": "实测返回 model_not_found / no available channel"},
+    "grok-imagine-image": {"label": "不稳定", "color": "#faad14", "note": "模型存在，但实测多次 generation_error"},
+    "nano-banana-pro-reverse": {"label": "当前无通道", "color": "#ff4d4f", "note": "当前默认组下无可用通道"},
+}
 
 try:
     GEMINI_MAX_INFLIGHT = int(os.getenv("GEMINI_MAX_INFLIGHT", "3"))
@@ -2801,10 +2808,15 @@ def render_image_engine_selector(prefix: str, settings: dict):
     if provider == "Gemini":
         st.caption(f"Gemini 默认模型：{MODELS[PRIMARY_IMAGE_MODEL]['name']}")
     else:
+        def relay_model_format(model_id: str):
+            status = RELAY_MODEL_STATUS.get(model_id, {})
+            suffix = status.get("label", "未知")
+            return f"{model_id} · {suffix}"
         relay_model = st.selectbox(
             "中转站模型",
             list(RELAY_IMAGE_MODELS.keys()),
             index=list(RELAY_IMAGE_MODELS.keys()).index(relay_model) if relay_model in RELAY_IMAGE_MODELS else 0,
+            format_func=relay_model_format,
             key=f"{prefix}_relay_model"
         )
         relay_key = st.text_input(
@@ -2813,6 +2825,12 @@ def render_image_engine_selector(prefix: str, settings: dict):
             placeholder="sk-...",
             key=f"{prefix}_relay_key"
         ).strip()
+        status = RELAY_MODEL_STATUS.get(relay_model, {})
+        if status:
+            st.markdown(
+                f"<div class='guide-card'><strong style='color:{status.get('color','#1677ff')}'>{status.get('label','未知')}</strong><br>{status.get('note','')}</div>",
+                unsafe_allow_html=True
+            )
         st.caption("当前中转站出图仅接管图片生成，图需分析/标题仍优先走 Gemini。")
     return provider, relay_model, relay_key
 
