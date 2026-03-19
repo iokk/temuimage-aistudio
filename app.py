@@ -4,6 +4,7 @@ Vertex Express + Nano Banana 2 image workflow
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 from PIL import Image
 import io
 import json
@@ -15,8 +16,10 @@ import hashlib
 import zipfile
 import random
 import time
+import base64
 from datetime import datetime, date
 from pathlib import Path
+import requests
 from google import genai
 from google.genai import types
 
@@ -69,6 +72,17 @@ MODELS = {
 PRIMARY_IMAGE_MODEL = "gemini-2.5-flash-image"
 LEGACY_IMAGE_MODELS = {"gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview"}
 MODEL_NAME_NANO_BANANA_2 = MODELS[PRIMARY_IMAGE_MODEL]["name"]
+
+RELAY_API_BASE = "https://newapi.aisonnet.org/v1"
+RELAY_IMAGE_MODELS = {
+    "z-image-turbo": {"name": "z-image-turbo"},
+    "imagine_x_1": {"name": "imagine_x_1"},
+    "hunyuan-image-3": {"name": "hunyuan-image-3"},
+    "grok-imagine-image": {"name": "grok-imagine-image"},
+}
+RELAY_TEXT_MODELS = {
+    "nano-banana-pro-reverse": {"name": "nano-banana-pro-reverse"},
+}
 
 try:
     GEMINI_MAX_INFLIGHT = int(os.getenv("GEMINI_MAX_INFLIGHT", "3"))
@@ -154,6 +168,7 @@ LANGUAGE_PROMPT_NAMES = {
 DEFAULT_SETTINGS = {
     "daily_limit_user": 100, "daily_limit_vip": 100,
     "default_model": PRIMARY_IMAGE_MODEL,
+    "default_image_provider": "Gemini",
     "default_resolution": "1K", 
     "default_aspect": "1:1",
     "default_thinking_level": "minimal",
@@ -185,6 +200,8 @@ DEFAULT_SETTINGS = {
     "translate_cleanup_chinese_overlay": True,
     "translate_bg_max_concurrent": 2
     ,
+    "relay_api_base": RELAY_API_BASE,
+    "relay_default_image_model": "imagine_x_1",
     "enforce_english_text": False,
     "english_text_max_retries": 1
 }
@@ -516,6 +533,11 @@ def get_settings():
     s["translate_text_model"] = PRIMARY_IMAGE_MODEL
     s["default_resolution"] = "1K"
     s["translate_default_resolution"] = "1K"
+    if s.get("default_image_provider") not in ("Gemini", "中转站"):
+        s["default_image_provider"] = "Gemini"
+    s["relay_api_base"] = str(s.get("relay_api_base", RELAY_API_BASE) or RELAY_API_BASE).rstrip("/")
+    if s.get("relay_default_image_model") not in RELAY_IMAGE_MODELS:
+        s["relay_default_image_model"] = "imagine_x_1"
     try:
         workers = int(s.get("translate_text_workers", DEFAULT_SETTINGS.get("translate_text_workers", 2)))
     except Exception:
@@ -964,6 +986,14 @@ def find_compliance_hits(text, terms):
 def format_runtime_error_message(error, max_len=220):
     raw = str(error).strip() if error is not None else ""
     lower = raw.lower()
+    if "model_not_found" in lower or "no available channel for model" in lower:
+        return "⚠️ 当前中转站该模型没有可用通道，请切换其他模型或稍后再试。"
+    if "generation failed" in lower:
+        return "⚠️ 中转站图片生成失败，请换一个模型或稍后再试。"
+    if "wss connection timeout" in lower or "\"limited\"" in lower:
+        return "⚠️ 中转站上游超时或限流，请降低并发并稍后重试。"
+    if "api key invalid" in lower or "invalid api key" in lower:
+        return "⚠️ API Key 无效，请检查后重试。"
     if (
         "user location is not supported for the api use" in lower
         or ("failed_precondition" in lower and "location is not supported" in lower)
@@ -1674,6 +1704,111 @@ Output image only."""
                 raise e
         return None
 
+# ==================== 中转站图片客户端 ====================
+class RelayImageClient:
+    def __init__(self, api_key: str, model: str, base_url: str = RELAY_API_BASE, timeout_sec: int = 180):
+        self.api_key = str(api_key or "").strip()
+        self.model = model
+        self.base_url = str(base_url or RELAY_API_BASE).rstrip("/")
+        self.timeout_sec = timeout_sec
+        self.last_error = None
+        self.total_tokens = 0
+
+    def get_last_error(self):
+        return self.last_error
+
+    def get_tokens_used(self):
+        return self.total_tokens
+
+    def _build_messages(self, refs, prompt: str):
+        content = [{"type": "text", "text": prompt}]
+        for ref in (refs or [])[:3]:
+            try:
+                img = resize_max_side(ref.copy(), 1024)
+                buf = io.BytesIO()
+                img.save(buf, format="PNG", optimize=True)
+                b64 = base64.b64encode(buf.getvalue()).decode()
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{b64}"}
+                })
+            except Exception:
+                continue
+        return [{"role": "user", "content": content}]
+
+    def _extract_image_from_response(self, payload: dict):
+        if not isinstance(payload, dict):
+            return None
+        for item in payload.get("data", []) or []:
+            if item.get("b64_json"):
+                return Image.open(io.BytesIO(base64.b64decode(item["b64_json"])))
+            if item.get("url"):
+                response = requests.get(item["url"], timeout=60)
+                response.raise_for_status()
+                return Image.open(io.BytesIO(response.content))
+        choices = payload.get("choices", []) or []
+        for choice in choices:
+            message = choice.get("message", {}) or {}
+            content = message.get("content")
+            if isinstance(content, str):
+                match = re.search(r'(https?://\\S+)', content)
+                if match:
+                    response = requests.get(match.group(1), timeout=60)
+                    response.raise_for_status()
+                    return Image.open(io.BytesIO(response.content))
+            if isinstance(content, list):
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    image_url = part.get("image_url")
+                    if isinstance(image_url, dict) and image_url.get("url"):
+                        url = image_url["url"]
+                        if url.startswith("data:image/") and "," in url:
+                            _, b64 = url.split(",", 1)
+                            return Image.open(io.BytesIO(base64.b64decode(b64)))
+                        response = requests.get(url, timeout=60)
+                        response.raise_for_status()
+                        return Image.open(io.BytesIO(response.content))
+                    if part.get("b64_json"):
+                        return Image.open(io.BytesIO(base64.b64decode(part["b64_json"])))
+        return None
+
+    def generate_image(self, refs, prompt, aspect="1:1", size="1K", thinking_level="minimal", enforce_english=False, max_attempts=1):
+        attempts = max(1, int(max_attempts or 1))
+        url = f"{self.base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        final_prompt = (
+            f"{prompt}\n"
+            f"Output requirement: generate one ecommerce image in aspect ratio {aspect}. "
+            f"Use English only. Keep product style consistent with references if references are provided."
+        )
+        for _ in range(attempts):
+            try:
+                payload = {
+                    "model": self.model,
+                    "messages": self._build_messages(refs, final_prompt),
+                    "temperature": 0.2,
+                    "max_tokens": 400,
+                }
+                response = requests.post(url, headers=headers, json=payload, timeout=self.timeout_sec)
+                text = response.text
+                if response.status_code >= 400:
+                    self.last_error = text
+                    continue
+                data = response.json()
+                usage = data.get("usage", {}) or {}
+                self.total_tokens += int(usage.get("total_tokens") or 0)
+                image = self._extract_image_from_response(data)
+                if image is not None:
+                    return image
+                self.last_error = text[:300]
+            except Exception as e:
+                self.last_error = str(e)
+        return None
+
 # ==================== 图片转Base64工具 ====================
 def image_to_base64(img: Image.Image) -> str:
     """将PIL Image转换为base64字符串"""
@@ -2323,6 +2458,42 @@ def show_footer():
     </div>
     """, unsafe_allow_html=True)
 
+def inject_browser_key_persistence():
+    components.html(
+        """
+        <script>
+        const mappings = [
+          { label: "Gemini / Vertex API Key", storageKey: "temu_ai_studio_login_key" },
+          { label: "中转站 API Key", storageKey: "temu_ai_studio_relay_key" }
+        ];
+        function applyPersistence() {
+          const doc = window.parent.document;
+          mappings.forEach((mapping) => {
+            const input = doc.querySelector(`input[aria-label="${mapping.label}"]`);
+            if (!input) return;
+            const saved = window.parent.localStorage.getItem(mapping.storageKey) || "";
+            if (saved && !input.value) {
+              input.value = saved;
+              input.dispatchEvent(new Event("input", { bubbles: true }));
+              input.dispatchEvent(new Event("change", { bubbles: true }));
+            }
+            if (!input.dataset.persistBound) {
+              input.addEventListener("input", () => {
+                window.parent.localStorage.setItem(mapping.storageKey, input.value || "");
+              });
+              input.dataset.persistBound = "1";
+            }
+          });
+        }
+        applyPersistence();
+        const observer = new MutationObserver(() => applyPersistence());
+        observer.observe(window.parent.document.body, { childList: true, subtree: true });
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
 # ==================== 初始化 ====================
 def init_session():
     defaults = {
@@ -2616,6 +2787,35 @@ def render_gemini3_settings(prefix: str, model_key: str):
     
     return aspect, size, thinking_level
 
+def render_image_engine_selector(prefix: str, settings: dict):
+    default_provider = settings.get("default_image_provider", "Gemini")
+    provider = st.radio(
+        "出图引擎",
+        ["Gemini", "中转站"],
+        index=0 if default_provider == "Gemini" else 1,
+        horizontal=True,
+        key=f"{prefix}_image_provider"
+    )
+    relay_model = settings.get("relay_default_image_model", "imagine_x_1")
+    relay_key = ""
+    if provider == "Gemini":
+        st.caption(f"Gemini 默认模型：{MODELS[PRIMARY_IMAGE_MODEL]['name']}")
+    else:
+        relay_model = st.selectbox(
+            "中转站模型",
+            list(RELAY_IMAGE_MODELS.keys()),
+            index=list(RELAY_IMAGE_MODELS.keys()).index(relay_model) if relay_model in RELAY_IMAGE_MODELS else 0,
+            key=f"{prefix}_relay_model"
+        )
+        relay_key = st.text_input(
+            "中转站 API Key",
+            type="password",
+            placeholder="sk-...",
+            key=f"{prefix}_relay_key"
+        ).strip()
+        st.caption("当前中转站出图仅接管图片生成，图需分析/标题仍优先走 Gemini。")
+    return provider, relay_model, relay_key
+
 def render_image_translate_settings(prefix: str, model_key: str, default_size: str = "1K"):
     model_info = MODELS.get(model_key, MODELS[PRIMARY_IMAGE_MODEL])
     supports_thinking = model_info.get("supports_thinking", False)
@@ -2878,8 +3078,8 @@ def show_combo_page():
         st.markdown("---")
         st.markdown("#### 🤖 出图模型")
         model_key = PRIMARY_IMAGE_MODEL
+        image_provider, relay_model, relay_key = render_image_engine_selector("combo", s)
         st.session_state.combo_model_key = model_key
-        st.caption(f"{MODELS[model_key]['name']}（已锁定）")
         
         st.markdown("---")
         if st.session_state.use_own_key:
@@ -2994,7 +3194,17 @@ def show_combo_page():
             st.info("下一步：生成图需文案后，进入「图需文案」查看并编辑。")
             
             st.markdown("---")
-            aspect, size, thinking_level = render_gemini3_settings("combo", model_key)
+            if image_provider == "Gemini":
+                aspect, size, thinking_level = render_gemini3_settings("combo", model_key)
+            else:
+                c1, c2 = st.columns(2)
+                with c1:
+                    aspect = st.selectbox("📐 宽高比", ASPECT_RATIOS, key="combo_aspect")
+                with c2:
+                    st.text_input("输出分辨率", value="1K", disabled=True, key="combo_relay_size")
+                size = "1K"
+                thinking_level = "minimal"
+                st.caption("中转站默认按 1K 低并发出图。")
             
             can_generate = total_count > 0 and total_count <= MAX_TOTAL_IMAGES
             
@@ -3106,7 +3316,15 @@ def show_combo_page():
                     s = get_settings()
                     enforce_en = bool(s.get("enforce_english_text", True))
                     en_retries = int(s.get("english_text_max_retries", 2))
-                    img = client.generate_image(refs, prompt, aspect, size, thinking_level, enforce_english=enforce_en, max_attempts=en_retries)
+                    if image_provider == "Gemini":
+                        img = client.generate_image(refs, prompt, aspect, size, thinking_level, enforce_english=enforce_en, max_attempts=en_retries)
+                    else:
+                        if not relay_key:
+                            raise Exception("请先输入中转站 API Key")
+                        relay_client = RelayImageClient(relay_key, relay_model, base_url=s.get("relay_api_base", RELAY_API_BASE))
+                        img = relay_client.generate_image(refs, prompt, aspect, size, thinking_level, enforce_english=enforce_en, max_attempts=1)
+                        if img is None:
+                            raise Exception(relay_client.get_last_error() or "中转站返回空图片")
                     
                     if img:
                         # 带类型名称的文件名
@@ -3256,8 +3474,18 @@ def show_smart_page():
     
     render_stepper(["上传素材", "选择类型", "生成出图"], 3)
     model = PRIMARY_IMAGE_MODEL
-    st.caption(f"🤖 出图模型：{MODELS[model]['name']}（已锁定）")
-    aspect, size, thinking_level = render_gemini3_settings("smart", model)
+    image_provider, relay_model, relay_key = render_image_engine_selector("smart", s)
+    if image_provider == "Gemini":
+        aspect, size, thinking_level = render_gemini3_settings("smart", model)
+    else:
+        c1, c2 = st.columns(2)
+        with c1:
+            aspect = st.selectbox("📐 宽高比", ASPECT_RATIOS, key="smart_aspect")
+        with c2:
+            st.text_input("输出分辨率", value="1K", disabled=True, key="smart_relay_size")
+        size = "1K"
+        thinking_level = "minimal"
+        st.caption("中转站默认按 1K 低并发出图。")
     
     can_gen = images and name and total_count > 0
     
@@ -3294,7 +3522,15 @@ Aspect: {aspect}"""
                     s = get_settings()
                     enforce_en = bool(s.get("enforce_english_text", True))
                     en_retries = int(s.get("english_text_max_retries", 2))
-                    img = client.generate_image(images, prompt, aspect, size, thinking_level, enforce_english=enforce_en, max_attempts=en_retries)
+                    if image_provider == "Gemini":
+                        img = client.generate_image(images, prompt, aspect, size, thinking_level, enforce_english=enforce_en, max_attempts=en_retries)
+                    else:
+                        if not relay_key:
+                            raise Exception("请先输入中转站 API Key")
+                        relay_client = RelayImageClient(relay_key, relay_model, base_url=s.get("relay_api_base", RELAY_API_BASE))
+                        img = relay_client.generate_image(images, prompt, aspect, size, thinking_level, enforce_english=enforce_en, max_attempts=1)
+                        if img is None:
+                            raise Exception(relay_client.get_last_error() or "中转站返回空图片")
                     if img:
                         filename = f"{str(done).zfill(2)}_{info['name']}.png"
                         label = f"{info['icon']} {info['name']}"
@@ -3505,7 +3741,7 @@ def show_image_translate_page():
         </div>
     </div>
     ''', unsafe_allow_html=True)
-    st.markdown("上传图片后可直接生成英文文本和译后图。")
+    st.markdown("上传图片后默认直接生成英文译后图。图片翻译当前固定走 Gemini / Vertex 图文链路。")
     render_translation_tips()
 
     api_key = st.session_state.own_api_key if st.session_state.use_own_key else get_next_api_key()
@@ -4243,6 +4479,17 @@ def show_admin():
         with c3:
             s["default_aspect"] = st.selectbox("默认宽高比", ASPECT_RATIOS,
                 index=ASPECT_RATIOS.index(s.get("default_aspect", "1:1")))
+        s["default_image_provider"] = st.selectbox(
+            "默认出图引擎",
+            ["Gemini", "中转站"],
+            index=0 if s.get("default_image_provider", "Gemini") == "Gemini" else 1
+        )
+        if s["default_image_provider"] == "中转站":
+            s["relay_default_image_model"] = st.selectbox(
+                "默认中转站模型",
+                list(RELAY_IMAGE_MODELS.keys()),
+                index=list(RELAY_IMAGE_MODELS.keys()).index(s.get("relay_default_image_model", "imagine_x_1")) if s.get("relay_default_image_model", "imagine_x_1") in RELAY_IMAGE_MODELS else 0
+            )
         st.caption("出图模型已全局锁定为 Nano Banana 2。")
         st.markdown("---")
         s["enforce_english_text"] = st.checkbox("强制英文文本校验（自动重试）", value=s.get("enforce_english_text", False))
@@ -4563,6 +4810,7 @@ def main():
     apply_style()
     init_session()
     bootstrap_runtime_config()
+    inject_browser_key_persistence()
     
     if not st.session_state.authenticated:
         show_login()
