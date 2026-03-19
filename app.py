@@ -1780,6 +1780,26 @@ class RelayImageClient:
                         return Image.open(io.BytesIO(base64.b64decode(part["b64_json"])))
         return None
 
+def probe_relay_api(base_url: str, api_key: str, model: str = ""):
+    base_url = str(base_url or RELAY_API_BASE).rstrip("/")
+    api_key = str(api_key or "").strip()
+    if not base_url or not api_key:
+        return False, "请先填写中转站 API 地址和 API Key。"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        response = requests.get(f"{base_url}/models", headers=headers, timeout=20)
+        if response.status_code >= 400:
+            return False, format_runtime_error_message(response.text)
+        payload = response.json()
+        model_ids = {item.get("id") for item in payload.get("data", []) if isinstance(item, dict)}
+        if model and model not in model_ids:
+            return False, f"模型 `{model}` 不在该中转站的模型列表中。"
+        if model:
+            return True, f"中转站连接正常，已找到模型 `{model}`。"
+        return True, "中转站连接正常。"
+    except Exception as e:
+        return False, format_runtime_error_message(e)
+
     def generate_image(self, refs, prompt, aspect="1:1", size="1K", thinking_level="minimal", enforce_english=False, max_attempts=1):
         attempts = max(1, int(max_attempts or 1))
         url = f"{self.base_url}/chat/completions"
@@ -2477,20 +2497,22 @@ def inject_browser_key_persistence():
         function applyPersistence() {
           const doc = window.parent.document;
           mappings.forEach((mapping) => {
-            const input = doc.querySelector(`input[aria-label="${mapping.label}"]`);
-            if (!input) return;
+            const inputs = doc.querySelectorAll(`input[aria-label="${mapping.label}"]`);
+            if (!inputs.length) return;
             const saved = window.parent.localStorage.getItem(mapping.storageKey) || "";
-            if (saved && !input.value) {
-              input.value = saved;
-              input.dispatchEvent(new Event("input", { bubbles: true }));
-              input.dispatchEvent(new Event("change", { bubbles: true }));
-            }
-            if (!input.dataset.persistBound) {
-              input.addEventListener("input", () => {
-                window.parent.localStorage.setItem(mapping.storageKey, input.value || "");
-              });
-              input.dataset.persistBound = "1";
-            }
+            inputs.forEach((input) => {
+              if (saved && !input.value) {
+                input.value = saved;
+                input.dispatchEvent(new Event("input", { bubbles: true }));
+                input.dispatchEvent(new Event("change", { bubbles: true }));
+              }
+              if (!input.dataset.persistBound) {
+                input.addEventListener("input", () => {
+                  window.parent.localStorage.setItem(mapping.storageKey, input.value || "");
+                });
+                input.dataset.persistBound = "1";
+              }
+            });
           });
         }
         applyPersistence();
@@ -2843,6 +2865,44 @@ def render_image_engine_selector(prefix: str, settings: dict):
         st.caption("当前中转站出图仅接管图片生成，图需分析/标题仍优先走 Gemini。")
     return provider, relay_model, relay_key, relay_base
 
+def render_relay_config_panel(prefix: str, settings: dict, expanded: bool = False):
+    with st.expander("🛰️ 中转站配置", expanded=expanded):
+        relay_base = st.text_input(
+            "中转站 API 地址",
+            value=settings.get("relay_api_base", RELAY_API_BASE),
+            placeholder="https://newapi.aisonnet.org/v1",
+            key=f"{prefix}_relay_base_panel"
+        ).strip().rstrip("/")
+        relay_key = st.text_input(
+            "中转站 API Key",
+            type="password",
+            placeholder="sk-...",
+            key=f"{prefix}_relay_key_panel"
+        ).strip()
+        relay_model = st.selectbox(
+            "测试模型",
+            list(RELAY_IMAGE_MODELS.keys()),
+            index=list(RELAY_IMAGE_MODELS.keys()).index(settings.get("relay_default_image_model", "imagine_x_1")) if settings.get("relay_default_image_model", "imagine_x_1") in RELAY_IMAGE_MODELS else 0,
+            format_func=lambda model_id: f"{model_id} · {RELAY_MODEL_STATUS.get(model_id, {}).get('label', '未知')}",
+            key=f"{prefix}_relay_test_model"
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("测试连接", key=f"{prefix}_relay_probe", use_container_width=True):
+                ok, message = probe_relay_api(relay_base, relay_key)
+                if ok:
+                    st.success(message)
+                else:
+                    st.error(message)
+        with c2:
+            if st.button("测试当前模型", key=f"{prefix}_relay_probe_model", use_container_width=True):
+                ok, message = probe_relay_api(relay_base, relay_key, relay_model)
+                if ok:
+                    st.success(message)
+                else:
+                    st.error(message)
+        st.caption("这里的输入只保存在当前浏览器本地，不写入服务端文件。")
+
 def render_image_translate_settings(prefix: str, model_key: str, default_size: str = "1K"):
     model_info = MODELS.get(model_key, MODELS[PRIMARY_IMAGE_MODEL])
     supports_thinking = model_info.get("supports_thinking", False)
@@ -2978,7 +3038,7 @@ def show_login():
                         st.success("已保存！")
                         st.rerun()
 
-    t1, t2 = st.tabs(["🔑 自己的API Key", "🎫 系统服务"])
+    t1, t2, t3 = st.tabs(["🔑 自己的API Key", "🎫 系统服务", "🛰️ 中转站配置"])
     
     with t1:
         st.markdown('<div class="info-card"><strong>💡 自有 Key 模式</strong><br><span style="font-size:13px;color:#64748b">支持 Gemini API Key（AIza...）和 Vertex Express Key（AQ...）</span></div>', unsafe_allow_html=True)
@@ -3068,6 +3128,10 @@ def show_login():
                     st.rerun()
                 else:
                     st.error("密码错误")
+
+    with t3:
+        st.markdown('<div class="info-card"><strong>🛰️ 中转站入口</strong><br><span style="font-size:13px;color:#64748b">这里可以直接填写中转站 API 地址、API Key，并测试连通性。</span></div>', unsafe_allow_html=True)
+        render_relay_config_panel("login", s, expanded=True)
 
     show_footer()
 
@@ -4806,9 +4870,11 @@ def main_app():
             st.markdown("---")
             with st.expander("🛡️ 自定义合规词"):
                 show_user_compliance()
-        
         st.markdown("---")
+        render_relay_config_panel("sidebar", get_settings(), expanded=False)
+        
         if st.session_state.is_admin:
+            st.markdown("---")
             if st.button("⚙️ 管理后台", use_container_width=True):
                 st.session_state.show_admin = True
                 st.rerun()
