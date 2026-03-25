@@ -12,6 +12,12 @@ services:
     environment:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - DATABASE_URL=${DATABASE_URL:-postgresql+psycopg://temu:temu@postgres:5432/temu}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - PLATFORM_AUTO_MIGRATE=${PLATFORM_AUTO_MIGRATE:-true}
+      - PLATFORM_SEED_DEFAULTS=${PLATFORM_SEED_DEFAULTS:-true}
+      - PLATFORM_DEFAULT_ORG_NAME=${PLATFORM_DEFAULT_ORG_NAME:-TEMU Team Workspace}
+      - PLATFORM_ENCRYPTION_KEY=${PLATFORM_ENCRYPTION_KEY:-}
       - GOOGLE_GENAI_USE_VERTEXAI=${GOOGLE_GENAI_USE_VERTEXAI:-false}
       - FILE_STORAGE_TYPE=${FILE_STORAGE_TYPE:-local}
       - FILE_RETENTION_DAYS=${FILE_RETENTION_DAYS:-7}
@@ -29,6 +35,60 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - temu-network
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-temu}
+      - POSTGRES_USER=${POSTGRES_USER:-temu}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-temu}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-temu} -d ${POSTGRES_DB:-temu}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - temu-network
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - temu-network
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
     networks:
       - temu-network
 
@@ -51,3 +111,8 @@ services:
 networks:
   temu-network:
     driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:
