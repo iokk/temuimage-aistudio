@@ -37,6 +37,7 @@ docker-compose.override.yml
 # OS
 .DS_Store
 Thumbs.db
+.worktrees/
 
 # SSL证书
 nginx/ssl/*.pem
