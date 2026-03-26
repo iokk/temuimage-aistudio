@@ -97,7 +97,7 @@ MODELS = {
         "max_refs": 5,
         "thinking_levels": ["minimal", "high"],
         "default_thinking": "minimal",
-        "supports_thinking": True,
+        "supports_thinking": False,
     }
 }
 PRIMARY_IMAGE_MODEL = "gemini-2.5-flash-image"
