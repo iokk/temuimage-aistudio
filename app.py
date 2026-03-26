@@ -19,6 +19,7 @@ import time
 import base64
 from datetime import datetime, date
 from pathlib import Path
+from typing import Optional
 import requests
 from google import genai
 from google.genai import types
@@ -57,6 +58,10 @@ from temu_core.streamlit_admin import (
     render_workspace_admin_tab,
 )
 from temu_core.team import ensure_workspace_identity, list_workspace_projects
+from temu_core.title_logic import (
+    generate_compliant_titles_or_raise,
+    should_attempt_title_generation,
+)
 
 # ==================== 配置常量 ====================
 APP_VERSION = "V1.0.0"
@@ -1717,7 +1722,7 @@ class GeminiClient:
 
     def __init__(self, api_key, model=PRIMARY_IMAGE_MODEL, timeout_ms: int = 180000):
         self.api_key = api_key
-        self.model = PRIMARY_IMAGE_MODEL
+        self.model = model or PRIMARY_IMAGE_MODEL
         self.timeout_ms = timeout_ms
         self.use_vertex_express = should_use_vertex_express(api_key)
         http_opts = None
@@ -3565,11 +3570,15 @@ def init_session():
         "combo_results": [],
         "combo_errors": [],
         "combo_titles": [],
+        "combo_title_error": "",
+        "combo_title_warnings": [],
         "smart_generating": False,
         "smart_generation_done": False,
         "smart_results": [],
         "smart_errors": [],
         "smart_titles": [],
+        "smart_title_error": "",
+        "smart_title_warnings": [],
         "img_trans_results": [],
         "img_trans_errors": [],
         "img_trans_done": False,
@@ -3711,7 +3720,7 @@ def show_user_compliance():
 
 
 # ==================== 标题生成选项组件 ====================
-def render_title_gen_option(prefix: str):
+def render_title_gen_option(prefix: str, has_images: bool = False):
     title_templates = get_title_templates()
     enabled_templates = {
         k: v for k, v in title_templates.items() if v.get("enabled", True)
@@ -3723,7 +3732,7 @@ def render_title_gen_option(prefix: str):
     enable_title = st.checkbox(
         "📝 同时生成商品标题",
         key=f"{prefix}_enable_title",
-        help="勾选后将在出图完成时一并生成中英双语标题",
+        help="勾选后将在出图完成时一并生成英文标题。已上传图片时会优先结合图片分析，补充商品信息可选。",
     )
 
     if enable_title:
@@ -3743,12 +3752,22 @@ def render_title_gen_option(prefix: str):
         template_info = enabled_templates.get(selected_template, {})
         st.caption(f"📝 {template_info.get('desc', '')}")
 
+        field_label = (
+            f"补充商品信息 / 关键词 (可选，最多{MAX_TITLE_INFO_CHARS}字)"
+            if has_images
+            else f"商品信息描述 (最多{MAX_TITLE_INFO_CHARS}字)"
+        )
+        placeholder = (
+            "已上传图片时可不填；补充材质、规格、核心卖点会帮助标题更准确。"
+            if has_images
+            else "输入商品的详细信息，如：名称、材质、规格、特点、用途等..."
+        )
         title_info = st.text_area(
-            f"商品信息描述 (最多{MAX_TITLE_INFO_CHARS}字)",
+            field_label,
             height=100,
             max_chars=MAX_TITLE_INFO_CHARS,
             key=f"{prefix}_title_info",
-            placeholder="输入商品的详细信息，如：名称、材质、规格、特点、用途等...",
+            placeholder=placeholder,
         )
 
         char_count = len(title_info) if title_info else 0
@@ -4124,7 +4143,13 @@ def render_image_translate_settings(
 
 # ==================== 结果显示组件 ====================
 def display_generation_results(
-    results: list, errors: list, titles: list, tokens_used: int, prefix: str
+    results: list,
+    errors: list,
+    titles: list,
+    tokens_used: int,
+    prefix: str,
+    title_error: str = "",
+    title_warnings: Optional[list] = None,
 ):
     """显示生成结果 - 修复版"""
 
@@ -4139,6 +4164,8 @@ def display_generation_results(
         with st.expander(f"⚠️ {len(errors)} 个错误", expanded=False):
             for err in errors:
                 st.error(err)
+
+    title_warnings = title_warnings or []
 
     # 显示图片
     if results:
@@ -4189,6 +4216,10 @@ def display_generation_results(
         st.warning("未能生成任何图片，请检查错误信息")
 
     # 显示标题
+    if title_error:
+        st.error(f"标题生成失败: {title_error}")
+    for warning in title_warnings:
+        st.warning(warning)
     if titles:
         st.markdown("---")
         display_generated_titles(titles, prefix)
@@ -4597,7 +4628,13 @@ def show_combo_page():
         st.caption(f"{rate_hint['provider']} · {rate_hint['note']}")
 
     # 检查是否有已完成的结果需要显示
-    if st.session_state.combo_generation_done and st.session_state.combo_results:
+    if st.session_state.combo_generation_done and (
+        st.session_state.combo_results
+        or st.session_state.combo_errors
+        or st.session_state.combo_titles
+        or st.session_state.get("combo_title_error")
+        or st.session_state.get("combo_title_warnings")
+    ):
         st.markdown("## 📸 生成结果")
         display_generation_results(
             st.session_state.combo_results,
@@ -4605,6 +4642,8 @@ def show_combo_page():
             st.session_state.combo_titles,
             st.session_state.get("combo_tokens_used", 0),
             "combo",
+            st.session_state.get("combo_title_error", ""),
+            st.session_state.get("combo_title_warnings", []),
         )
 
         if st.button("🔄 开始新任务", type="primary", use_container_width=True):
@@ -4615,6 +4654,8 @@ def show_combo_page():
             st.session_state.combo_results = []
             st.session_state.combo_errors = []
             st.session_state.combo_titles = []
+            st.session_state.combo_title_error = ""
+            st.session_state.combo_title_warnings = []
             st.session_state.combo_generation_done = False
             st.session_state.combo_generating = False
             for tk in templates.keys():
@@ -4728,7 +4769,9 @@ def show_combo_page():
             if total_count > MAX_TOTAL_IMAGES:
                 st.error(f"❌ 超出最大限制 ({MAX_TOTAL_IMAGES}张)")
 
-            enable_title, title_info, title_template = render_title_gen_option("combo")
+            enable_title, title_info, title_template = render_title_gen_option(
+                "combo", has_images=bool(st.session_state.combo_images)
+            )
             st.info("下一步：生成图需文案后，进入「图需文案」查看并编辑。")
 
             st.markdown("---")
@@ -4897,6 +4940,8 @@ def show_combo_page():
 
             results = []
             errors = []
+            title_error = ""
+            title_warnings = []
 
             for i, r in enumerate(reqs):
                 type_key = r.get("type_key", "img")
@@ -4977,8 +5022,11 @@ def show_combo_page():
 
             # 生成标题
             generated_titles = []
-            if st.session_state.get("combo_enable_title") and st.session_state.get(
-                "combo_title_info"
+            title_tokens = 0
+            if should_attempt_title_generation(
+                st.session_state.get("combo_enable_title", False),
+                refs,
+                st.session_state.get("combo_title_info", ""),
             ):
                 status.info("⏳ 生成中英双语标题...")
                 try:
@@ -4989,20 +5037,37 @@ def show_combo_page():
                     template_prompt = title_templates.get(template_key, {}).get(
                         "prompt", DEFAULT_TITLE_TEMPLATES["default"]["prompt"]
                     )
-                    generated_titles = client.generate_titles(
-                        st.session_state.combo_title_info, template_prompt
+                    title_client = GeminiClient(api_key, model=TITLE_TEXT_MODEL)
+                    generated_titles, title_warnings = (
+                        generate_compliant_titles_or_raise(
+                            title_client,
+                            refs,
+                            st.session_state.get("combo_title_info", ""),
+                            template_prompt,
+                            compliance_checker=check_compliance,
+                            compliance_mode=st.session_state.get(
+                                "user_compliance_mode", "strict"
+                            ),
+                        )
                     )
+                    title_tokens = title_client.get_tokens_used()
                 except Exception as e:
+                    title_error = format_runtime_error_message(str(e), 220)
                     with log_container:
-                        st.warning(f"标题生成失败: {str(e)[:50]}")
+                        st.warning(f"标题生成失败: {title_error}")
+                for warning in title_warnings:
+                    with log_container:
+                        st.warning(warning)
 
-            tokens_used = client.get_tokens_used()
+            tokens_used = client.get_tokens_used() + title_tokens
             st.session_state.session_tokens += tokens_used
 
             # 保存结果到session_state
             st.session_state.combo_results = results
             st.session_state.combo_errors = errors
             st.session_state.combo_titles = generated_titles
+            st.session_state.combo_title_error = title_error
+            st.session_state.combo_title_warnings = title_warnings
             st.session_state.combo_tokens_used = tokens_used
             st.session_state.combo_generating = False
             st.session_state.combo_generation_done = True
@@ -5059,7 +5124,13 @@ def show_smart_page():
         return
 
     # 检查是否有已完成的结果
-    if st.session_state.smart_generation_done and st.session_state.smart_results:
+    if st.session_state.smart_generation_done and (
+        st.session_state.smart_results
+        or st.session_state.smart_errors
+        or st.session_state.smart_titles
+        or st.session_state.get("smart_title_error")
+        or st.session_state.get("smart_title_warnings")
+    ):
         st.markdown("## 📸 生成结果")
         display_generation_results(
             st.session_state.smart_results,
@@ -5067,12 +5138,16 @@ def show_smart_page():
             st.session_state.smart_titles,
             st.session_state.get("smart_tokens_used", 0),
             "smart",
+            st.session_state.get("smart_title_error", ""),
+            st.session_state.get("smart_title_warnings", []),
         )
 
         if st.button("🔄 开始新任务", type="primary", use_container_width=True):
             st.session_state.smart_results = []
             st.session_state.smart_errors = []
             st.session_state.smart_titles = []
+            st.session_state.smart_title_error = ""
+            st.session_state.smart_title_warnings = []
             st.session_state.smart_generation_done = False
             st.session_state.smart_generating = False
             st.rerun()
@@ -5130,7 +5205,9 @@ def show_smart_page():
         templates, prefix="smart", max_per_type=5, max_total=20
     )
 
-    enable_title, title_info, title_template = render_title_gen_option("smart")
+    enable_title, title_info, title_template = render_title_gen_option(
+        "smart", has_images=bool(images)
+    )
 
     st.markdown("---")
 
@@ -5171,6 +5248,8 @@ def show_smart_page():
         results = []
         errors = []
         done = 0
+        title_error = ""
+        title_warnings = []
 
         for tk, cnt in selected_types.items():
             info = templates[tk]
@@ -5247,25 +5326,43 @@ Aspect: {aspect}"""
 
         # 生成标题
         generated_titles = []
-        if enable_title and title_info:
+        title_tokens = 0
+        if should_attempt_title_generation(enable_title, images, title_info):
             status.info("⏳ 生成中英双语标题...")
             try:
                 title_templates_data = get_title_templates()
                 template_prompt = title_templates_data.get(title_template, {}).get(
                     "prompt", DEFAULT_TITLE_TEMPLATES["default"]["prompt"]
                 )
-                generated_titles = client.generate_titles(title_info, template_prompt)
+                title_client = GeminiClient(api_key, model=TITLE_TEXT_MODEL)
+                generated_titles, title_warnings = generate_compliant_titles_or_raise(
+                    title_client,
+                    images,
+                    title_info,
+                    template_prompt,
+                    compliance_checker=check_compliance,
+                    compliance_mode=st.session_state.get(
+                        "user_compliance_mode", "strict"
+                    ),
+                )
+                title_tokens = title_client.get_tokens_used()
             except Exception as e:
+                title_error = format_runtime_error_message(str(e), 220)
                 with log_container:
-                    st.warning(f"标题生成失败: {str(e)[:50]}")
+                    st.warning(f"标题生成失败: {title_error}")
+            for warning in title_warnings:
+                with log_container:
+                    st.warning(warning)
 
-        tokens_used = client.get_tokens_used()
+        tokens_used = client.get_tokens_used() + title_tokens
         st.session_state.session_tokens += tokens_used
 
         # 保存结果
         st.session_state.smart_results = results
         st.session_state.smart_errors = errors
         st.session_state.smart_titles = generated_titles
+        st.session_state.smart_title_error = title_error
+        st.session_state.smart_title_warnings = title_warnings
         st.session_state.smart_tokens_used = tokens_used
         st.session_state.smart_generation_done = True
 
@@ -5442,15 +5539,16 @@ def show_title_page():
         with st.spinner("🤖 AI生成中..."):
             try:
                 client = GeminiClient(api_key, model=TITLE_TEXT_MODEL)
-
-                if input_mode == "🖼️ 图片分析" or (
-                    input_mode == "🔀 图片+文字" and uploaded_images
-                ):
-                    titles = client.generate_titles_from_image(
-                        uploaded_images, product_info or "", final_prompt
-                    )
-                else:
-                    titles = client.generate_titles(product_info, final_prompt)
+                titles, title_warnings = generate_compliant_titles_or_raise(
+                    client,
+                    uploaded_images,
+                    product_info,
+                    final_prompt,
+                    compliance_checker=check_compliance,
+                    compliance_mode=st.session_state.get(
+                        "user_compliance_mode", "strict"
+                    ),
+                )
 
                 if titles:
                     if not st.session_state.use_own_key:
@@ -5475,15 +5573,17 @@ def show_title_page():
                     st.session_state.session_tokens += client.get_tokens_used()
 
                     st.markdown("---")
+                    for warning in title_warnings:
+                        st.warning(warning)
                     display_generated_titles(titles, "title")
                     st.markdown(
                         f'<div class="token-badge">🎯 消耗: {client.get_tokens_used():,} tokens</div>',
                         unsafe_allow_html=True,
                     )
                 else:
-                    st.error("生成失败，请重试")
+                    st.error("标题生成失败，未返回有效结果")
             except Exception as e:
-                st.error(f"生成失败: {str(e)}")
+                st.error(f"生成失败: {format_runtime_error_message(str(e), 220)}")
 
     show_footer()
 
