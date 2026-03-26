@@ -46,6 +46,10 @@ from temu_core.billing import charge_usage_to_wallet, get_wallet_dashboard
 from temu_core.db import get_database_status, session_scope
 from temu_core.models import EXPECTED_TABLES, User
 from temu_core.platform_status import describe_platform_database_status
+from temu_core.relay_config import (
+    has_system_service_access,
+    resolve_relay_runtime_config,
+)
 from temu_core.settings import (
     database_enabled as platform_database_enabled,
     get_platform_settings,
@@ -293,6 +297,7 @@ DEFAULT_SETTINGS = {
     "translate_cleanup_chinese_overlay": True,
     "translate_bg_max_concurrent": 2,
     "relay_api_base": RELAY_API_BASE,
+    "relay_api_key": "",
     "relay_default_image_model": "imagine_x_1",
     "enforce_english_text": False,
     "english_text_max_retries": 1,
@@ -792,6 +797,7 @@ def get_settings():
     s["relay_api_base"] = str(
         s.get("relay_api_base", RELAY_API_BASE) or RELAY_API_BASE
     ).rstrip("/")
+    s["relay_api_key"] = str(s.get("relay_api_key", "") or "").strip()
     if s.get("relay_default_image_model") not in RELAY_IMAGE_MODELS:
         s["relay_default_image_model"] = "imagine_x_1"
     try:
@@ -907,6 +913,10 @@ def _has_valid_system_key():
         if k.get("enabled", True) and (not k.get("expires") or k.get("expires") > now)
     ]
     return len(valid) > 0
+
+
+def _has_system_service_access():
+    return has_system_service_access(_has_valid_system_key(), get_settings())
 
 
 def bootstrap_env_system_key():
@@ -4001,6 +4011,7 @@ def render_image_engine_selector(prefix: str, settings: dict):
     relay_model = settings.get("relay_default_image_model", "imagine_x_1")
     relay_key = ""
     relay_base = settings.get("relay_api_base", RELAY_API_BASE)
+    saved_relay_key = settings.get("relay_api_key", "")
     if provider == "Gemini":
         st.caption(f"Gemini 默认模型：{MODELS[PRIMARY_IMAGE_MODEL]['name']}")
     else:
@@ -4022,10 +4033,12 @@ def render_image_engine_selector(prefix: str, settings: dict):
         relay_key = st.text_input(
             "中转站 API Key",
             type="password",
-            placeholder="sk-...",
+            placeholder="sk-...（留空则使用系统已保存的 Key）"
+            if saved_relay_key
+            else "sk-...",
             key=f"{prefix}_relay_key",
         ).strip()
-        relay_base = (
+        relay_base_input = (
             st.text_input(
                 "中转站 API 地址",
                 value=relay_base,
@@ -4035,6 +4048,12 @@ def render_image_engine_selector(prefix: str, settings: dict):
             .strip()
             .rstrip("/")
         )
+        relay_key, relay_base, relay_model = resolve_relay_runtime_config(
+            settings,
+            relay_key,
+            relay_base_input,
+            relay_model,
+        )
         status = RELAY_MODEL_STATUS.get(relay_model, {})
         if status:
             st.markdown(
@@ -4042,6 +4061,11 @@ def render_image_engine_selector(prefix: str, settings: dict):
                 unsafe_allow_html=True,
             )
         st.caption("支持前台直接改 API 地址和 API Key；浏览器会自动记住。")
+        if (
+            saved_relay_key
+            and not st.session_state.get(f"{prefix}_relay_key", "").strip()
+        ):
+            st.caption("未填写中转站 Key 时，自动回退使用系统管理员保存的中转站 Key。")
         st.caption(
             f"当前中转站出图仅接管图片生成，图需分析仍走 Gemini，标题默认走 Gemini 文本模型 {TITLE_TEXT_MODEL}。"
         )
@@ -4243,7 +4267,7 @@ def render_legacy_system_service_login(s, allow_user_passwordless_login: bool):
     ):
         if role.startswith("👤"):
             if (
-                _has_valid_system_key()
+                _has_system_service_access()
                 and st.session_state.get("remember_role") == "user"
             ):
                 st.session_state.authenticated = True
@@ -4263,8 +4287,8 @@ def render_legacy_system_service_login(s, allow_user_passwordless_login: bool):
         if allow_user_passwordless_login:
             st.success("✅ 已开启系统服务用户免密登录")
             if st.button("👤 直接进入", type="primary", use_container_width=True):
-                if not _has_valid_system_key():
-                    st.warning("⚠️ 系统未配置API Key")
+                if not _has_system_service_access():
+                    st.warning("⚠️ 系统未配置 Gemini Key 或系统中转站配置")
                 else:
                     st.session_state.authenticated = True
                     st.session_state.use_own_key = False
@@ -4279,8 +4303,8 @@ def render_legacy_system_service_login(s, allow_user_passwordless_login: bool):
         else:
             pwd = st.text_input("访问密码", type="password", key="login_pwd")
             if st.button("👤 用户登录", type="primary", use_container_width=True):
-                if not _has_valid_system_key():
-                    st.warning("⚠️ 系统未配置API Key")
+                if not _has_system_service_access():
+                    st.warning("⚠️ 系统未配置 Gemini Key 或系统中转站配置")
                 elif pwd == s.get("user_password"):
                     st.session_state.authenticated = True
                     st.session_state.use_own_key = False
@@ -4329,8 +4353,8 @@ def render_registered_system_service_login(s):
             key="registered_login_submit",
             use_container_width=True,
         ):
-            if not _has_valid_system_key():
-                st.warning("⚠️ 系统未配置API Key")
+            if not _has_system_service_access():
+                st.warning("⚠️ 系统未配置 Gemini Key 或系统中转站配置")
             else:
                 try:
                     with session_scope() as session:
@@ -4368,8 +4392,8 @@ def render_registered_system_service_login(s):
             ):
                 if password != confirm_password:
                     st.error("两次输入的密码不一致")
-                elif not _has_valid_system_key():
-                    st.warning("⚠️ 系统未配置API Key")
+                elif not _has_system_service_access():
+                    st.warning("⚠️ 系统未配置 Gemini Key 或系统中转站配置")
                 else:
                     try:
                         with session_scope() as session:
@@ -4438,9 +4462,9 @@ def show_login():
     s = get_settings()
     allow_user_passwordless_login = bool(s.get("allow_user_passwordless_login", False))
 
-    if not _has_valid_system_key():
+    if not _has_system_service_access():
         with st.expander("🚀 系统服务初始化", expanded=True):
-            st.info("系统服务尚未配置API Key")
+            st.info("系统服务尚未配置 Gemini Key 或系统中转站配置")
             admin_pwd = st.text_input(
                 "管理员密码", type="password", key="init_admin_pwd"
             )
@@ -6815,6 +6839,63 @@ def show_admin():
         if st.button("💾 保存Key设置"):
             save_api_keys(keys_data)
             st.success("✅ 已保存")
+
+        st.markdown("---")
+        st.markdown("### 🛰️ 系统中转站配置")
+        relay_key_preview = (
+            mask_api_key(s.get("relay_api_key", ""))
+            if s.get("relay_api_key")
+            else "未保存"
+        )
+        st.caption(f"当前系统中转站 Key: {relay_key_preview}")
+        relay_base_value = st.text_input(
+            "系统中转站 API 地址",
+            value=s.get("relay_api_base", RELAY_API_BASE),
+            key="admin_relay_api_base",
+        )
+        relay_model_value = st.selectbox(
+            "系统中转站默认模型",
+            list(RELAY_IMAGE_MODELS.keys()),
+            index=list(RELAY_IMAGE_MODELS.keys()).index(
+                s.get("relay_default_image_model", "imagine_x_1")
+            )
+            if s.get("relay_default_image_model", "imagine_x_1") in RELAY_IMAGE_MODELS
+            else 0,
+            key="admin_relay_default_model",
+        )
+        relay_key_input = st.text_input(
+            "系统中转站 API Key",
+            type="password",
+            key="admin_relay_api_key",
+            placeholder="留空则保留当前已保存的 Key",
+        )
+        c_relay_1, c_relay_2 = st.columns(2)
+        with c_relay_1:
+            if st.button(
+                "💾 保存系统中转站配置",
+                key="save_system_relay",
+                use_container_width=True,
+            ):
+                s["relay_api_base"] = (
+                    str(relay_base_value or RELAY_API_BASE).strip().rstrip("/")
+                )
+                s["relay_default_image_model"] = relay_model_value
+                if relay_key_input.strip():
+                    s["relay_api_key"] = relay_key_input.strip()
+                save_settings(s)
+                st.success("✅ 已保存系统中转站配置")
+                st.rerun()
+        with c_relay_2:
+            if st.button(
+                "🗑️ 清空系统中转站 Key",
+                key="clear_system_relay",
+                use_container_width=True,
+            ):
+                s["relay_api_key"] = ""
+                save_settings(s)
+                st.success("✅ 已清空系统中转站 Key")
+                st.rerun()
+        st.caption("前台中转站输入框留空时，会自动回退使用这里保存的系统 Key 和 URL。")
 
     with tabs[3]:
         comp = get_compliance()
