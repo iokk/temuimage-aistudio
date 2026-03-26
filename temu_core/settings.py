@@ -34,6 +34,7 @@ class PlatformSettings:
     platform_auto_migrate: bool
     platform_seed_defaults: bool
     default_org_name: str
+    default_project_name: str
     backup_bucket: str
     backup_prefix: str
     encryption_key: str
@@ -47,6 +48,9 @@ def get_platform_settings() -> PlatformSettings:
         platform_auto_migrate=_env_flag("PLATFORM_AUTO_MIGRATE", False),
         platform_seed_defaults=_env_flag("PLATFORM_SEED_DEFAULTS", True),
         default_org_name=_clean_env("PLATFORM_DEFAULT_ORG_NAME", "TEMU Team Workspace"),
+        default_project_name=_clean_env(
+            "PLATFORM_DEFAULT_PROJECT_NAME", "Default Project"
+        ),
         backup_bucket=_clean_env("BACKUP_S3_BUCKET"),
         backup_prefix=_clean_env("BACKUP_S3_PREFIX", "temu-backups/"),
         encryption_key=_clean_env("PLATFORM_ENCRYPTION_KEY"),

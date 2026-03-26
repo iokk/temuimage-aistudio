@@ -22,14 +22,37 @@ from pathlib import Path
 import requests
 from google import genai
 from google.genai import types
+from sqlalchemy import select
+from temu_core.auth import (
+    authenticate_local_user,
+    backup_and_delete_local_user,
+    ensure_local_user,
+    encryption_available as platform_encryption_available,
+    get_login_context_for_user,
+    is_registration_open as platform_registration_open,
+    list_registered_users,
+    list_secure_api_key_previews,
+    list_user_backups,
+    load_secure_api_keys_payload,
+    mask_api_key,
+    reset_local_user_password,
+    save_secure_api_keys_payload,
+    set_local_user_status,
+    set_registration_open,
+)
 from temu_core.bootstrap import bootstrap_platform_runtime
-from temu_core.db import session_scope
+from temu_core.billing import charge_usage_to_wallet, get_wallet_dashboard
+from temu_core.db import get_database_status, session_scope
+from temu_core.models import EXPECTED_TABLES, User
 from temu_core.settings import database_enabled as platform_database_enabled
 from temu_core.streamlit_admin import (
     render_billing_admin_tab,
+    render_pricing_admin_tab,
     render_redeem_code_admin_tab,
+    render_user_admin_tab,
+    render_workspace_admin_tab,
 )
-from temu_core.usage import record_usage_event
+from temu_core.team import ensure_workspace_identity, list_workspace_projects
 
 # ==================== 配置常量 ====================
 APP_VERSION = "V1.0.0"
@@ -78,6 +101,7 @@ MODELS = {
     }
 }
 PRIMARY_IMAGE_MODEL = "gemini-2.5-flash-image"
+TITLE_TEXT_MODEL = (os.getenv("TITLE_TEXT_MODEL") or "gemini-3.1-pro").strip()
 LEGACY_IMAGE_MODELS = {"gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview"}
 MODEL_NAME_NANO_BANANA_2 = MODELS[PRIMARY_IMAGE_MODEL]["name"]
 
@@ -849,9 +873,18 @@ def _normalize_api_keys_data(data):
 
 
 def get_api_keys():
-    data = load_json(API_KEYS_FILE, DEFAULT_API_KEYS)
+    data = None
+    if platform_database_enabled():
+        try:
+            with session_scope() as session:
+                data = load_secure_api_keys_payload(session)
+        except Exception:
+            data = None
+    if data is None:
+        data = load_json(API_KEYS_FILE, DEFAULT_API_KEYS)
     data = _normalize_api_keys_data(data)
-    save_api_keys(data)
+    if data.get("keys"):
+        save_api_keys(data)
     return data
 
 
@@ -885,7 +918,17 @@ def bootstrap_env_system_key():
 
 
 def save_api_keys(data):
-    return save_json(API_KEYS_FILE, data)
+    clean_data = _normalize_api_keys_data(data)
+    if platform_database_enabled() and platform_encryption_available():
+        try:
+            with session_scope() as session:
+                save_secure_api_keys_payload(
+                    session, clean_data, actor_label="streamlit-admin"
+                )
+            return True
+        except Exception:
+            pass
+    return save_json(API_KEYS_FILE, clean_data)
 
 
 def _parse_env_bool(name):
@@ -1207,11 +1250,229 @@ def maybe_persist_and_upload(content: bytes, filename: str):
 
 
 def get_user_id():
+    auth_user_id = st.session_state.get("auth_user_id")
+    if auth_user_id:
+        return str(auth_user_id)
     if "user_id" not in st.session_state:
         st.session_state.user_id = hashlib.md5(
             f"{datetime.now().timestamp()}{random.random()}".encode()
         ).hexdigest()[:12]
     return st.session_state.user_id
+
+
+def get_platform_actor_identity() -> dict:
+    uid = get_user_id()
+    auth_username = (st.session_state.get("auth_username") or "").strip()
+    auth_display_name = (
+        st.session_state.get("auth_display_name") or auth_username
+    ).strip()
+    auth_role = (st.session_state.get("auth_role") or "member").strip() or "member"
+    if auth_username:
+        return {
+            "username": auth_username,
+            "display_name": auth_display_name or auth_username,
+            "role": auth_role,
+            "source": "own_key"
+            if st.session_state.get("use_own_key")
+            else "system_pool",
+        }
+    if st.session_state.get("is_admin"):
+        return {
+            "username": "system-admin",
+            "display_name": "System Admin",
+            "role": "admin",
+            "source": "system_pool",
+        }
+    if st.session_state.get("use_own_key"):
+        return {
+            "username": f"byok-{uid}",
+            "display_name": f"BYOK User {uid[:6]}",
+            "role": "member",
+            "source": "own_key",
+        }
+    return {
+        "username": f"system-user-{uid}",
+        "display_name": f"Workspace User {uid[:6]}",
+        "role": "member",
+        "source": "system_pool",
+    }
+
+
+def sync_platform_session_context():
+    if not platform_database_enabled() or not st.session_state.get("authenticated"):
+        return None
+    try:
+        actor = get_platform_actor_identity()
+        with session_scope() as session:
+            if (
+                st.session_state.get("auth_user_id")
+                and st.session_state.get("auth_provider") == "local"
+            ):
+                user = session.scalar(
+                    select(User).where(User.id == st.session_state.get("auth_user_id"))
+                )
+                if user is None:
+                    raise ValueError("当前注册用户不存在")
+                ctx = get_login_context_for_user(
+                    session,
+                    user,
+                    project_id=st.session_state.get("platform_project_id") or "",
+                )
+            else:
+                ctx = ensure_workspace_identity(
+                    session,
+                    username=actor["username"],
+                    display_name=actor["display_name"],
+                    role=actor["role"],
+                )
+            projects = list_workspace_projects(session, ctx.organization_id)
+            wallet_dashboard = get_wallet_dashboard(session)
+        project_options = [{"id": p.id, "name": p.name} for p in projects]
+        selected_project_id = (
+            st.session_state.get("platform_project_id") or ctx.project_id
+        )
+        if not any(item["id"] == selected_project_id for item in project_options):
+            selected_project_id = ctx.project_id
+        selected_project_name = next(
+            (
+                item["name"]
+                for item in project_options
+                if item["id"] == selected_project_id
+            ),
+            ctx.project_name,
+        )
+        st.session_state.platform_org_id = ctx.organization_id
+        st.session_state.platform_org_name = ctx.organization_name
+        st.session_state.platform_user_id = ctx.user_id
+        st.session_state.platform_username = ctx.username
+        st.session_state.platform_role = ctx.role
+        st.session_state.platform_project_id = selected_project_id
+        st.session_state.platform_project_name = selected_project_name
+        st.session_state.platform_wallet_balance = int(
+            wallet_dashboard["wallet"].cached_balance
+        )
+        st.session_state.platform_context_error = ""
+        st.session_state.platform_project_options = project_options
+        return {
+            "organization_id": ctx.organization_id,
+            "organization_name": ctx.organization_name,
+            "user_id": ctx.user_id,
+            "username": ctx.username,
+            "role": ctx.role,
+            "project_id": selected_project_id,
+            "project_name": selected_project_name,
+            "wallet_balance": int(wallet_dashboard["wallet"].cached_balance),
+            "projects": project_options,
+            "charge_source": actor["source"],
+        }
+    except Exception as exc:
+        st.session_state.platform_context_error = str(exc)
+        return None
+
+
+def set_registered_auth_session(
+    user_id: str, username: str, display_name: str, role: str
+):
+    st.session_state.authenticated = True
+    st.session_state.is_admin = str(role or "") == "admin"
+    st.session_state.use_own_key = False
+    st.session_state.own_api_key = ""
+    st.session_state.auth_user_id = str(user_id or "")
+    st.session_state.auth_username = str(username or "")
+    st.session_state.auth_display_name = str(display_name or username or "")
+    st.session_state.auth_role = str(role or "member")
+    st.session_state.auth_provider = "local"
+
+
+def clear_registered_auth_session():
+    st.session_state.auth_user_id = ""
+    st.session_state.auth_username = ""
+    st.session_state.auth_display_name = ""
+    st.session_state.auth_role = ""
+    st.session_state.auth_provider = ""
+
+
+def platform_auth_status() -> dict:
+    return get_database_status(EXPECTED_TABLES)
+
+
+def platform_auth_ready() -> bool:
+    status = platform_auth_status()
+    return bool(
+        status.get("configured")
+        and status.get("reachable")
+        and not status.get("missing_tables")
+    )
+
+
+def validate_active_registered_session() -> bool:
+    if not st.session_state.get("auth_user_id"):
+        return True
+    if not platform_auth_ready():
+        return False
+    try:
+        with session_scope() as session:
+            users = list_registered_users(session)
+        current_user = next(
+            (
+                item
+                for item in users
+                if item["user_id"] == st.session_state.get("auth_user_id")
+            ),
+            None,
+        )
+        return bool(
+            current_user
+            and current_user.get("status") == "active"
+            and current_user.get("membership_status") == "active"
+        )
+    except Exception:
+        return False
+
+
+def render_platform_workspace_sidebar():
+    ctx = sync_platform_session_context()
+    if not ctx:
+        platform_error = st.session_state.get("platform_context_error", "")
+        if platform_database_enabled() and platform_error:
+            st.caption(f"团队工作区暂不可用: {platform_error[:80]}")
+        return
+
+    st.markdown("---")
+    st.markdown("#### 🏢 团队工作区")
+    st.caption(ctx["organization_name"])
+    if ctx["projects"]:
+        selected_project_id = st.selectbox(
+            "当前项目",
+            options=[item["id"] for item in ctx["projects"]],
+            index=next(
+                (
+                    i
+                    for i, item in enumerate(ctx["projects"])
+                    if item["id"] == ctx["project_id"]
+                ),
+                0,
+            ),
+            format_func=lambda value: next(
+                (item["name"] for item in ctx["projects"] if item["id"] == value), value
+            ),
+            key="platform_project_selector",
+        )
+        if selected_project_id != st.session_state.get("platform_project_id"):
+            st.session_state.platform_project_id = selected_project_id
+            st.session_state.platform_project_name = next(
+                (
+                    item["name"]
+                    for item in ctx["projects"]
+                    if item["id"] == selected_project_id
+                ),
+                ctx["project_name"],
+            )
+    st.caption(f"当前成员: {ctx['username']} · 角色: {ctx['role']}")
+    if st.session_state.get("use_own_key"):
+        st.caption("当前请求使用自己的 Gemini Key，不扣共享钱包。")
+    else:
+        st.caption(f"共享钱包余额: {ctx['wallet_balance']:,} credits")
 
 
 USAGE_STATS_LOCK = threading.RLock()
@@ -1302,11 +1563,14 @@ def record_platform_usage_event_safe(
     tokens_used: int,
     charge_source: str,
     actor_label: str,
+    operation_key: str = "",
     metadata_json=None,
 ):
     if not platform_database_enabled():
         return
     try:
+        context = sync_platform_session_context() or {}
+        effective_actor_label = context.get("username") or actor_label
         payload = {
             "feature": feature,
             "provider": provider,
@@ -1315,15 +1579,18 @@ def record_platform_usage_event_safe(
             "output_images": int(output_images or 0),
             "tokens_used": int(tokens_used or 0),
             "charge_source": charge_source,
-            "actor_label": actor_label,
+            "actor_label": effective_actor_label,
+            "operation_key": operation_key or "manual",
             "metadata": metadata_json or {},
-            "clock": time.time_ns(),
+            "organization_id": context.get("organization_id", ""),
+            "project_id": context.get("project_id", ""),
+            "user_id": context.get("user_id", ""),
         }
         digest = hashlib.sha256(
             json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
         ).hexdigest()
         with session_scope() as session:
-            record_usage_event(
+            charge_usage_to_wallet(
                 session,
                 feature=feature,
                 provider=provider,
@@ -1332,10 +1599,14 @@ def record_platform_usage_event_safe(
                 output_images=output_images,
                 tokens_used=tokens_used,
                 charge_source=charge_source,
-                actor_label=actor_label,
-                idempotency_key=f"usage:{digest}",
+                actor_label=effective_actor_label,
+                idempotency_key=operation_key or f"usage:{digest}",
+                organization_id=context.get("organization_id", ""),
+                project_id=context.get("project_id", ""),
+                user_id=context.get("user_id", ""),
                 metadata_json=metadata_json,
             )
+        sync_platform_session_context()
     except Exception:
         pass
 
@@ -1885,7 +2156,7 @@ Return valid JSON only."""
         try:
             resp = self._call(
                 lambda: self.client.models.generate_content(
-                    model=PRIMARY_IMAGE_MODEL,
+                    model=self.model or TITLE_TEXT_MODEL,
                     contents=[prompt],
                     config=types.GenerateContentConfig(response_modalities=["TEXT"]),
                 )
@@ -1930,7 +2201,7 @@ Return valid JSON only."""
         parts.append(prompt)
 
         try:
-            model_name = self.model or PRIMARY_IMAGE_MODEL
+            model_name = self.model or TITLE_TEXT_MODEL
             resp = self._call(
                 lambda: self.client.models.generate_content(
                     model=model_name,
@@ -2973,6 +3244,7 @@ def _run_image_translate_bg_task(task_id: str, payload: dict):
             tokens_used=tokens_used,
             charge_source="system_pool" if payload.get("charge_usage") else "own_key",
             actor_label=str(payload.get("owner_id") or "background-job"),
+            operation_key=f"bg-image-translate:{task_id}",
             metadata_json={"mode": "background", "errors": len(errors)},
         )
 
@@ -3274,6 +3546,11 @@ def init_session():
         "is_admin": False,
         "use_own_key": False,
         "own_api_key": "",
+        "auth_user_id": "",
+        "auth_username": "",
+        "auth_display_name": "",
+        "auth_role": "",
+        "auth_provider": "",
         "show_admin": False,
         "user_compliance_mode": "strict",
         "combo_anchor": None,
@@ -3300,6 +3577,16 @@ def init_session():
         "remember_role": None,
         "remember_until": 0,
         "session_tokens": 0,
+        "platform_org_id": "",
+        "platform_org_name": "",
+        "platform_user_id": "",
+        "platform_username": "",
+        "platform_role": "",
+        "platform_project_id": "",
+        "platform_project_name": "",
+        "platform_wallet_balance": 0,
+        "platform_context_error": "",
+        "platform_project_options": [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -3312,10 +3599,25 @@ def reset_working_session():
         "is_admin",
         "use_own_key",
         "own_api_key",
+        "auth_user_id",
+        "auth_username",
+        "auth_display_name",
+        "auth_role",
+        "auth_provider",
         "remember_login",
         "remember_role",
         "remember_until",
         "user_id",
+        "platform_org_id",
+        "platform_org_name",
+        "platform_user_id",
+        "platform_username",
+        "platform_role",
+        "platform_project_id",
+        "platform_project_name",
+        "platform_wallet_balance",
+        "platform_context_error",
+        "platform_project_options",
     }
     for k in list(st.session_state.keys()):
         if k not in keep_keys:
@@ -3717,7 +4019,9 @@ def render_image_engine_selector(prefix: str, settings: dict):
                 unsafe_allow_html=True,
             )
         st.caption("支持前台直接改 API 地址和 API Key；浏览器会自动记住。")
-        st.caption("当前中转站出图仅接管图片生成，图需分析/标题仍优先走 Gemini。")
+        st.caption(
+            f"当前中转站出图仅接管图片生成，图需分析仍走 Gemini，标题默认走 Gemini 文本模型 {TITLE_TEXT_MODEL}。"
+        )
     return provider, relay_model, relay_key, relay_base
 
 
@@ -3886,6 +4190,192 @@ def display_generation_results(
         display_generated_titles(titles, prefix)
 
 
+def render_legacy_system_service_login(s, allow_user_passwordless_login: bool):
+    user_role_name = (
+        "👤 普通用户（免密）" if allow_user_passwordless_login else "👤 普通用户"
+    )
+    role = st.radio(
+        "身份", [user_role_name, "🛠️ 管理员"], horizontal=True, key="role_select"
+    )
+    remember_default = st.session_state.get("remember_login", False)
+    remember_login = st.checkbox(
+        "记住本次登录（8小时）", value=remember_default, key="remember_login"
+    )
+
+    if (
+        remember_login
+        and st.session_state.get("remember_until", 0) > datetime.now().timestamp()
+    ):
+        if role.startswith("👤"):
+            if (
+                _has_valid_system_key()
+                and st.session_state.get("remember_role") == "user"
+            ):
+                st.session_state.authenticated = True
+                st.session_state.use_own_key = False
+                st.session_state.is_admin = False
+                clear_registered_auth_session()
+                st.rerun()
+        else:
+            if st.session_state.get("remember_role") == "admin":
+                st.session_state.authenticated = True
+                st.session_state.is_admin = True
+                st.session_state.use_own_key = False
+                clear_registered_auth_session()
+                st.rerun()
+
+    if role.startswith("👤"):
+        if allow_user_passwordless_login:
+            st.success("✅ 已开启系统服务用户免密登录")
+            if st.button("👤 直接进入", type="primary", use_container_width=True):
+                if not _has_valid_system_key():
+                    st.warning("⚠️ 系统未配置API Key")
+                else:
+                    st.session_state.authenticated = True
+                    st.session_state.use_own_key = False
+                    st.session_state.is_admin = False
+                    clear_registered_auth_session()
+                    if remember_login:
+                        st.session_state.remember_role = "user"
+                        st.session_state.remember_until = (
+                            datetime.now().timestamp() + 8 * 3600
+                        )
+                    st.rerun()
+        else:
+            pwd = st.text_input("访问密码", type="password", key="login_pwd")
+            if st.button("👤 用户登录", type="primary", use_container_width=True):
+                if not _has_valid_system_key():
+                    st.warning("⚠️ 系统未配置API Key")
+                elif pwd == s.get("user_password"):
+                    st.session_state.authenticated = True
+                    st.session_state.use_own_key = False
+                    st.session_state.is_admin = False
+                    clear_registered_auth_session()
+                    if remember_login:
+                        st.session_state.remember_role = "user"
+                        st.session_state.remember_until = (
+                            datetime.now().timestamp() + 8 * 3600
+                        )
+                    st.rerun()
+                else:
+                    st.error("密码错误")
+    else:
+        admin_pwd = st.text_input("管理员密码", type="password", key="admin_pwd")
+        if st.button("🛠️ 进入后台", use_container_width=True):
+            if admin_pwd == s.get("admin_password"):
+                st.session_state.authenticated = True
+                st.session_state.is_admin = True
+                st.session_state.use_own_key = False
+                clear_registered_auth_session()
+                if remember_login:
+                    st.session_state.remember_role = "admin"
+                    st.session_state.remember_until = (
+                        datetime.now().timestamp() + 8 * 3600
+                    )
+                st.rerun()
+            else:
+                st.error("密码错误")
+
+
+def render_registered_system_service_login(s):
+    login_tab, register_tab, admin_tab = st.tabs(
+        ["👤 用户登录", "📝 用户注册", "🛠️ 管理员"]
+    )
+
+    with login_tab:
+        st.caption("系统服务模式下，1/2/3/4 功能都要求注册用户登录。")
+        username = st.text_input("用户名", key="registered_login_username")
+        password = st.text_input(
+            "密码", type="password", key="registered_login_password"
+        )
+        if st.button(
+            "登录系统服务",
+            type="primary",
+            key="registered_login_submit",
+            use_container_width=True,
+        ):
+            if not _has_valid_system_key():
+                st.warning("⚠️ 系统未配置API Key")
+            else:
+                try:
+                    with session_scope() as session:
+                        user = authenticate_local_user(session, username, password)
+                        ctx = get_login_context_for_user(session, user)
+                    set_registered_auth_session(
+                        user_id=ctx.user_id,
+                        username=ctx.username,
+                        display_name=ctx.display_name,
+                        role=ctx.role,
+                    )
+                    sync_platform_session_context()
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
+
+    with register_tab:
+        with session_scope() as session:
+            registration_open = platform_registration_open(session)
+        if not registration_open:
+            st.warning("当前管理员已关闭新用户注册。")
+        else:
+            username = st.text_input("用户名", key="register_username")
+            display_name = st.text_input("显示名称", key="register_display_name")
+            email = st.text_input("邮箱（可选）", key="register_email")
+            password = st.text_input("密码", type="password", key="register_password")
+            confirm_password = st.text_input(
+                "确认密码", type="password", key="register_password_confirm"
+            )
+            if st.button(
+                "创建账号",
+                type="primary",
+                key="register_submit",
+                use_container_width=True,
+            ):
+                if password != confirm_password:
+                    st.error("两次输入的密码不一致")
+                elif not _has_valid_system_key():
+                    st.warning("⚠️ 系统未配置API Key")
+                else:
+                    try:
+                        with session_scope() as session:
+                            user = ensure_local_user(
+                                session,
+                                username=username,
+                                password=password,
+                                display_name=display_name,
+                                email=email,
+                                actor_label="self-service-register",
+                            )
+                            ctx = get_login_context_for_user(session, user)
+                        set_registered_auth_session(
+                            user_id=ctx.user_id,
+                            username=ctx.username,
+                            display_name=ctx.display_name,
+                            role=ctx.role,
+                        )
+                        sync_platform_session_context()
+                        st.success("注册成功，已自动登录")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(str(exc))
+
+    with admin_tab:
+        admin_pwd = st.text_input(
+            "管理员密码", type="password", key="registered_admin_pwd"
+        )
+        if st.button(
+            "🛠️ 进入后台", key="registered_admin_submit", use_container_width=True
+        ):
+            if admin_pwd == s.get("admin_password"):
+                st.session_state.authenticated = True
+                st.session_state.is_admin = True
+                st.session_state.use_own_key = False
+                clear_registered_auth_session()
+                st.rerun()
+            else:
+                st.error("密码错误")
+
+
 # ==================== 登录页 ====================
 def show_login():
     st.markdown(f'<div class="main-title">🍌 {APP_NAME}</div>', unsafe_allow_html=True)
@@ -3924,18 +4414,15 @@ def show_login():
             )
             c1, c2 = st.columns(2)
             with c1:
-                new_user_pwd = st.text_input(
-                    "用户密码",
-                    value=s.get("user_password"),
-                    type="password",
-                    key="init_user_pwd",
-                )
-            with c2:
                 new_admin_pwd = st.text_input(
                     "新管理员密码",
                     value=s.get("admin_password"),
                     type="password",
                     key="init_new_admin_pwd",
+                )
+            with c2:
+                st.caption(
+                    "如果配置了 `PLATFORM_ENCRYPTION_KEY`，系统 API Key 会优先加密存进 PostgreSQL；否则仅保存在本地数据目录。"
                 )
             if st.button("✅ 保存并启用", type="primary", use_container_width=True):
                 if admin_pwd != s.get("admin_password"):
@@ -3951,7 +4438,6 @@ def show_login():
                         data["keys"] = [{"key": k, "enabled": True} for k in keys]
                         data["current_index"] = 0
                         save_api_keys(data)
-                        s["user_password"] = new_user_pwd or s.get("user_password")
                         s["admin_password"] = new_admin_pwd or s.get("admin_password")
                         save_settings(s)
                         st.success("已保存！")
@@ -3981,6 +4467,7 @@ def show_login():
                         st.session_state.use_own_key = True
                         st.session_state.own_api_key = key
                         st.session_state.is_admin = False
+                        clear_registered_auth_session()
                         st.rerun()
                     except Exception as e:
                         st.error(f"❌ 验证失败: {str(e)[:80]}")
@@ -3997,88 +4484,12 @@ def show_login():
             '<div class="info-card"><strong>🎫 系统服务模式</strong></div>',
             unsafe_allow_html=True,
         )
-        user_role_name = (
-            "👤 普通用户（免密）" if allow_user_passwordless_login else "👤 普通用户"
-        )
-        role = st.radio(
-            "身份", [user_role_name, "🛠️ 管理员"], horizontal=True, key="role_select"
-        )
-
-        # 记住登录（会话内，默认8小时）
-        remember_default = st.session_state.get("remember_login", False)
-        remember_login = st.checkbox(
-            "记住本次登录（8小时）", value=remember_default, key="remember_login"
-        )
-
-        # 自动登录判断
-        if (
-            remember_login
-            and st.session_state.get("remember_until", 0) > datetime.now().timestamp()
-        ):
-            if role.startswith("👤"):
-                if (
-                    _has_valid_system_key()
-                    and st.session_state.get("remember_role") == "user"
-                ):
-                    st.session_state.authenticated = True
-                    st.session_state.use_own_key = False
-                    st.session_state.is_admin = False
-                    st.rerun()
-            else:
-                if st.session_state.get("remember_role") == "admin":
-                    st.session_state.authenticated = True
-                    st.session_state.is_admin = True
-                    st.session_state.use_own_key = False
-                    st.rerun()
-
-        if role.startswith("👤"):
-            if allow_user_passwordless_login:
-                st.success("✅ 已开启系统服务用户免密登录")
-                if st.button("👤 直接进入", type="primary", use_container_width=True):
-                    if not _has_valid_system_key():
-                        st.warning("⚠️ 系统未配置API Key")
-                    else:
-                        st.session_state.authenticated = True
-                        st.session_state.use_own_key = False
-                        st.session_state.is_admin = False
-                        if remember_login:
-                            st.session_state.remember_role = "user"
-                            st.session_state.remember_until = (
-                                datetime.now().timestamp() + 8 * 3600
-                            )
-                        st.rerun()
-            else:
-                pwd = st.text_input("访问密码", type="password", key="login_pwd")
-                if st.button("👤 用户登录", type="primary", use_container_width=True):
-                    if not _has_valid_system_key():
-                        st.warning("⚠️ 系统未配置API Key")
-                    elif pwd == s.get("user_password"):
-                        st.session_state.authenticated = True
-                        st.session_state.use_own_key = False
-                        st.session_state.is_admin = False
-                        if remember_login:
-                            st.session_state.remember_role = "user"
-                            st.session_state.remember_until = (
-                                datetime.now().timestamp() + 8 * 3600
-                            )
-                        st.rerun()
-                    else:
-                        st.error("密码错误")
+        if platform_auth_ready():
+            st.success("✅ 团队注册用户体系已启用")
+            render_registered_system_service_login(s)
         else:
-            admin_pwd = st.text_input("管理员密码", type="password", key="admin_pwd")
-            if st.button("🛠️ 进入后台", use_container_width=True):
-                if admin_pwd == s.get("admin_password"):
-                    st.session_state.authenticated = True
-                    st.session_state.is_admin = True
-                    st.session_state.use_own_key = False
-                    if remember_login:
-                        st.session_state.remember_role = "admin"
-                        st.session_state.remember_until = (
-                            datetime.now().timestamp() + 8 * 3600
-                        )
-                    st.rerun()
-                else:
-                    st.error("密码错误")
+            st.warning("当前团队数据库未就绪，暂时回退到旧版系统服务登录。")
+            render_legacy_system_service_login(s, allow_user_passwordless_login)
 
     with t3:
         st.markdown(
@@ -4600,6 +5011,7 @@ def show_combo_page():
                     if st.session_state.use_own_key
                     else "system_pool",
                     actor_label=get_user_id(),
+                    operation_key=f"combo:{get_user_id()}:{int(time.time() * 1000)}",
                     metadata_json={"titles_generated": len(generated_titles)},
                 )
 
@@ -4860,6 +5272,7 @@ Aspect: {aspect}"""
                 if st.session_state.use_own_key
                 else "system_pool",
                 actor_label=get_user_id(),
+                operation_key=f"smart:{get_user_id()}:{int(time.time() * 1000)}",
                 metadata_json={"titles_generated": len(generated_titles)},
             )
 
@@ -4892,6 +5305,9 @@ def show_title_page():
             <li><b>双语输出</b> - 每个标题同时生成英文和中文</li>
             <li><b>英文字符</b> - {MIN_TITLE_EN_CHARS}-{MAX_TITLE_EN_CHARS}字符</li>
             <li><b>三种策略</b> - 搜索优化/转化优化/差异化</li>
+            <li><b>默认模型</b> - Gemini 文本链路 `"""
+        + TITLE_TEXT_MODEL
+        + """`，优先降低 token 和算力消耗</li>
         </ul>
     </div>""",
         unsafe_allow_html=True,
@@ -5010,7 +5426,7 @@ def show_title_page():
     ):
         with st.spinner("🤖 AI生成中..."):
             try:
-                client = GeminiClient(api_key)
+                client = GeminiClient(api_key, model=TITLE_TEXT_MODEL)
 
                 if input_mode == "🖼️ 图片分析" or (
                     input_mode == "🔀 图片+文字" and uploaded_images
@@ -5029,7 +5445,7 @@ def show_title_page():
                     record_platform_usage_event_safe(
                         feature="title_optimization",
                         provider="Gemini",
-                        model=PRIMARY_IMAGE_MODEL,
+                        model=TITLE_TEXT_MODEL,
                         request_count=1,
                         output_images=0,
                         tokens_used=client.get_tokens_used(),
@@ -5037,6 +5453,7 @@ def show_title_page():
                         if st.session_state.use_own_key
                         else "system_pool",
                         actor_label=get_user_id(),
+                        operation_key=f"title:{get_user_id()}:{int(time.time() * 1000)}",
                         metadata_json={"titles_generated": len(titles)},
                     )
 
@@ -5926,6 +6343,7 @@ def show_image_translate_page():
                 if st.session_state.use_own_key
                 else "system_pool",
                 actor_label=uid,
+                operation_key=f"fg-image-translate:{uid}:{int(time.time() * 1000)}",
                 metadata_json={"mode": "foreground", "errors": len(errors)},
             )
 
@@ -5954,6 +6372,8 @@ def show_admin():
             "🏷️ 标题模板",
             "🎨 组图模板",
             "👥 用户管理",
+            "🏢 团队工作区",
+            "💳 定价规则",
             "🏦 钱包账本",
             "🎟️ 兑换码",
         ]
@@ -6015,10 +6435,16 @@ def show_admin():
             st.success("✅ 已保存")
 
     with tabs[1]:
+        if platform_auth_ready():
+            st.info(
+                "团队数据库已启用时，普通用户通过注册账号登录；这里保留的是管理员密码和旧版回退设置。"
+            )
         c1, c2 = st.columns(2)
         with c1:
             s["user_password"] = st.text_input(
-                "用户密码", s.get("user_password"), type="password"
+                "旧版用户密码（仅数据库未就绪时回退使用）",
+                s.get("user_password"),
+                type="password",
             )
             s["daily_limit_user"] = st.number_input(
                 "普通用户日限额", 1, 1000, s.get("daily_limit_user", 30)
@@ -6031,7 +6457,7 @@ def show_admin():
                 "VIP日限额", 1, 1000, s.get("daily_limit_vip", 100)
             )
         s["allow_user_passwordless_login"] = st.checkbox(
-            "允许系统服务用户免密登录",
+            "允许旧版系统服务用户免密登录（仅数据库未就绪时回退使用）",
             value=bool(s.get("allow_user_passwordless_login", False)),
         )
         if _parse_env_bool("ALLOW_PASSWORDLESS_USER_LOGIN") is not None:
@@ -6214,6 +6640,12 @@ def show_admin():
 
     with tabs[2]:
         st.markdown("### 🔑 API Key管理")
+        if platform_database_enabled() and platform_encryption_available():
+            st.success("系统 API Key 将加密保存在 PostgreSQL，不会以明文展示。")
+        elif platform_database_enabled():
+            st.warning(
+                "当前未配置 `PLATFORM_ENCRYPTION_KEY`，新保存的系统 API Key 将退回本地文件存储。上线前建议补齐加密密钥。"
+            )
         fixed_keys_env = (os.getenv("SYSTEM_API_KEYS_FIXED") or "").strip()
         if fixed_keys_env:
             sync_mode = (
@@ -6240,11 +6672,17 @@ def show_admin():
                     st.rerun()
 
         keys_data = get_api_keys()
+        secure_previews = []
+        if platform_database_enabled():
+            try:
+                with session_scope() as session:
+                    secure_previews = list_secure_api_key_previews(session)
+            except Exception:
+                secure_previews = []
         for i, k in enumerate(keys_data.get("keys", [])):
             key_val = k.get("key", "")
-            key_display = (
-                f"{key_val[:8]}...{key_val[-4:]}" if len(key_val) > 12 else "无效"
-            )
+            preview_data = secure_previews[i] if i < len(secure_previews) else {}
+            key_display = preview_data.get("preview") or mask_api_key(key_val)
             c1, c2, c3, c4 = st.columns([3, 1.5, 1, 1])
             with c1:
                 st.text(f"{k.get('name', '')}: {key_display}")
@@ -6450,35 +6888,32 @@ def show_admin():
             st.success("✅ 已保存")
 
     with tabs[7]:
-        users = get_users()
-        if users:
-            for uid, u in list(users.items())[:50]:
-                c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
-                with c1:
-                    st.text(f"{uid[:10]}...")
-                with c2:
-                    st.text(f"总: {u.get('total', 0)}")
-                with c3:
-                    users[uid]["vip"] = st.checkbox(
-                        "VIP", u.get("vip", False), key=f"vip_{uid}"
-                    )
-                with c4:
-                    if st.button("重置", key=f"rst_{uid}"):
-                        users[uid]["daily"] = {}
-            if st.button("💾 保存用户"):
-                save_users(users)
-                st.success("✅ 已保存")
-        else:
-            st.info("暂无用户")
+        st.markdown("### 注册用户管理")
+        st.caption("管理员可以一键停用注册、重置密码、备份并删除用户。")
+        render_user_admin_tab()
 
     with tabs[8]:
+        st.markdown("### Workspace Foundation")
+        st.caption(
+            "Projects and members are provisioned in PostgreSQL while the legacy session auth remains untouched to avoid conflicts."
+        )
+        render_workspace_admin_tab()
+
+    with tabs[9]:
+        st.markdown("### Pricing Foundation")
+        st.caption(
+            "Shared-wallet debits use these pricing rules. BYOK traffic records usage but skips wallet debits."
+        )
+        render_pricing_admin_tab()
+
+    with tabs[10]:
         st.markdown("### Team Wallet Foundation")
         st.caption(
             "This tab uses the new PostgreSQL billing foundation and is ready for Zeabur managed databases."
         )
         render_billing_admin_tab()
 
-    with tabs[9]:
+    with tabs[11]:
         st.markdown("### Redeem Code Foundation")
         st.caption(
             "Use batches for admin-issued recharge codes, offline transfer fulfillment, and future channel distribution."
@@ -6510,6 +6945,8 @@ def main_app():
             uid = get_user_id()
             _, used, limit = check_user_limit(uid)
             st.info(f"今日: {used}/{limit}")
+
+        render_platform_workspace_sidebar()
 
         if st.session_state.use_own_key or st.session_state.is_admin:
             st.markdown("---")
@@ -6560,6 +6997,30 @@ def main():
     if not st.session_state.authenticated:
         show_login()
         return
+
+    if platform_auth_ready() and st.session_state.get("auth_user_id"):
+        if not validate_active_registered_session():
+            for key in list(st.session_state.keys()):
+                if key not in {"remember_login", "remember_role", "remember_until"}:
+                    st.session_state.pop(key, None)
+            st.warning("当前账号已被停用或删除，请联系管理员。")
+            show_login()
+            return
+
+    if (
+        platform_auth_ready()
+        and not st.session_state.get("is_admin")
+        and not st.session_state.get("use_own_key")
+        and not st.session_state.get("auth_user_id")
+    ):
+        for key in list(st.session_state.keys()):
+            if key not in {"remember_login", "remember_role", "remember_until"}:
+                st.session_state.pop(key, None)
+        st.warning("团队模式已启用，请先使用注册账号登录系统服务。")
+        show_login()
+        return
+
+    sync_platform_session_context()
 
     if st.session_state.get("show_admin") and st.session_state.is_admin:
         show_admin()

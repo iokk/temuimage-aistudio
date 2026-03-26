@@ -39,7 +39,13 @@ class User(TimestampMixin, Base):
     username: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
     display_name: Mapped[str] = mapped_column(String(160), default="", nullable=False)
     email: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    auth_provider: Mapped[str] = mapped_column(
+        String(32), default="synthetic", nullable=False
+    )
+    password_hash: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
+    last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
 
 
 class Organization(TimestampMixin, Base):
@@ -280,6 +286,36 @@ class PricingRule(TimestampMixin, Base):
     notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
 
 
+class PlatformConfig(TimestampMixin, Base):
+    __tablename__ = "platform_configs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    config_key: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    config_value_json: Mapped[object] = mapped_column(JSON)
+    encrypted_value: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    updated_by_label: Mapped[str] = mapped_column(
+        String(160), default="", nullable=False
+    )
+
+
+class UserBackup(Base):
+    __tablename__ = "user_backups"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    original_user_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    username: Mapped[str] = mapped_column(String(120), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(160), default="", nullable=False)
+    email: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    deleted_by_label: Mapped[str] = mapped_column(
+        String(160), default="", nullable=False
+    )
+    reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    snapshot_json: Mapped[object] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
 
@@ -310,5 +346,7 @@ EXPECTED_TABLES = [
     "redeem_code_redemptions",
     "usage_events",
     "pricing_rules",
+    "platform_configs",
+    "user_backups",
     "audit_logs",
 ]

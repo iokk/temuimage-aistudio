@@ -28,8 +28,15 @@ REDIS_URL=redis://...
 PLATFORM_AUTO_MIGRATE=true
 PLATFORM_SEED_DEFAULTS=true
 PLATFORM_DEFAULT_ORG_NAME=TEMU Team Workspace
+PLATFORM_DEFAULT_PROJECT_NAME=Default Project
 PLATFORM_ENCRYPTION_KEY=请设置高强度随机值
+TITLE_TEXT_MODEL=gemini-3.1-pro
 ```
+
+说明：
+
+- `PLATFORM_ENCRYPTION_KEY` 建议在 Zeabur 生产环境必填，用于加密保存系统 API Key
+- 团队数据库启用后，普通用户通过注册账号登录；共享密码只保留给回退场景和管理员引导
 
 ### 步骤
 

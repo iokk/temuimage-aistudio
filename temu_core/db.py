@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from functools import lru_cache
+from typing import Optional
 
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
@@ -57,7 +58,7 @@ def session_scope():
         session.close()
 
 
-def get_database_status(expected_tables: list[str] | None = None) -> dict:
+def get_database_status(expected_tables: Optional[list[str]] = None) -> dict:
     status = {
         "configured": database_enabled(),
         "reachable": False,

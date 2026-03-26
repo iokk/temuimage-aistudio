@@ -16,7 +16,9 @@ The app should remain stateless. Persistent business state must not depend on `/
 - `PLATFORM_AUTO_MIGRATE=true`
 - `PLATFORM_SEED_DEFAULTS=true`
 - `PLATFORM_DEFAULT_ORG_NAME`
+- `PLATFORM_DEFAULT_PROJECT_NAME`
 - `PLATFORM_ENCRYPTION_KEY`
+- `TITLE_TEXT_MODEL=gemini-3.1-pro`
 - `S3_ENDPOINT`
 - `S3_BUCKET`
 - `S3_REGION`

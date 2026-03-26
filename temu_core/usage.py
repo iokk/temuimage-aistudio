@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from typing import Optional
+
 from sqlalchemy import select
 
 from .billing import ensure_default_organization
-from .models import UsageEvent, WalletLedgerEntry
+from .models import Organization, UsageEvent
 
 
 def record_usage_event(
@@ -17,6 +19,9 @@ def record_usage_event(
     charge_source: str,
     actor_label: str,
     idempotency_key: str,
+    organization_id: str = "",
+    project_id: Optional[str] = None,
+    user_id: Optional[str] = None,
     metadata_json=None,
 ):
     existing = session.scalar(
@@ -24,9 +29,17 @@ def record_usage_event(
     )
     if existing is not None:
         return existing
-    organization = ensure_default_organization(session)
+    organization = None
+    if organization_id:
+        organization = session.scalar(
+            select(Organization).where(Organization.id == organization_id)
+        )
+    if organization is None:
+        organization = ensure_default_organization(session)
     event = UsageEvent(
         organization_id=organization.id,
+        project_id=project_id or None,
+        user_id=user_id or None,
         feature=feature,
         provider=provider,
         model=model,
