@@ -1,8 +1,18 @@
 from __future__ import annotations
 
 
-def describe_platform_database_status(status: dict, auto_migrate: bool = False) -> dict:
+def describe_platform_database_status(
+    status: dict, auto_migrate: bool = False, has_service_access: bool = False
+) -> dict:
     if not status.get("configured"):
+        if has_service_access:
+            return {
+                "state": "optional_database_missing",
+                "level": "info",
+                "ready": False,
+                "message": "团队数据库未启用，但管理员/系统服务仍可用。",
+                "detail": "当前可以先用管理员登录和系统中转站；只有注册用户、钱包、团队项目等功能需要 DATABASE_URL。",
+            }
         return {
             "state": "missing_database_url",
             "level": "warning",

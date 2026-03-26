@@ -4771,10 +4771,13 @@ def show_login():
             db_info = describe_platform_database_status(
                 platform_auth_status(),
                 auto_migrate=get_platform_settings().platform_auto_migrate,
+                has_service_access=_has_system_service_access(),
             )
             level = db_info["level"]
             if level == "error":
                 st.error(db_info["message"])
+            elif level == "info":
+                st.info(db_info["message"])
             else:
                 st.warning(db_info["message"])
             if db_info.get("detail"):
