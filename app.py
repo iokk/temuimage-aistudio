@@ -73,7 +73,12 @@ from temu_core.title_logic import (
     generate_compliant_titles_or_raise,
     should_attempt_title_generation,
 )
-from temu_core.ui_content import build_admin_mode_notice, build_feature_catalog
+from temu_core.ui_content import (
+    build_admin_mode_notice,
+    build_feature_catalog,
+    build_page_sections,
+    build_result_summary,
+)
 
 # ==================== 配置常量 ====================
 APP_LAST_UPDATED = "最近更新 2026-03-26"
@@ -3673,6 +3678,18 @@ def apply_style():
     .dashboard-icon { width: 42px; height: 42px; border-radius: 12px; background: linear-gradient(135deg, rgba(15,118,110,0.14), rgba(37,99,235,0.12)); display: flex; align-items: center; justify-content: center; font-size: 20px; color: var(--primary); margin-bottom: 12px; }
     .dashboard-title { font-size: 16px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
     .dashboard-desc { font-size: 13px; color: var(--muted); line-height: 1.6; }
+    .section-frame { background: rgba(255,255,255,0.96); border: 1px solid var(--line); border-radius: 18px; padding: 16px 18px; margin: 0 0 14px; box-shadow: 0 8px 24px rgba(15,23,42,0.04); }
+    .section-eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--primary); font-weight: 700; margin-bottom: 6px; }
+    .section-heading { font-size: 18px; font-weight: 750; color: var(--text); margin-bottom: 4px; }
+    .section-caption { font-size: 13px; color: var(--muted); margin-bottom: 14px; line-height: 1.65; }
+    .result-shell { background: rgba(255,255,255,0.98); border: 1px solid var(--line); border-radius: 18px; padding: 18px; margin-bottom: 14px; box-shadow: 0 12px 30px rgba(15,23,42,0.05); }
+    .result-summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 0.5rem 0 1rem; }
+    .result-summary-card { background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; }
+    .result-summary-label { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+    .result-summary-value { font-size: 15px; font-weight: 700; color: var(--text); }
+    .results-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+    .results-toolbar-title { font-size: 18px; font-weight: 750; color: var(--text); }
+    .results-toolbar-subtitle { font-size: 13px; color: var(--muted); }
     .stButton>button { border-radius: 10px; font-weight: 600; transition: all 0.2s; border: 1px solid #e2e8f0; background: #f8fafc; color: #0f172a; }
     .stButton>button:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15, 23, 42, 0.12); }
     button[kind="primary"] { background: linear-gradient(135deg, #1677ff 0%, #36cfc9 100%); color: #fff !important; border: 0 !important; box-shadow: 0 6px 16px rgba(22, 119, 255, 0.28); }
@@ -3717,7 +3734,7 @@ def apply_style():
     .step.active { background: linear-gradient(135deg, #e6f4ff 0%, #f0f5ff 100%); border-color: #91caff; color: #1e293b; }
     .step.active .step-num { background: #1677ff; color: #fff; }
     @media (max-width: 900px) {
-      .status-grid, .dashboard-grid { grid-template-columns: 1fr; }
+      .status-grid, .dashboard-grid, .result-summary-grid { grid-template-columns: 1fr; }
       .shell-heading { font-size: 22px; }
     }
     </style>""",
@@ -3786,6 +3803,26 @@ def render_workspace_dashboard():
         )
     st.markdown(
         '<div class="dashboard-grid">' + "".join(cards) + "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_section_frame(section: dict, index: int):
+    st.markdown(
+        f"""<div class="section-frame"><div class="section-eyebrow">Step {index}</div><div class="section-heading">{section.get("title", "")}</div><div class="section-caption">{section.get("desc", "")}</div></div>""",
+        unsafe_allow_html=True,
+    )
+
+
+def render_result_summary_shell(summary: dict):
+    state_label = {
+        "success": "结果已完成",
+        "partial": "结果部分完成",
+        "error": "结果未完成",
+        "neutral": "结果待确认",
+    }.get(summary.get("state", "neutral"), "结果待确认")
+    st.markdown(
+        f"""<div class="result-shell"><div class="results-toolbar"><div><div class="results-toolbar-title">{summary.get("title", "结果")}</div><div class="results-toolbar-subtitle">{state_label}</div></div></div><div class="result-summary-grid"><div class="result-summary-card"><div class="result-summary-label">完成情况</div><div class="result-summary-value">{summary.get("headline", "")}</div></div><div class="result-summary-card"><div class="result-summary-label">Token</div><div class="result-summary-value">{summary.get("token_text", "")}</div></div><div class="result-summary-card"><div class="result-summary-label">警告</div><div class="result-summary-value">{summary.get("warning_text", "")}</div></div><div class="result-summary-card"><div class="result-summary-label">错误</div><div class="result-summary-value">{summary.get("error_text", "")}</div></div></div></div>""",
         unsafe_allow_html=True,
     )
 
@@ -4878,9 +4915,11 @@ def show_login():
 def show_combo_page():
     st.markdown('<div class="page-title">1 批量出图</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="info-card">适合批量卖点图、主图、尺寸图。按步骤完成即可。</div>',
+        '<div class="info-card">标准批量工作流：先准备素材，再确认类型与图需，最后统一生成和查看结果。</div>',
         unsafe_allow_html=True,
     )
+    for idx, section in enumerate(build_page_sections("combo"), start=1):
+        render_section_frame(section, idx)
 
     s = get_settings()
     templates = get_templates()["combo_types"]
@@ -4959,6 +4998,17 @@ def show_combo_page():
         or st.session_state.get("combo_title_warnings")
     ):
         st.markdown("## 📸 生成结果")
+        summary = build_result_summary(
+            title="批量出图结果",
+            success_count=len(st.session_state.combo_results),
+            total_count=len(st.session_state.combo_results)
+            + len(st.session_state.combo_errors),
+            token_count=st.session_state.get("combo_tokens_used", 0),
+            warning_count=len(st.session_state.get("combo_title_warnings", [])),
+            error_count=len(st.session_state.combo_errors)
+            + (1 if st.session_state.get("combo_title_error") else 0),
+        )
+        render_result_summary_shell(summary)
         display_generation_results(
             st.session_state.combo_results,
             st.session_state.combo_errors,
@@ -5489,9 +5539,11 @@ def show_combo_page():
 def show_smart_page():
     st.markdown('<div class="page-title">2 快速出图</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="info-card">更少步骤，适合快速做单批图片。</div>',
+        '<div class="info-card">快速工作流：上传商品图、选择类型、直接生成。适合单批高频操作。</div>',
         unsafe_allow_html=True,
     )
+    for idx, section in enumerate(build_page_sections("smart"), start=1):
+        render_section_frame(section, idx)
 
     s = get_settings()
     templates = get_templates()["smart_types"]
@@ -5510,6 +5562,17 @@ def show_smart_page():
         or st.session_state.get("smart_title_warnings")
     ):
         st.markdown("## 📸 生成结果")
+        summary = build_result_summary(
+            title="快速出图结果",
+            success_count=len(st.session_state.smart_results),
+            total_count=len(st.session_state.smart_results)
+            + len(st.session_state.smart_errors),
+            token_count=st.session_state.get("smart_tokens_used", 0),
+            warning_count=len(st.session_state.get("smart_title_warnings", [])),
+            error_count=len(st.session_state.smart_errors)
+            + (1 if st.session_state.get("smart_title_error") else 0),
+        )
+        render_result_summary_shell(summary)
         display_generation_results(
             st.session_state.smart_results,
             st.session_state.smart_errors,
@@ -5992,6 +6055,15 @@ def show_title_page():
                     st.session_state.session_tokens += client.get_tokens_used()
 
                     st.markdown("---")
+                    summary = build_result_summary(
+                        title="标题优化结果",
+                        success_count=max(len(titles) // 2, len(titles)),
+                        total_count=max(len(titles) // 2, len(titles)),
+                        token_count=client.get_tokens_used(),
+                        warning_count=len(title_warnings),
+                        error_count=0,
+                    )
+                    render_result_summary_shell(summary)
                     for warning in title_warnings:
                         st.warning(warning)
                     display_generated_titles(titles, "title")
@@ -6107,6 +6179,18 @@ def show_image_translate_page():
     # 已完成结果展示
     if st.session_state.img_trans_done and st.session_state.img_trans_results:
         st.markdown("## 翻译结果")
+        translated_only = [
+            r for r in st.session_state.img_trans_results if r.get("translated")
+        ]
+        summary = build_result_summary(
+            title="图片翻译结果",
+            success_count=len(translated_only),
+            total_count=len(st.session_state.img_trans_results),
+            token_count=st.session_state.get("img_trans_tokens_used", 0),
+            warning_count=0,
+            error_count=len(st.session_state.img_trans_errors),
+        )
+        render_result_summary_shell(summary)
         guide_cols = st.columns(3)
         with guide_cols[0]:
             st.markdown(
@@ -6131,7 +6215,6 @@ def show_image_translate_page():
                     st.error(err)
 
         results = st.session_state.img_trans_results
-        translated_only = [r for r in results if r.get("translated")]
         text_blocks = []
 
         if translated_only:

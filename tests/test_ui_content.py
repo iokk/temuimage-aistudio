@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from temu_core.ui_content import build_admin_mode_notice, build_feature_catalog
+from temu_core.ui_content import (
+    build_admin_mode_notice,
+    build_feature_catalog,
+    build_page_sections,
+    build_result_summary,
+)
 
 
 class UIContentTest(unittest.TestCase):
@@ -22,6 +27,32 @@ class UIContentTest(unittest.TestCase):
         notice = build_admin_mode_notice(has_service_access=True, team_ready=True)
         self.assertEqual(notice["level"], "success")
         self.assertIn("团队模式", notice["title"])
+
+    def test_batch_page_sections_follow_new_structure(self):
+        sections = build_page_sections("combo")
+        self.assertEqual(
+            [item["key"] for item in sections],
+            ["assets", "types", "brief", "compliance", "generate"],
+        )
+
+    def test_smart_page_sections_follow_new_structure(self):
+        sections = build_page_sections("smart")
+        self.assertEqual(
+            [item["key"] for item in sections],
+            ["assets", "types", "generate"],
+        )
+
+    def test_result_summary_marks_partial_success(self):
+        summary = build_result_summary(
+            title="标题优化结果",
+            success_count=2,
+            total_count=3,
+            token_count=120,
+            warning_count=1,
+            error_count=1,
+        )
+        self.assertEqual(summary["state"], "partial")
+        self.assertIn("2 / 3", summary["headline"])
 
 
 if __name__ == "__main__":
