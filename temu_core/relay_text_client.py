@@ -1,0 +1,152 @@
+from __future__ import annotations
+
+import base64
+import io
+import json
+import re
+
+import requests
+from PIL import Image
+
+
+class RelayTextClient:
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        base_url: str = "https://newapi.aisonnet.org/v1",
+        timeout_sec: int = 180,
+    ):
+        self.api_key = str(api_key or "").strip()
+        self.model = str(model or "").strip()
+        self.base_url = str(base_url or "https://newapi.aisonnet.org/v1").rstrip("/")
+        self.timeout_sec = timeout_sec
+        self.last_error = ""
+        self.total_tokens = 0
+
+    def get_last_error(self):
+        return self.last_error
+
+    def get_tokens_used(self):
+        return self.total_tokens
+
+    def _build_messages(self, refs, prompt: str):
+        content = [{"type": "text", "text": prompt}]
+        for ref in (refs or [])[:5]:
+            try:
+                buf = io.BytesIO()
+                ref.copy().save(buf, format="PNG", optimize=True)
+                b64 = base64.b64encode(buf.getvalue()).decode()
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{b64}"},
+                    }
+                )
+            except Exception:
+                continue
+        return [{"role": "user", "content": content}]
+
+    def extract_text_from_response(self, payload: dict) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        choices = payload.get("choices", []) or []
+        for choice in choices:
+            message = choice.get("message", {}) or {}
+            content = message.get("content")
+            if isinstance(content, str):
+                return content.strip()
+            if isinstance(content, list):
+                parts = []
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    text = item.get("text")
+                    if text:
+                        parts.append(str(text).strip())
+                if parts:
+                    return "\n".join(parts)
+        return ""
+
+    def parse_json_response(self, text: str, default):
+        raw = str(text or "").strip()
+        if not raw:
+            return default
+        if raw.startswith("```"):
+            lines = raw.split("\n")
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            raw = "\n".join(lines).strip()
+        try:
+            return json.loads(raw)
+        except Exception:
+            pass
+        for pattern in (r"\{.*\}", r"\[.*\]"):
+            match = re.search(pattern, raw, re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group())
+                except Exception:
+                    continue
+        return default
+
+    def generate_text(
+        self, refs, prompt: str, max_tokens: int = 1800, temperature: float = 0.2
+    ) -> str:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.model,
+            "messages": self._build_messages(refs, prompt),
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        response = requests.post(
+            f"{self.base_url}/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=self.timeout_sec,
+        )
+        text = response.text
+        if response.status_code >= 400:
+            self.last_error = text
+            raise Exception(text)
+        data = response.json()
+        usage = data.get("usage", {}) or {}
+        self.total_tokens += int(usage.get("total_tokens") or 0)
+        result = self.extract_text_from_response(data)
+        if not result:
+            self.last_error = text[:300]
+        return result
+
+    def _clean_title_lines(self, text: str):
+        lines = [line.strip() for line in str(text or "").split("\n") if line.strip()]
+        clean_lines = []
+        for line in lines:
+            cleaned = re.sub(
+                r"^(Title\s*\d*[:.]?\s*|Option\s*\d*[:.]?\s*|\d+[:.]\s*|English[:]\s*|Chinese[:]\s*|中文[:]\s*)",
+                "",
+                line,
+                flags=re.IGNORECASE,
+            ).strip()
+            if cleaned:
+                clean_lines.append(cleaned)
+        return clean_lines[:6] if len(clean_lines) >= 6 else clean_lines
+
+    def generate_titles(self, product_info: str, template_prompt: str):
+        prompt = template_prompt.replace("{product_info}", product_info)
+        text = self.generate_text([], prompt, max_tokens=1200)
+        return self._clean_title_lines(text)
+
+    def generate_titles_from_image(
+        self, images, product_info: str = "", template_prompt: str = ""
+    ):
+        prompt = template_prompt.replace(
+            "{product_info}", product_info or "No additional info provided"
+        )
+        text = self.generate_text(images, prompt, max_tokens=1200)
+        return self._clean_title_lines(text)

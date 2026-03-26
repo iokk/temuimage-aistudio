@@ -50,6 +50,13 @@ from temu_core.relay_config import (
     has_system_service_access,
     resolve_relay_runtime_config,
 )
+from temu_core.relay_first_logic import (
+    analyze_product_with_text_client,
+    build_fallback_anchor,
+    generate_en_copy_with_text_client,
+    generate_requirements_with_text_client,
+)
+from temu_core.relay_text_client import RelayTextClient
 from temu_core.settings import (
     database_enabled as platform_database_enabled,
     get_platform_settings,
@@ -2751,6 +2758,172 @@ def probe_relay_api(base_url: str, api_key: str, model: str = ""):
         return False, format_runtime_error_message(e)
 
 
+def build_relay_text_client(relay_key: str, relay_model: str, relay_base: str):
+    if not relay_key:
+        raise Exception("请先配置系统中转站 Key 或前台中转站 Key")
+    selected_model = relay_model or get_settings().get(
+        "relay_default_image_model", "gemini-3.1-flash-image-preview"
+    )
+    return RelayTextClient(
+        relay_key, selected_model, base_url=relay_base or RELAY_API_BASE
+    )
+
+
+def build_text_generation_client(
+    image_provider: str,
+    gemini_api_key: str,
+    relay_key: str,
+    relay_base: str,
+    relay_model: str,
+    model: str = TITLE_TEXT_MODEL,
+):
+    if image_provider == "中转站":
+        return build_relay_text_client(relay_key, relay_model, relay_base)
+    if not gemini_api_key:
+        raise Exception("当前未配置 Gemini API Key")
+    return GeminiClient(gemini_api_key, model=model)
+
+
+def build_combo_anchor(
+    image_provider: str,
+    gemini_api_key: str,
+    relay_key: str,
+    relay_base: str,
+    relay_model: str,
+    images,
+    name: str,
+    detail: str,
+):
+    if image_provider == "中转站":
+        prompt_template = get_prompts().get(
+            "anchor_analysis", DEFAULT_PROMPTS["anchor_analysis"]
+        )
+        text_client = build_relay_text_client(relay_key, relay_model, relay_base)
+        anchor = analyze_product_with_text_client(
+            text_client,
+            images,
+            name,
+            detail,
+            prompt_template,
+        )
+        return anchor, text_client.get_tokens_used()
+    client = GeminiClient(gemini_api_key, PRIMARY_IMAGE_MODEL)
+    anchor = client.analyze_product(images, name, detail)
+    return anchor, client.get_tokens_used()
+
+
+def build_combo_requirements(
+    image_provider: str,
+    gemini_api_key: str,
+    relay_key: str,
+    relay_base: str,
+    relay_model: str,
+    anchor: dict,
+    selected_types: dict,
+    tags: list,
+):
+    if image_provider == "中转站":
+        prompt_template = get_prompts().get(
+            "requirements_gen", DEFAULT_PROMPTS["requirements_gen"]
+        )
+        en_copy_template = get_prompts().get(
+            "en_copy_gen", DEFAULT_PROMPTS["en_copy_gen"]
+        )
+        templates = get_templates()["combo_types"]
+        text_client = build_relay_text_client(relay_key, relay_model, relay_base)
+        reqs = generate_requirements_with_text_client(
+            text_client,
+            anchor,
+            selected_types,
+            templates,
+            prompt_template,
+            tags=tags,
+        )
+        reqs = normalize_requirements(reqs, selected_types, templates)
+        reqs = generate_en_copy_with_text_client(
+            text_client,
+            anchor,
+            reqs,
+            en_copy_template,
+            max_headline_chars=MAX_HEADLINE_CHARS,
+            max_subline_chars=MAX_SUBLINE_CHARS,
+            max_badge_chars=MAX_BADGE_CHARS,
+        )
+        return reqs, text_client.get_tokens_used()
+    client = GeminiClient(gemini_api_key, PRIMARY_IMAGE_MODEL)
+    reqs = client.generate_requirements(anchor, selected_types, tags)
+    reqs = normalize_requirements(reqs, selected_types, get_templates()["combo_types"])
+    reqs = client.generate_en_copy(anchor, reqs)
+    return reqs, client.get_tokens_used()
+
+
+def build_smart_anchor(
+    image_provider: str,
+    gemini_api_key: str,
+    relay_key: str,
+    relay_base: str,
+    relay_model: str,
+    images,
+    name: str,
+    material: str,
+):
+    if image_provider == "中转站":
+        prompt_template = get_prompts().get(
+            "anchor_analysis", DEFAULT_PROMPTS["anchor_analysis"]
+        )
+        text_client = build_relay_text_client(relay_key, relay_model, relay_base)
+        anchor = analyze_product_with_text_client(
+            text_client,
+            images,
+            name,
+            material,
+            prompt_template,
+        )
+        return anchor, text_client.get_tokens_used()
+    client = GeminiClient(gemini_api_key, PRIMARY_IMAGE_MODEL)
+    anchor = client.analyze_product(images, name, material or "")
+    return anchor, client.get_tokens_used()
+
+
+def compose_combo_image_prompt(anchor, req, aspect="1:1"):
+    templates = get_templates()["combo_types"]
+    type_info = templates.get(req.get("type_key", ""), {})
+
+    if req.get("type_key") == "size":
+        prompt_template = get_prompts().get(
+            "size_image_prompt", DEFAULT_PROMPTS["size_image_prompt"]
+        )
+        try:
+            return prompt_template.format(
+                product_name=anchor.get("product_name_en", "Product"),
+                aspect_ratio=aspect,
+            )
+        except KeyError:
+            return f"Professional product dimension diagram. Product: {anchor.get('product_name_en', 'Product')}. Aspect: {aspect}"
+
+    text_content = ""
+    if req.get("headline"):
+        text_content = f"Headline: {req['headline']}"
+        if req.get("subline"):
+            text_content += f"\nSubline: {req['subline']}"
+        if req.get("badge"):
+            text_content += f"\nBadge: {req['badge']}"
+
+    prompt_template = get_prompts().get("image_prompt", DEFAULT_PROMPTS["image_prompt"])
+    try:
+        return prompt_template.format(
+            product_name=anchor.get("product_name_en", "Product"),
+            category=anchor.get("primary_category", "General"),
+            image_type=req.get("type_name", ""),
+            style_hint=type_info.get("hint", ""),
+            scene=req.get("scene", ""),
+            text_content=text_content,
+            aspect_ratio=aspect,
+        )
+    except KeyError:
+        return f"Professional ecommerce product image. Product: {anchor.get('product_name_en', 'Product')}. Aspect: {aspect}"
+
+
 # ==================== 图片转Base64工具 ====================
 def image_to_base64(img: Image.Image) -> str:
     """将PIL Image转换为base64字符串"""
@@ -4629,15 +4802,11 @@ def show_combo_page():
 
     s = get_settings()
     templates = get_templates()["combo_types"]
-    api_key = (
+    gemini_api_key = (
         st.session_state.own_api_key
         if st.session_state.use_own_key
         else get_next_api_key()
     )
-
-    if not api_key:
-        st.error("⚠️ 无可用的API Key")
-        return
 
     # 侧边栏
     with st.sidebar:
@@ -4811,15 +4980,29 @@ def show_combo_page():
         ):
             with st.spinner("🤖 AI正在分析..."):
                 try:
-                    client = GeminiClient(api_key, model_key)
-                    anchor = client.analyze_product(
-                        st.session_state.combo_images, name, detail
+                    runtime_relay_key, runtime_relay_base, runtime_relay_model = (
+                        resolve_relay_runtime_config(
+                            s,
+                            relay_key,
+                            relay_base,
+                            relay_model,
+                        )
+                    )
+                    anchor, used_tokens = build_combo_anchor(
+                        image_provider,
+                        gemini_api_key,
+                        runtime_relay_key,
+                        runtime_relay_base,
+                        runtime_relay_model,
+                        st.session_state.combo_images,
+                        name,
+                        detail,
                     )
                     st.session_state.combo_anchor = anchor
                     st.session_state.combo_tags_list = [
                         t.strip() for t in tags.split(",") if t.strip()
                     ][:MAX_TAGS]
-                    st.session_state.session_tokens += client.get_tokens_used()
+                    st.session_state.session_tokens += used_tokens
                     st.success("✅ 分析完成！")
                     st.rerun()
                 except Exception as e:
@@ -4875,18 +5058,26 @@ def show_combo_page():
             ):
                 with st.spinner("🤖 生成中..."):
                     try:
-                        client = GeminiClient(api_key, model_key)
-                        reqs = client.generate_requirements(
+                        runtime_relay_key, runtime_relay_base, runtime_relay_model = (
+                            resolve_relay_runtime_config(
+                                s,
+                                relay_key,
+                                relay_base,
+                                relay_model,
+                            )
+                        )
+                        reqs, used_tokens = build_combo_requirements(
+                            image_provider,
+                            gemini_api_key,
+                            runtime_relay_key,
+                            runtime_relay_base,
+                            runtime_relay_model,
                             st.session_state.combo_anchor,
                             selected_types,
                             st.session_state.get("combo_tags_list", []),
                         )
-                        reqs = normalize_requirements(reqs, selected_types, templates)
-                        reqs = client.generate_en_copy(
-                            st.session_state.combo_anchor, reqs
-                        )
                         st.session_state.combo_reqs = reqs
-                        st.session_state.session_tokens += client.get_tokens_used()
+                        st.session_state.session_tokens += used_tokens
                         st.success("✅ 生成完成！")
                         st.rerun()
                     except Exception as e:
@@ -4988,8 +5179,10 @@ def show_combo_page():
             st.info("👆 请完成前面的步骤")
         elif not st.session_state.combo_generating:
             task_desc = f"**待生成: {len(reqs)} 张图片**"
-            if st.session_state.get("combo_enable_title") and st.session_state.get(
-                "combo_title_info"
+            if should_attempt_title_generation(
+                st.session_state.get("combo_enable_title", False),
+                st.session_state.get("combo_images", []),
+                st.session_state.get("combo_title_info", ""),
             ):
                 task_desc += " + **中英双语标题**"
             st.markdown(task_desc)
@@ -4999,12 +5192,34 @@ def show_combo_page():
         else:
             # 执行生成
             model = PRIMARY_IMAGE_MODEL
-            client = GeminiClient(api_key, model)
             anchor = st.session_state.combo_anchor
             aspect = st.session_state.get("combo_aspect", "1:1")
             size = st.session_state.get("combo_size", "1K")
             thinking_level = st.session_state.get("combo_thinking_level", "minimal")
             refs = st.session_state.combo_images
+            runtime_relay_key, runtime_relay_base, runtime_relay_model = (
+                resolve_relay_runtime_config(
+                    s,
+                    relay_key,
+                    relay_base,
+                    relay_model,
+                )
+            )
+            gemini_image_client = (
+                GeminiClient(gemini_api_key, model)
+                if image_provider == "Gemini"
+                else None
+            )
+            relay_image_client = (
+                RelayImageClient(
+                    runtime_relay_key,
+                    runtime_relay_model,
+                    base_url=runtime_relay_base
+                    or s.get("relay_api_base", RELAY_API_BASE),
+                )
+                if image_provider == "中转站"
+                else None
+            )
 
             progress = st.progress(0)
             status = st.empty()
@@ -5014,6 +5229,7 @@ def show_combo_page():
             errors = []
             title_error = ""
             title_warnings = []
+            generation_tokens = 0
 
             for i, r in enumerate(reqs):
                 type_key = r.get("type_key", "img")
@@ -5024,12 +5240,14 @@ def show_combo_page():
                 status.info(f"⏳ 生成: {type_icon} {type_name} ({i + 1}/{len(reqs)})")
 
                 try:
-                    prompt = client.compose_image_prompt(anchor, r, aspect)
+                    prompt = compose_combo_image_prompt(anchor, r, aspect)
                     s = get_settings()
                     enforce_en = bool(s.get("enforce_english_text", True))
                     en_retries = int(s.get("english_text_max_retries", 2))
                     if image_provider == "Gemini":
-                        img = client.generate_image(
+                        if gemini_image_client is None:
+                            raise Exception("当前未配置 Gemini API Key")
+                        img = gemini_image_client.generate_image(
                             refs,
                             prompt,
                             aspect,
@@ -5038,16 +5256,11 @@ def show_combo_page():
                             enforce_english=enforce_en,
                             max_attempts=en_retries,
                         )
+                        generation_tokens = gemini_image_client.get_tokens_used()
                     else:
-                        if not relay_key:
-                            raise Exception("请先输入中转站 API Key")
-                        relay_client = RelayImageClient(
-                            relay_key,
-                            relay_model,
-                            base_url=relay_base
-                            or s.get("relay_api_base", RELAY_API_BASE),
-                        )
-                        img = relay_client.generate_image(
+                        if relay_image_client is None:
+                            raise Exception("请先配置系统中转站 Key 或前台中转站 Key")
+                        img = relay_image_client.generate_image(
                             refs,
                             prompt,
                             aspect,
@@ -5056,9 +5269,11 @@ def show_combo_page():
                             enforce_english=enforce_en,
                             max_attempts=1,
                         )
+                        generation_tokens += relay_image_client.get_tokens_used()
                         if img is None:
                             raise Exception(
-                                relay_client.get_last_error() or "中转站返回空图片"
+                                relay_image_client.get_last_error()
+                                or "中转站返回空图片"
                             )
 
                     if img:
@@ -5079,7 +5294,13 @@ def show_combo_page():
                         with log_container:
                             st.success(f"✅ {type_icon} {type_name} 生成成功")
                     else:
-                        error_msg = client.get_last_error() or "返回空图片"
+                        error_msg = (
+                            gemini_image_client.get_last_error()
+                            if gemini_image_client is not None
+                            else relay_image_client.get_last_error()
+                            if relay_image_client is not None
+                            else "返回空图片"
+                        ) or "返回空图片"
                         errors.append(f"{type_icon} {type_name}: {error_msg}")
                         with log_container:
                             st.error(f"❌ {type_icon} {type_name}: {error_msg}")
@@ -5109,7 +5330,14 @@ def show_combo_page():
                     template_prompt = title_templates.get(template_key, {}).get(
                         "prompt", DEFAULT_TITLE_TEMPLATES["default"]["prompt"]
                     )
-                    title_client = GeminiClient(api_key, model=TITLE_TEXT_MODEL)
+                    title_client = build_text_generation_client(
+                        image_provider,
+                        gemini_api_key,
+                        runtime_relay_key,
+                        runtime_relay_base,
+                        runtime_relay_model,
+                        model=TITLE_TEXT_MODEL,
+                    )
                     generated_titles, title_warnings = (
                         generate_compliant_titles_or_raise(
                             title_client,
@@ -5131,7 +5359,7 @@ def show_combo_page():
                     with log_container:
                         st.warning(warning)
 
-            tokens_used = client.get_tokens_used() + title_tokens
+            tokens_used = generation_tokens + title_tokens
             st.session_state.session_tokens += tokens_used
 
             # 保存结果到session_state
@@ -5185,15 +5413,11 @@ def show_smart_page():
 
     s = get_settings()
     templates = get_templates()["smart_types"]
-    api_key = (
+    gemini_api_key = (
         st.session_state.own_api_key
         if st.session_state.use_own_key
         else get_next_api_key()
     )
-
-    if not api_key:
-        st.error("⚠️ 无可用的API Key")
-        return
 
     # 检查是否有已完成的结果
     if st.session_state.smart_generation_done and (
@@ -5307,7 +5531,26 @@ def show_smart_page():
     if st.button(
         "🚀 开始生成", type="primary", use_container_width=True, disabled=not can_gen
     ):
-        client = GeminiClient(api_key, model)
+        runtime_relay_key, runtime_relay_base, runtime_relay_model = (
+            resolve_relay_runtime_config(
+                s,
+                relay_key,
+                relay_base,
+                relay_model,
+            )
+        )
+        gemini_image_client = (
+            GeminiClient(gemini_api_key, model) if image_provider == "Gemini" else None
+        )
+        relay_image_client = (
+            RelayImageClient(
+                runtime_relay_key,
+                runtime_relay_model,
+                base_url=runtime_relay_base or s.get("relay_api_base", RELAY_API_BASE),
+            )
+            if image_provider == "中转站"
+            else None
+        )
 
         progress = st.progress(0)
         status = st.empty()
@@ -5315,13 +5558,23 @@ def show_smart_page():
 
         # 先分析商品
         status.info("🤖 分析商品...")
-        anchor = client.analyze_product(images, name, material or "")
+        anchor, anchor_tokens = build_smart_anchor(
+            image_provider,
+            gemini_api_key,
+            runtime_relay_key,
+            runtime_relay_base,
+            runtime_relay_model,
+            images,
+            name,
+            material or "",
+        )
 
         results = []
         errors = []
         done = 0
         title_error = ""
         title_warnings = []
+        generation_tokens = anchor_tokens
 
         for tk, cnt in selected_types.items():
             info = templates[tk]
@@ -5344,7 +5597,9 @@ Aspect: {aspect}"""
                     enforce_en = bool(s.get("enforce_english_text", True))
                     en_retries = int(s.get("english_text_max_retries", 2))
                     if image_provider == "Gemini":
-                        img = client.generate_image(
+                        if gemini_image_client is None:
+                            raise Exception("当前未配置 Gemini API Key")
+                        img = gemini_image_client.generate_image(
                             images,
                             prompt,
                             aspect,
@@ -5353,16 +5608,11 @@ Aspect: {aspect}"""
                             enforce_english=enforce_en,
                             max_attempts=en_retries,
                         )
+                        generation_tokens = gemini_image_client.get_tokens_used()
                     else:
-                        if not relay_key:
-                            raise Exception("请先输入中转站 API Key")
-                        relay_client = RelayImageClient(
-                            relay_key,
-                            relay_model,
-                            base_url=relay_base
-                            or s.get("relay_api_base", RELAY_API_BASE),
-                        )
-                        img = relay_client.generate_image(
+                        if relay_image_client is None:
+                            raise Exception("请先配置系统中转站 Key 或前台中转站 Key")
+                        img = relay_image_client.generate_image(
                             images,
                             prompt,
                             aspect,
@@ -5371,9 +5621,11 @@ Aspect: {aspect}"""
                             enforce_english=enforce_en,
                             max_attempts=1,
                         )
+                        generation_tokens += relay_image_client.get_tokens_used()
                         if img is None:
                             raise Exception(
-                                relay_client.get_last_error() or "中转站返回空图片"
+                                relay_image_client.get_last_error()
+                                or "中转站返回空图片"
                             )
                     if img:
                         filename = f"{str(done).zfill(2)}_{info['name']}.png"
@@ -5384,7 +5636,13 @@ Aspect: {aspect}"""
                         with log_container:
                             st.success(f"✅ {info['icon']} {info['name']} 生成成功")
                     else:
-                        error_msg = client.get_last_error() or "返回空图片"
+                        error_msg = (
+                            gemini_image_client.get_last_error()
+                            if gemini_image_client is not None
+                            else relay_image_client.get_last_error()
+                            if relay_image_client is not None
+                            else "返回空图片"
+                        ) or "返回空图片"
                         errors.append(f"{info['icon']} {info['name']}: {error_msg}")
                         with log_container:
                             st.error(f"❌ {info['icon']} {info['name']}: {error_msg}")
@@ -5406,7 +5664,14 @@ Aspect: {aspect}"""
                 template_prompt = title_templates_data.get(title_template, {}).get(
                     "prompt", DEFAULT_TITLE_TEMPLATES["default"]["prompt"]
                 )
-                title_client = GeminiClient(api_key, model=TITLE_TEXT_MODEL)
+                title_client = build_text_generation_client(
+                    image_provider,
+                    gemini_api_key,
+                    runtime_relay_key,
+                    runtime_relay_base,
+                    runtime_relay_model,
+                    model=TITLE_TEXT_MODEL,
+                )
                 generated_titles, title_warnings = generate_compliant_titles_or_raise(
                     title_client,
                     images,
@@ -5426,7 +5691,7 @@ Aspect: {aspect}"""
                 with log_container:
                     st.warning(warning)
 
-        tokens_used = client.get_tokens_used() + title_tokens
+        tokens_used = generation_tokens + title_tokens
         st.session_state.session_tokens += tokens_used
 
         # 保存结果
