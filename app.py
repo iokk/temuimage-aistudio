@@ -68,9 +68,8 @@ from temu_core.title_logic import (
 )
 
 # ==================== 配置常量 ====================
-APP_VERSION = "V1.0.0"
-APP_AUTHOR = "企鹅 & 小明"
-APP_COMMERCIAL = "安得跨境 企鹅&Jerry nowdn.com"
+APP_LAST_UPDATED = "最近更新 2026-03-26"
+APP_TAGLINE = "批量出图 · 快速出图 · 标题优化 · 图片翻译"
 APP_NAME = "TEMU AI Studio"
 
 DATA_DIR = Path("/app/data") if os.path.exists("/app/data") else Path("./data")
@@ -120,6 +119,9 @@ MODEL_NAME_NANO_BANANA_2 = MODELS[PRIMARY_IMAGE_MODEL]["name"]
 
 RELAY_API_BASE = "https://newapi.aisonnet.org/v1"
 RELAY_IMAGE_MODELS = {
+    "gemini-3.1-flash-image-preview": {"name": "gemini-3.1-flash-image-preview"},
+    "seedream-5.0": {"name": "seedream-5.0"},
+    "seedream-4.6": {"name": "seedream-4.6"},
     "z-image-turbo": {"name": "z-image-turbo"},
     "imagine_x_1": {"name": "imagine_x_1"},
     "hunyuan-image-3": {"name": "hunyuan-image-3"},
@@ -129,10 +131,25 @@ RELAY_TEXT_MODELS = {
     "nano-banana-pro-reverse": {"name": "nano-banana-pro-reverse"},
 }
 RELAY_MODEL_STATUS = {
+    "gemini-3.1-flash-image-preview": {
+        "label": "优先推荐",
+        "color": "#10b981",
+        "note": "当前优先推荐的中转站图片模型，适合先作为默认模型测试与上线。",
+    },
+    "seedream-5.0": {
+        "label": "待测试",
+        "color": "#1677ff",
+        "note": "已加入系统中转站模型列表，建议管理员先做连通性与出图验证。",
+    },
+    "seedream-4.6": {
+        "label": "待测试",
+        "color": "#1677ff",
+        "note": "已加入系统中转站模型列表，建议管理员先做连通性与出图验证。",
+    },
     "z-image-turbo": {
-        "label": "当前无通道",
-        "color": "#ff4d4f",
-        "note": "实测返回 model_not_found / no available channel",
+        "label": "待测试",
+        "color": "#1677ff",
+        "note": "已加入系统中转站模型列表，建议管理员先做连通性与出图验证。",
     },
     "imagine_x_1": {
         "label": "不稳定",
@@ -298,7 +315,7 @@ DEFAULT_SETTINGS = {
     "translate_bg_max_concurrent": 2,
     "relay_api_base": RELAY_API_BASE,
     "relay_api_key": "",
-    "relay_default_image_model": "imagine_x_1",
+    "relay_default_image_model": "gemini-3.1-flash-image-preview",
     "enforce_english_text": False,
     "english_text_max_retries": 1,
 }
@@ -799,7 +816,7 @@ def get_settings():
     ).rstrip("/")
     s["relay_api_key"] = str(s.get("relay_api_key", "") or "").strip()
     if s.get("relay_default_image_model") not in RELAY_IMAGE_MODELS:
-        s["relay_default_image_model"] = "imagine_x_1"
+        s["relay_default_image_model"] = "gemini-3.1-flash-image-preview"
     try:
         workers = int(
             s.get(
@@ -2637,9 +2654,11 @@ class RelayImageClient:
             message = choice.get("message", {}) or {}
             content = message.get("content")
             if isinstance(content, str):
-                match = re.search(r"(https?://\\S+)", content)
+                markdown_match = re.search(r"\((https?://[^)\s]+)\)", content)
+                match = markdown_match or re.search(r"(https?://\\S+)", content)
                 if match:
-                    response = requests.get(match.group(1), timeout=60)
+                    url = match.group(1).rstrip(")],}'\"")
+                    response = requests.get(url, timeout=60)
                     response.raise_for_status()
                     return Image.open(io.BytesIO(response.content))
             if isinstance(content, list):
@@ -2660,29 +2679,6 @@ class RelayImageClient:
                             io.BytesIO(base64.b64decode(part["b64_json"]))
                         )
         return None
-
-
-def probe_relay_api(base_url: str, api_key: str, model: str = ""):
-    base_url = str(base_url or RELAY_API_BASE).rstrip("/")
-    api_key = str(api_key or "").strip()
-    if not base_url or not api_key:
-        return False, "请先填写中转站 API 地址和 API Key。"
-    headers = {"Authorization": f"Bearer {api_key}"}
-    try:
-        response = requests.get(f"{base_url}/models", headers=headers, timeout=20)
-        if response.status_code >= 400:
-            return False, format_runtime_error_message(response.text)
-        payload = response.json()
-        model_ids = {
-            item.get("id") for item in payload.get("data", []) if isinstance(item, dict)
-        }
-        if model and model not in model_ids:
-            return False, f"模型 `{model}` 不在该中转站的模型列表中。"
-        if model:
-            return True, f"中转站连接正常，已找到模型 `{model}`。"
-        return True, "中转站连接正常。"
-    except Exception as e:
-        return False, format_runtime_error_message(e)
 
     def generate_image(
         self,
@@ -2730,6 +2726,29 @@ def probe_relay_api(base_url: str, api_key: str, model: str = ""):
             except Exception as e:
                 self.last_error = str(e)
         return None
+
+
+def probe_relay_api(base_url: str, api_key: str, model: str = ""):
+    base_url = str(base_url or RELAY_API_BASE).rstrip("/")
+    api_key = str(api_key or "").strip()
+    if not base_url or not api_key:
+        return False, "请先填写中转站 API 地址和 API Key。"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        response = requests.get(f"{base_url}/models", headers=headers, timeout=20)
+        if response.status_code >= 400:
+            return False, format_runtime_error_message(response.text)
+        payload = response.json()
+        model_ids = {
+            item.get("id") for item in payload.get("data", []) if isinstance(item, dict)
+        }
+        if model and model not in model_ids:
+            return False, f"模型 `{model}` 不在该中转站的模型列表中。"
+        if model:
+            return True, f"中转站连接正常，已找到模型 `{model}`。"
+        return True, "中转站连接正常。"
+    except Exception as e:
+        return False, format_runtime_error_message(e)
 
 
 # ==================== 图片转Base64工具 ====================
@@ -3508,9 +3527,9 @@ def show_footer():
     st.markdown(
         f"""
     <div class="footer">
-        <p><strong>{APP_NAME}</strong> {APP_VERSION}</p>
+        <p><strong>{APP_NAME}</strong> · {APP_LAST_UPDATED}</p>
         <p>📈 今日已出图: <strong>{today_images}</strong> 张</p>
-        <p>作者: {APP_AUTHOR} | 商业服务: {APP_COMMERCIAL}</p>
+        <p>{APP_TAGLINE}</p>
         <p style="margin-top:0.75rem;font-size:11px;color:#94a3b8">© {datetime.now().year} All Rights Reserved.</p>
     </div>
     """,
@@ -4439,7 +4458,8 @@ def render_registered_system_service_login(s):
 def show_login():
     st.markdown(f'<div class="main-title">🍌 {APP_NAME}</div>', unsafe_allow_html=True)
     st.markdown(
-        f'<p style="text-align:center;color:#64748b;margin-bottom:1.5rem">{APP_VERSION} · {APP_AUTHOR}</p>',
+        f'<p style="text-align:center;color:#64748b;margin-bottom:0.5rem">{APP_LAST_UPDATED}</p>'
+        f'<p style="text-align:center;color:#94a3b8;margin-bottom:1.5rem">{APP_TAGLINE}</p>',
         unsafe_allow_html=True,
     )
 
@@ -4483,6 +4503,27 @@ def show_login():
                 st.caption(
                     "如果配置了 `PLATFORM_ENCRYPTION_KEY`，系统 API Key 会优先加密存进 PostgreSQL；否则仅保存在本地数据目录。"
                 )
+            relay_base_init = st.text_input(
+                "系统中转站 API 地址（可选）",
+                value=s.get("relay_api_base", RELAY_API_BASE),
+                key="init_relay_base",
+            )
+            relay_key_init = st.text_input(
+                "系统中转站 API Key（可选）",
+                type="password",
+                key="init_relay_key",
+            )
+            relay_model_init = st.selectbox(
+                "系统中转站默认模型",
+                list(RELAY_IMAGE_MODELS.keys()),
+                index=list(RELAY_IMAGE_MODELS.keys()).index(
+                    s.get("relay_default_image_model", "gemini-3.1-flash-image-preview")
+                )
+                if s.get("relay_default_image_model", "gemini-3.1-flash-image-preview")
+                in RELAY_IMAGE_MODELS
+                else 0,
+                key="init_relay_model",
+            )
             if st.button("✅ 保存并启用", type="primary", use_container_width=True):
                 if admin_pwd != s.get("admin_password"):
                     st.error("管理员密码错误")
@@ -4490,13 +4531,20 @@ def show_login():
                     keys = [
                         k.strip() for k in (keys_text or "").splitlines() if k.strip()
                     ]
-                    if not keys:
-                        st.error("请至少填写1个API Key")
+                    if not keys and not relay_key_init.strip():
+                        st.error("请至少填写 1 个 Gemini Key，或填写系统中转站 Key")
                     else:
-                        data = get_api_keys()
-                        data["keys"] = [{"key": k, "enabled": True} for k in keys]
-                        data["current_index"] = 0
-                        save_api_keys(data)
+                        if keys:
+                            data = get_api_keys()
+                            data["keys"] = [{"key": k, "enabled": True} for k in keys]
+                            data["current_index"] = 0
+                            save_api_keys(data)
+                        s["relay_api_base"] = (
+                            str(relay_base_init or RELAY_API_BASE).strip().rstrip("/")
+                        )
+                        if relay_key_init.strip():
+                            s["relay_api_key"] = relay_key_init.strip()
+                        s["relay_default_image_model"] = relay_model_init
                         s["admin_password"] = new_admin_pwd or s.get("admin_password")
                         save_settings(s)
                         st.success("已保存！")
@@ -7126,7 +7174,8 @@ def show_admin():
 def main_app():
     with st.sidebar:
         st.markdown(f"### 🍌 {APP_NAME}")
-        st.caption(APP_VERSION)
+        st.caption(APP_LAST_UPDATED)
+        st.caption(APP_TAGLINE)
         st.markdown("---")
         page = st.radio(
             "功能",
@@ -7179,7 +7228,7 @@ def main_app():
 # ==================== 主入口 ====================
 def main():
     st.set_page_config(
-        page_title=f"{APP_NAME} {APP_VERSION}",
+        page_title=f"{APP_NAME} · {APP_LAST_UPDATED}",
         page_icon="🍌",
         layout="wide",
         initial_sidebar_state="expanded",
