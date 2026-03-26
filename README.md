@@ -77,24 +77,62 @@ https://newapi.aisonnet.org/v1
 
 ## 部署方式
 
-### 方式一：GitHub → Zeabur
+### 方式一：Zeabur Template / Deploy Button（推荐）
 
-推荐流程：
+推荐你后续都走这个路径，而不是裸 GitHub Import。
 
-1. 代码推送到 GitHub 仓库
-2. 在 Zeabur 新建服务并连接仓库
-3. 配置环境变量
-4. 后续通过 `git push` 自动更新
+仓库已提供 `template.yaml`，目标是一次性拉起：
+
+- `temu-app`
+- `postgresql`
+- `redis`
+
+模板部署时会自动注入：
+
+```bash
+DATABASE_URL=${POSTGRES_CONNECTION_STRING}
+REDIS_URL=${REDIS_CONNECTION_STRING}
+PLATFORM_AUTO_MIGRATE=true
+PLATFORM_SEED_DEFAULTS=true
+PLATFORM_DEFAULT_ORG_NAME=TEMU Team Workspace
+PLATFORM_DEFAULT_PROJECT_NAME=Default Project
+TITLE_TEXT_MODEL=gemini-3.1-pro
+```
+
+首次只需要你填写少量变量：
+
+```bash
+SYSTEM_API_KEYS_FIXED=你的 Gemini Key
+ADMIN_PASSWORD_FIXED=你的管理员密码
+PLATFORM_ENCRYPTION_KEY=高强度随机值
+PUBLIC_DOMAIN=可选域名
+```
+
+说明：
+
+- `Deploy Button` 需要你先在 Zeabur 里基于这个模板创建一次模板条目，之后才能生成按钮
+- 仓库已经为这条路径准备好了 `template.yaml`
+
+### 方式二：GitHub → Zeabur（备用）
+
+如果你仍然直接用 GitHub Import，请至少保证：
+
+1. 已单独添加 PostgreSQL 和 Redis 服务
+2. `DATABASE_URL` 已填好
+3. `PLATFORM_AUTO_MIGRATE=true`
+4. `PLATFORM_SEED_DEFAULTS=true`
 
 推荐环境变量：
 
 ```bash
-SYSTEM_API_KEYS_FIXED=AQ.xxxxx
+SYSTEM_API_KEYS_FIXED=AIza... 或 AQ...
 SYSTEM_API_KEYS_SYNC_MODE=replace
-GOOGLE_GENAI_USE_VERTEXAI=true
 ADMIN_PASSWORD_FIXED=你的管理员密码
-USER_PASSWORD_FIXED=你的用户密码
-ALLOW_PASSWORDLESS_USER_LOGIN=true
+PLATFORM_ENCRYPTION_KEY=高强度随机值
+DATABASE_URL=postgresql+psycopg://...
+REDIS_URL=redis://...
+PLATFORM_AUTO_MIGRATE=true
+PLATFORM_SEED_DEFAULTS=true
 PORT=8501
 ```
 
@@ -107,6 +145,7 @@ PORT=8501
 ## 目录说明
 
 - `app.py`：主应用
+- `template.yaml`：Zeabur 模板化部署配置
 - `scripts/deploy-zeabur.sh`：Zeabur 发布脚本
 - `scripts/deploy-debian.sh`：服务器部署脚本
 - `docker-compose.yml`：本地 / 服务器容器部署
@@ -122,4 +161,4 @@ python3 -m py_compile app.py
 
 GitHub 仓库：
 
-`https://github.com/iokk/temu-ai-studio-v1`
+`https://github.com/iokk/temuimage-aistudio`

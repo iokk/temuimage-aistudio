@@ -12,6 +12,7 @@ This repository now includes the first shared-billing foundation for the future 
 - Registered user accounts with admin-managed disable/delete backups
 - Encrypted system API key storage when `PLATFORM_ENCRYPTION_KEY` is configured
 - Zeabur-ready environment variables for managed PostgreSQL, Redis, and object storage
+- A repository-level `template.yaml` for template-first Zeabur deployment
 
 ## Current scope
 
@@ -48,6 +49,16 @@ This commit starts the platform migration without breaking the current monolith.
 3. Run `python3 scripts/seed_platform_defaults.py`
 4. Set `PLATFORM_ENCRYPTION_KEY` before storing system API Keys in production
 5. Open the admin console and verify `注册用户管理`, `团队工作区`, `定价规则`, `钱包账本`, and `兑换码` tabs
+
+## Zeabur template-first deployment
+
+Use `template.yaml` when possible so Zeabur provisions:
+
+- `temu-app`
+- `postgresql`
+- `redis`
+
+This avoids the most common production issue: the login page falling back because `DATABASE_URL` or migrations were never set up.
 
 ## Next milestones
 

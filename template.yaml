@@ -1,0 +1,188 @@
+# yaml-language-server: $schema=https://schema.zeabur.app/template.json
+apiVersion: zeabur.com/v1
+kind: Template
+metadata:
+  name: TEMU AI Studio
+
+spec:
+  description: TEMU image generation, title optimization, and translation workspace with team auth, PostgreSQL, and Redis.
+  icon: https://avatars.githubusercontent.com/u/47072738?v=4
+  tags:
+    - AI
+    - Productivity
+    - E-commerce
+
+  variables:
+    - key: PUBLIC_DOMAIN
+      type: DOMAIN
+      name: Public Domain
+      description: Optional public domain for the TEMU AI Studio web app.
+    - key: SYSTEM_API_KEYS_FIXED
+      type: STRING
+      name: Gemini System API Keys
+      description: Required. One or more Gemini or Vertex keys, separated by commas or new lines.
+    - key: ADMIN_PASSWORD_FIXED
+      type: STRING
+      name: Admin Password
+      description: Required. Initial admin password for the system backend.
+    - key: PLATFORM_ENCRYPTION_KEY
+      type: STRING
+      name: Platform Encryption Key
+      description: Required. High-entropy secret used to encrypt stored system API keys.
+
+  readme: |
+    # TEMU AI Studio
+
+    Recommended Zeabur deployment for the repository:
+
+    - App service from this GitHub repository
+    - PostgreSQL for team auth, projects, and wallet data
+    - Redis for queue/cache readiness
+
+    ## What this template auto-configures
+
+    - `DATABASE_URL` from the PostgreSQL service
+    - `REDIS_URL` from the Redis service
+    - `PLATFORM_AUTO_MIGRATE=true`
+    - `PLATFORM_SEED_DEFAULTS=true`
+    - `TITLE_TEXT_MODEL=gemini-3.1-pro`
+
+    ## What you still need to provide
+
+    - `SYSTEM_API_KEYS_FIXED`
+    - `ADMIN_PASSWORD_FIXED`
+    - `PLATFORM_ENCRYPTION_KEY`
+
+    After deployment, log in with the admin password and verify that the login page no longer falls back to the legacy system-service flow.
+
+  services:
+    - name: postgresql
+      icon: https://raw.githubusercontent.com/zeabur/service-icons/main/marketplace/postgresql.svg
+      template: PREBUILT
+      spec:
+        source:
+          image: postgres:16-alpine
+        ports:
+          - id: database
+            port: 5432
+            type: TCP
+        volumes:
+          - id: data
+            dir: /var/lib/postgresql/data
+        env:
+          POSTGRES_DB:
+            default: temu
+          POSTGRES_USER:
+            default: temu
+            expose: true
+            readonly: true
+          POSTGRES_PASSWORD:
+            default: ${PASSWORD}
+            expose: true
+          POSTGRES_HOST:
+            default: ${CONTAINER_HOSTNAME}
+            expose: true
+            readonly: true
+          POSTGRES_PORT:
+            default: ${DATABASE_PORT}
+            expose: true
+            readonly: true
+          POSTGRES_CONNECTION_STRING:
+            default: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+            expose: true
+            readonly: true
+        instructions:
+          - type: TEXT
+            title: PostgreSQL Connection String
+            content: ${POSTGRES_CONNECTION_STRING}
+            category: Database
+
+    - name: redis
+      icon: https://raw.githubusercontent.com/zeabur/service-icons/main/marketplace/redis.svg
+      template: PREBUILT
+      spec:
+        source:
+          image: redis:7-alpine
+        ports:
+          - id: database
+            port: 6379
+            type: TCP
+        volumes:
+          - id: data
+            dir: /data
+        env:
+          REDIS_HOST:
+            default: ${CONTAINER_HOSTNAME}
+            expose: true
+            readonly: true
+          REDIS_PORT:
+            default: ${DATABASE_PORT}
+            expose: true
+            readonly: true
+          REDIS_CONNECTION_STRING:
+            default: redis://${REDIS_HOST}:${REDIS_PORT}/0
+            expose: true
+            readonly: true
+        instructions:
+          - type: TEXT
+            title: Redis Connection String
+            content: ${REDIS_CONNECTION_STRING}
+            category: Cache
+
+    - name: temu-app
+      icon: https://avatars.githubusercontent.com/u/47072738?v=4
+      template: GIT
+      domainKey: PUBLIC_DOMAIN
+      dependencies:
+        - postgresql
+        - redis
+      spec:
+        source:
+          type: GITHUB
+          repoID: 1184397680
+          branch: main
+        ports:
+          - id: web
+            port: 8501
+            type: HTTP
+        volumes:
+          - id: data
+            dir: /app/data
+        env:
+          PORT:
+            default: "8501"
+          APP_PORT:
+            default: "8501"
+          DATABASE_URL:
+            default: ${POSTGRES_CONNECTION_STRING}
+          REDIS_URL:
+            default: ${REDIS_CONNECTION_STRING}
+          PLATFORM_AUTO_MIGRATE:
+            default: "true"
+          PLATFORM_SEED_DEFAULTS:
+            default: "true"
+          PLATFORM_DEFAULT_ORG_NAME:
+            default: TEMU Team Workspace
+          PLATFORM_DEFAULT_PROJECT_NAME:
+            default: Default Project
+          PLATFORM_ENCRYPTION_KEY:
+            default: ${PLATFORM_ENCRYPTION_KEY}
+          TITLE_TEXT_MODEL:
+            default: gemini-3.1-pro
+          SYSTEM_API_KEYS_FIXED:
+            default: ${SYSTEM_API_KEYS_FIXED}
+          SYSTEM_API_KEYS_SYNC_MODE:
+            default: replace
+          ADMIN_PASSWORD_FIXED:
+            default: ${ADMIN_PASSWORD_FIXED}
+          FILE_STORAGE_TYPE:
+            default: local
+          FILE_STORAGE_PATH:
+            default: /app/data/files
+        instructions:
+          - type: DOMAIN
+            title: TEMU AI Studio
+            content: https://${PUBLIC_DOMAIN}/
+          - type: TEXT
+            title: Login Mode
+            content: Team auth is enabled automatically when PostgreSQL is ready.

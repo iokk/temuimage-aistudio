@@ -44,7 +44,11 @@ from temu_core.bootstrap import bootstrap_platform_runtime
 from temu_core.billing import charge_usage_to_wallet, get_wallet_dashboard
 from temu_core.db import get_database_status, session_scope
 from temu_core.models import EXPECTED_TABLES, User
-from temu_core.settings import database_enabled as platform_database_enabled
+from temu_core.platform_status import describe_platform_database_status
+from temu_core.settings import (
+    database_enabled as platform_database_enabled,
+    get_platform_settings,
+)
 from temu_core.streamlit_admin import (
     render_billing_admin_tab,
     render_pricing_admin_tab,
@@ -4488,7 +4492,18 @@ def show_login():
             st.success("✅ 团队注册用户体系已启用")
             render_registered_system_service_login(s)
         else:
-            st.warning("当前团队数据库未就绪，暂时回退到旧版系统服务登录。")
+            db_info = describe_platform_database_status(
+                platform_auth_status(),
+                auto_migrate=get_platform_settings().platform_auto_migrate,
+            )
+            level = db_info["level"]
+            if level == "error":
+                st.error(db_info["message"])
+            else:
+                st.warning(db_info["message"])
+            if db_info.get("detail"):
+                st.caption(db_info["detail"])
+            st.caption("当前会临时回退到旧版系统服务登录。")
             render_legacy_system_service_login(s, allow_user_passwordless_login)
 
     with t3:

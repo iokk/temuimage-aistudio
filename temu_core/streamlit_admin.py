@@ -26,6 +26,7 @@ from .billing import (
 )
 from .db import get_database_status, session_scope
 from .models import EXPECTED_TABLES
+from .platform_status import describe_platform_database_status
 from .settings import get_platform_settings
 from .team import create_workspace_project, get_workspace_overview
 from .usage import list_recent_usage_events
@@ -34,25 +35,18 @@ from .usage import list_recent_usage_events
 def render_platform_status_banner():
     settings = get_platform_settings()
     status = get_database_status(EXPECTED_TABLES)
-    if not status["configured"]:
-        st.info(
-            "Team billing foundation is disabled. Set `DATABASE_URL` and `REDIS_URL` in Zeabur before enabling shared billing."
-        )
-        return status
-    if not status["reachable"]:
-        st.error(f"Team database is configured but unreachable: {status['error']}")
-        return status
-    if status["missing_tables"]:
-        st.warning(
-            "Team database is connected but the billing schema is missing. "
-            "Run `alembic upgrade head` or set `PLATFORM_AUTO_MIGRATE=true` on Zeabur."
-        )
-        st.caption(f"Missing tables: {', '.join(status['missing_tables'])}")
-        return status
-    auto_migrate_label = "on" if settings.platform_auto_migrate else "off"
-    st.success(
-        f"Team database ready: {status['dialect']} · {status['table_count']} tables · auto-migrate {auto_migrate_label}"
+    info = describe_platform_database_status(
+        status, auto_migrate=settings.platform_auto_migrate
     )
+    if info["level"] == "error":
+        st.error(info["message"])
+    elif info["level"] == "success":
+        auto_migrate_label = "on" if settings.platform_auto_migrate else "off"
+        st.success(f"{info['message']} auto-migrate {auto_migrate_label}")
+    else:
+        st.warning(info["message"])
+    if info.get("detail"):
+        st.caption(info["detail"])
     return status
 
 
