@@ -73,6 +73,7 @@ from temu_core.title_logic import (
     generate_compliant_titles_or_raise,
     should_attempt_title_generation,
 )
+from temu_core.ui_content import build_admin_mode_notice, build_feature_catalog
 
 # ==================== 配置常量 ====================
 APP_LAST_UPDATED = "最近更新 2026-03-26"
@@ -3647,11 +3648,31 @@ def create_zip_from_results(results: list, titles: list = None) -> bytes:
 def apply_style():
     st.markdown(
         """<style>
-    :root { --primary: #1677ff; --success: #10b981; --warning: #faad14; --danger: #ff4d4f; }
-    html, body, [class*="css"] { font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", "Helvetica Neue", Arial, sans-serif; }
-    .block-container { padding-top: 0.75rem; padding-bottom: 1.25rem; }
-    .main-title { font-size: 2.5rem; font-weight: 800; text-align: center; margin: 1rem 0; background: linear-gradient(135deg, #1677ff 0%, #36cfc9 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-    .page-title { font-size: 1.75rem; font-weight: 700; margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 3px solid var(--primary); }
+    :root { --primary: #0f766e; --accent: #2563eb; --surface: #ffffff; --canvas: #f4f7fb; --text: #0f172a; --muted: #64748b; --success: #059669; --warning: #d97706; --danger: #dc2626; --line: #dbe4ee; }
+    html, body, [class*="css"] { font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", "Helvetica Neue", Arial, sans-serif; background: var(--canvas); color: var(--text); }
+    .stApp { background: radial-gradient(circle at top right, rgba(37,99,235,0.08), transparent 28%), linear-gradient(180deg, #f8fbff 0%, #f4f7fb 100%); }
+    .block-container { padding-top: 0.75rem; padding-bottom: 1.5rem; max-width: 1380px; }
+    .main-title { font-size: 2.6rem; font-weight: 800; text-align: center; margin: 0.8rem 0 0.6rem; color: var(--text); letter-spacing: -0.03em; }
+    .page-title { font-size: 1.75rem; font-weight: 750; margin-bottom: 1rem; padding-bottom: 0.55rem; border-bottom: 2px solid rgba(15,118,110,0.18); }
+    .shell-banner { background: linear-gradient(135deg, rgba(15,118,110,0.1) 0%, rgba(37,99,235,0.08) 100%); border: 1px solid rgba(15,118,110,0.18); border-radius: 18px; padding: 18px 20px; margin-bottom: 1rem; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.04); }
+    .shell-kicker { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--primary); }
+    .shell-heading { font-size: 28px; font-weight: 800; color: var(--text); margin-top: 4px; }
+    .shell-subtext { font-size: 13px; color: var(--muted); margin-top: 6px; }
+    .notice-card { border-radius: 14px; padding: 14px 16px; margin: 0.75rem 0 1rem; border: 1px solid var(--line); background: #ffffff; }
+    .notice-card.info { background: linear-gradient(135deg, rgba(37,99,235,0.08), rgba(15,118,110,0.06)); }
+    .notice-card.success { background: linear-gradient(135deg, rgba(5,150,105,0.09), rgba(15,118,110,0.05)); }
+    .notice-card.warning { background: linear-gradient(135deg, rgba(217,119,6,0.09), rgba(245,158,11,0.06)); }
+    .notice-title { font-size: 15px; font-weight: 700; color: var(--text); margin-bottom: 4px; }
+    .notice-body { font-size: 13px; color: var(--muted); }
+    .status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 1rem 0 1.2rem; }
+    .status-card { background: rgba(255,255,255,0.9); border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px; box-shadow: 0 6px 18px rgba(15, 23, 42, 0.04); }
+    .status-label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+    .status-value { font-size: 18px; font-weight: 750; color: var(--text); }
+    .dashboard-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 1rem 0; }
+    .dashboard-card { background: rgba(255,255,255,0.96); border: 1px solid var(--line); border-radius: 18px; padding: 18px; box-shadow: 0 12px 28px rgba(15, 23, 42, 0.05); }
+    .dashboard-icon { width: 42px; height: 42px; border-radius: 12px; background: linear-gradient(135deg, rgba(15,118,110,0.14), rgba(37,99,235,0.12)); display: flex; align-items: center; justify-content: center; font-size: 20px; color: var(--primary); margin-bottom: 12px; }
+    .dashboard-title { font-size: 16px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+    .dashboard-desc { font-size: 13px; color: var(--muted); line-height: 1.6; }
     .stButton>button { border-radius: 10px; font-weight: 600; transition: all 0.2s; border: 1px solid #e2e8f0; background: #f8fafc; color: #0f172a; }
     .stButton>button:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15, 23, 42, 0.12); }
     button[kind="primary"] { background: linear-gradient(135deg, #1677ff 0%, #36cfc9 100%); color: #fff !important; border: 0 !important; box-shadow: 0 6px 16px rgba(22, 119, 255, 0.28); }
@@ -3684,12 +3705,21 @@ def apply_style():
     .section-chip { font-size: 11px; color: #1677ff; background: #e6f4ff; border-radius: 999px; padding: 2px 8px; }
     .guide-card { background: linear-gradient(135deg, #f8fafc 0%, #eef2ff 100%); border: 1px solid #e5e7eb; border-radius: 12px; padding: 10px 12px; font-size: 12px; }
     .thumb-grid img { border-radius: 8px; border: 1px solid #e5e7eb; }
-    section[data-testid="stSidebar"] { background: #fbfbfd; }
+    section[data-testid="stSidebar"] { background: linear-gradient(180deg, #fbfcff 0%, #f5f8fc 100%); border-right: 1px solid rgba(148,163,184,0.18); }
+    .sidebar-brand { padding: 6px 0 10px; }
+    .sidebar-kicker { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--primary); font-weight: 700; }
+    .sidebar-title { font-size: 20px; font-weight: 800; color: var(--text); margin-top: 4px; }
+    .sidebar-subtitle { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.6; }
+    .sidebar-section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: #475569; font-weight: 700; margin: 0.8rem 0 0.5rem; }
     .stepper { display: flex; gap: 8px; flex-wrap: wrap; margin: 0.5rem 0 1rem; }
     .step { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 6px 10px; font-size: 12px; display: inline-flex; align-items: center; gap: 6px; color: #334155; }
     .step-num { width: 18px; height: 18px; border-radius: 999px; background: #e2e8f0; color: #0f172a; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; }
     .step.active { background: linear-gradient(135deg, #e6f4ff 0%, #f0f5ff 100%); border-color: #91caff; color: #1e293b; }
     .step.active .step-num { background: #1677ff; color: #fff; }
+    @media (max-width: 900px) {
+      .status-grid, .dashboard-grid { grid-template-columns: 1fr; }
+      .shell-heading { font-size: 22px; }
+    }
     </style>""",
         unsafe_allow_html=True,
     )
@@ -3706,6 +3736,56 @@ def show_footer():
         <p style="margin-top:0.75rem;font-size:11px;color:#94a3b8">© {datetime.now().year} All Rights Reserved.</p>
     </div>
     """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_notice_card(title: str, body: str, level: str = "info"):
+    safe_level = level if level in {"info", "success", "warning"} else "info"
+    st.markdown(
+        f'<div class="notice-card {safe_level}"><div class="notice-title">{title}</div><div class="notice-body">{body}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_workspace_dashboard():
+    settings = get_settings()
+    mode_value = "团队模式" if platform_auth_ready() else "管理员模式"
+    image_engine = settings.get("default_image_provider", "Gemini")
+    relay_model = settings.get("relay_default_image_model", "未配置")
+    db_value = "已启用" if platform_auth_ready() else "未启用"
+    used, limit = check_user_limit(get_user_id())[1:]
+    usage_value = "无限额度" if st.session_state.use_own_key else f"{used}/{limit}"
+    st.markdown(
+        f"""<div class="shell-banner">
+            <div class="shell-kicker">Workspace Overview</div>
+            <div class="shell-heading">{APP_NAME}</div>
+            <div class="shell-subtext">{APP_LAST_UPDATED} · {APP_TAGLINE}</div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"""<div class="status-grid">
+            <div class="status-card"><div class="status-label">当前模式</div><div class="status-value">{mode_value}</div></div>
+            <div class="status-card"><div class="status-label">默认出图引擎</div><div class="status-value">{image_engine}</div></div>
+            <div class="status-card"><div class="status-label">系统中转站模型</div><div class="status-value">{relay_model}</div></div>
+            <div class="status-card"><div class="status-label">今日额度</div><div class="status-value">{usage_value}</div></div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+    notice = build_admin_mode_notice(
+        has_service_access=_has_system_service_access(),
+        team_ready=platform_auth_ready(),
+    )
+    render_notice_card(notice["title"], notice["body"], notice["level"])
+    catalog = build_feature_catalog()
+    cards = []
+    for item in catalog[1:]:
+        cards.append(
+            f"""<div class="dashboard-card"><div class="dashboard-icon">{item["emoji"]}</div><div class="dashboard-title">{item["title"]}</div><div class="dashboard-desc">{item["subtitle"]}</div></div>"""
+        )
+    st.markdown(
+        '<div class="dashboard-grid">' + "".join(cards) + "</div>",
         unsafe_allow_html=True,
     )
 
@@ -4764,8 +4844,12 @@ def show_login():
             '<div class="info-card"><strong>🎫 系统服务模式</strong></div>',
             unsafe_allow_html=True,
         )
+        notice = build_admin_mode_notice(
+            has_service_access=_has_system_service_access(),
+            team_ready=platform_auth_ready(),
+        )
+        render_notice_card(notice["title"], notice["body"], notice["level"])
         if platform_auth_ready():
-            st.success("✅ 团队注册用户体系已启用")
             render_registered_system_service_login(s)
         else:
             db_info = describe_platform_database_status(
@@ -4773,16 +4857,11 @@ def show_login():
                 auto_migrate=get_platform_settings().platform_auto_migrate,
                 has_service_access=_has_system_service_access(),
             )
-            level = db_info["level"]
-            if level == "error":
-                st.error(db_info["message"])
-            elif level == "info":
-                st.info(db_info["message"])
-            else:
-                st.warning(db_info["message"])
             if db_info.get("detail"):
                 st.caption(db_info["detail"])
-            st.caption("当前会临时回退到旧版系统服务登录。")
+            st.caption(
+                "当前默认使用管理员模式；如需注册用户、钱包和团队项目，再启用数据库。"
+            )
             render_legacy_system_service_login(s, allow_user_passwordless_login)
 
     with t3:
@@ -7440,14 +7519,24 @@ def show_admin():
 
 # ==================== 主应用 ====================
 def main_app():
+    feature_catalog = build_feature_catalog()
+    page_options = [item["nav"] for item in feature_catalog]
     with st.sidebar:
-        st.markdown(f"### 🍌 {APP_NAME}")
-        st.caption(APP_LAST_UPDATED)
-        st.caption(APP_TAGLINE)
+        st.markdown(
+            f"""<div class="sidebar-brand">
+            <div class="sidebar-kicker">TEMU Image System</div>
+            <div class="sidebar-title">{APP_NAME}</div>
+            <div class="sidebar-subtitle">{APP_LAST_UPDATED}<br>{APP_TAGLINE}</div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
         st.markdown("---")
+        st.markdown(
+            '<div class="sidebar-section-title">核心功能</div>', unsafe_allow_html=True
+        )
         page = st.radio(
             "功能",
-            ["1 批量出图", "2 快速出图", "3 标题优化", "4 图片翻译"],
+            page_options,
             label_visibility="collapsed",
         )
         st.markdown("---")
@@ -7459,13 +7548,24 @@ def main_app():
             _, used, limit = check_user_limit(uid)
             st.info(f"今日: {used}/{limit}")
 
+        st.markdown(
+            '<div class="sidebar-section-title">工作区状态</div>',
+            unsafe_allow_html=True,
+        )
         render_platform_workspace_sidebar()
 
         if st.session_state.use_own_key or st.session_state.is_admin:
             st.markdown("---")
+            st.markdown(
+                '<div class="sidebar-section-title">安全与规则</div>',
+                unsafe_allow_html=True,
+            )
             with st.expander("🛡️ 自定义合规词"):
                 show_user_compliance()
         st.markdown("---")
+        st.markdown(
+            '<div class="sidebar-section-title">系统引擎</div>', unsafe_allow_html=True
+        )
         render_relay_config_panel("sidebar", get_settings(), expanded=False)
 
         if st.session_state.is_admin:
@@ -7483,11 +7583,14 @@ def main_app():
                 del st.session_state[k]
             st.rerun()
 
-    if page == "1 批量出图":
+    if page == "工作台":
+        render_workspace_dashboard()
+        show_footer()
+    elif page == "批量出图":
         show_combo_page()
-    elif page == "2 快速出图":
+    elif page == "快速出图":
         show_smart_page()
-    elif page == "3 标题优化":
+    elif page == "标题优化":
         show_title_page()
     else:
         show_image_translate_page()
