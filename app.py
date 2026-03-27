@@ -53,6 +53,15 @@ from temu_core.provider_capabilities import (
     get_translation_provider_message,
     model_supports,
 )
+from temu_core.action_reasons import (
+    combo_analysis_reasons,
+    combo_generate_reasons,
+    combo_requirements_reasons,
+    smart_generate_reasons,
+    title_generate_reasons,
+    translate_generate_reasons,
+)
+from temu_core.config_ui import build_login_tab_labels, build_settings_sections
 from temu_core.relay_config import (
     has_system_service_access,
     resolve_relay_runtime_config,
@@ -96,6 +105,7 @@ from temu_core.ui_content import (
 APP_LAST_UPDATED = "最近更新 2026-03-26"
 APP_TAGLINE = "批量出图 · 快速出图 · 标题优化 · 图片翻译"
 APP_NAME = "TEMU AI Studio"
+BRAND_MARK_PATH = Path(__file__).parent / "assets" / "brand-mark.svg"
 
 DATA_DIR = Path("/app/data") if os.path.exists("/app/data") else Path("./data")
 DATA_DIR.mkdir(exist_ok=True)
@@ -3977,6 +3987,24 @@ def render_workspace_dashboard():
     )
 
 
+def render_brand_mark(center: bool = False, width: int = 72):
+    if not BRAND_MARK_PATH.exists():
+        return
+    if center:
+        c1, c2, c3 = st.columns([1, 1, 1])
+        with c2:
+            st.image(str(BRAND_MARK_PATH), width=width)
+    else:
+        st.image(str(BRAND_MARK_PATH), width=width)
+
+
+def render_action_reasons(title: str, reasons: list, success_note: str = ""):
+    if reasons:
+        render_notice_card(title, "<br>".join([f"- {r}" for r in reasons]), "warning")
+    elif success_note:
+        render_notice_card(title, success_note, "success")
+
+
 def render_section_frame(section: dict, index: int):
     st.markdown(
         f"""<div class="section-frame"><div class="section-eyebrow">Step {index}</div><div class="section-heading">{section.get("title", "")}</div><div class="section-caption">{section.get("desc", "")}</div></div>""",
@@ -4904,6 +4932,7 @@ def render_registered_system_service_login(s):
 
 # ==================== 登录页 ====================
 def show_login():
+    render_brand_mark(center=True, width=84)
     st.markdown(f'<div class="main-title">🍌 {APP_NAME}</div>', unsafe_allow_html=True)
     st.markdown(
         f'<p style="text-align:center;color:#64748b;margin-bottom:0.5rem">{APP_LAST_UPDATED}</p>'
@@ -4999,9 +5028,8 @@ def show_login():
                         st.success("已保存！")
                         st.rerun()
 
-    runtime_mode_tabs = ["🔐 我的凭据", "🎫 系统服务"]
-    if current_runtime_mode() == "team_mode":
-        runtime_mode_tabs.append("⚙️ 系统配置")
+    settings_sections = build_settings_sections()
+    runtime_mode_tabs = build_login_tab_labels(current_runtime_mode())
     tabs = st.tabs(runtime_mode_tabs)
     t1 = tabs[0]
     t2 = tabs[1]
@@ -5009,7 +5037,7 @@ def show_login():
 
     with t1:
         st.markdown(
-            '<div class="info-card"><strong>💡 我的凭据</strong><br><span style="font-size:13px;color:#64748b">你可以使用自己的 Gemini 官方 Key，或自己的中转站 URL / Key / 模型。</span></div>',
+            f'<div class="info-card"><strong>{settings_sections["personal"]["gemini"]["title"]}</strong><br><span style="font-size:13px;color:#64748b">{settings_sections["personal"]["gemini"]["desc"]}</span></div>',
             unsafe_allow_html=True,
         )
         key = st.text_input(
@@ -5084,6 +5112,10 @@ def show_login():
                 '<a href="https://aistudio.google.com/apikey" target="_blank" style="color:#6366f1;font-size:13px">🔗 获取 Gemini API Key →</a><br><span style="font-size:12px;color:#64748b">如果你选择中转站，登录后 1/2/3 会优先复用你自己的中转站配置。</span>',
                 unsafe_allow_html=True,
             )
+        st.markdown(
+            f'<div class="info-card"><strong>{settings_sections["personal"]["relay"]["title"]}</strong><br><span style="font-size:13px;color:#64748b">{settings_sections["personal"]["relay"]["desc"]}</span></div>',
+            unsafe_allow_html=True,
+        )
 
     with t2:
         st.markdown(
@@ -5104,7 +5136,7 @@ def show_login():
     if t3 is not None:
         with t3:
             st.markdown(
-                '<div class="info-card"><strong>⚙️ 系统配置入口</strong><br><span style="font-size:13px;color:#64748b">这里用于管理员统一配置系统级中转站，普通用户自己的凭据请在「我的凭据」中处理。</span></div>',
+                f'<div class="info-card"><strong>{settings_sections["system"]["relay"]["title"]}</strong><br><span style="font-size:13px;color:#64748b">{settings_sections["system"]["relay"]["desc"]}</span></div>',
                 unsafe_allow_html=True,
             )
             render_relay_config_panel("login", s, expanded=True)
@@ -5305,6 +5337,11 @@ def show_combo_page():
         st.info("下一步：点击「AI分析商品」后进入「选择类型」。")
 
         btn_disabled = not st.session_state.combo_images
+        render_action_reasons(
+            "分析前检查",
+            combo_analysis_reasons(len(st.session_state.combo_images)),
+            success_note="素材已齐全，可以开始商品分析。",
+        )
         if st.button(
             "🔍 AI分析商品",
             type="primary",
@@ -5382,6 +5419,15 @@ def show_combo_page():
                 st.caption("中转站默认按 1K 低并发出图。")
 
             can_generate = total_count > 0 and total_count <= MAX_TOTAL_IMAGES
+            render_action_reasons(
+                "图需生成前检查",
+                combo_requirements_reasons(
+                    has_anchor=bool(st.session_state.combo_anchor),
+                    total_count=total_count,
+                    max_total=MAX_TOTAL_IMAGES,
+                ),
+                success_note="类型选择已完成，可以生成图需文案。",
+            )
 
             if st.button(
                 "📝 AI生成图需文案",
@@ -5519,6 +5565,14 @@ def show_combo_page():
             ):
                 task_desc += " + **中英双语标题**"
             st.markdown(task_desc)
+            render_action_reasons(
+                "生成前检查",
+                combo_generate_reasons(
+                    req_count=len(reqs),
+                    generating=bool(st.session_state.combo_generating),
+                ),
+                success_note="图需文案已完成，可以开始批量出图。",
+            )
             if st.button("🚀 确认开始生成", type="primary", use_container_width=True):
                 st.session_state.combo_generating = True
                 st.rerun()
@@ -5873,6 +5927,13 @@ def show_smart_page():
         st.caption("中转站默认按 1K 低并发出图。")
 
     can_gen = images and name and total_count > 0
+    render_action_reasons(
+        "生成前检查",
+        smart_generate_reasons(
+            image_count=len(images), product_name=name, total_count=total_count
+        ),
+        success_note="素材、商品名称和类型已齐全，可以开始快速出图。",
+    )
 
     if st.button(
         "🚀 开始生成", type="primary", use_container_width=True, disabled=not can_gen
@@ -6213,6 +6274,16 @@ def show_title_page():
         can_generate = len(uploaded_images) > 0 or (
             product_info and len(product_info) >= 10
         )
+
+    render_action_reasons(
+        "标题生成前检查",
+        title_generate_reasons(
+            input_mode=input_mode,
+            product_info=product_info,
+            image_count=len(uploaded_images),
+        ),
+        success_note="输入条件已满足，可以生成标题。",
+    )
 
     if st.button(
         "🚀 生成中英双语标题",
@@ -6984,6 +7055,29 @@ def show_image_translate_page():
 
     can_run = bool(upload_items)
     start_label = "提交后台任务" if run_mode.startswith("后台") else "开始处理"
+    render_action_reasons(
+        "处理前检查",
+        translate_generate_reasons(
+            upload_count=len(upload_items),
+            need_text=need_text,
+            need_image=need_image,
+            provider=active_provider,
+            text_supported=(
+                True
+                if active_provider != "relay"
+                else model_supports("relay", text_model_key, "text_generation")
+            ),
+            image_supported=(
+                True
+                if active_provider != "relay"
+                else (
+                    model_key is not None
+                    and model_supports("relay", model_key, "image_translate")
+                )
+            ),
+        ),
+        success_note="当前 provider 支持所选任务，可以开始处理。",
+    )
     if st.button(
         start_label, type="primary", use_container_width=True, disabled=not can_run
     ):
@@ -7388,7 +7482,12 @@ def show_admin():
             st.success("✅ 已保存")
 
     with tabs[2]:
+        settings_sections = build_settings_sections()
         st.markdown("### 🔑 API Key管理")
+        st.markdown(
+            f'<div class="info-card"><strong>{settings_sections["system"]["gemini"]["title"]}</strong><br><span style="font-size:13px;color:#64748b">{settings_sections["system"]["gemini"]["desc"]}</span></div>',
+            unsafe_allow_html=True,
+        )
         if platform_database_enabled() and platform_encryption_available():
             st.success("系统 API Key 将加密保存在 PostgreSQL，不会以明文展示。")
         elif platform_database_enabled():
@@ -7452,6 +7551,10 @@ def show_admin():
 
         st.markdown("---")
         st.markdown("### 🛰️ 系统中转站配置")
+        st.markdown(
+            f'<div class="info-card"><strong>{settings_sections["system"]["relay"]["title"]}</strong><br><span style="font-size:13px;color:#64748b">{settings_sections["system"]["relay"]["desc"]}</span></div>',
+            unsafe_allow_html=True,
+        )
         relay_key_preview = (
             mask_api_key(s.get("relay_api_key", ""))
             if s.get("relay_api_key")
@@ -7756,6 +7859,7 @@ def main_app():
         if st.session_state.get("current_page") == "工作台":
             st.session_state.current_page = "批量出图"
     with st.sidebar:
+        render_brand_mark(width=58)
         st.markdown(
             f"""<div class="sidebar-brand">
             <div class="sidebar-kicker">TEMU Image System</div>
