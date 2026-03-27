@@ -95,6 +95,12 @@ from temu_core.title_logic import (
     generate_compliant_titles_or_raise,
     should_attempt_title_generation,
 )
+from temu_core.task_center import (
+    build_task_badge,
+    build_task_panel_title,
+    build_task_type_meta,
+    count_pending_tasks,
+)
 from temu_core.ui_content import (
     build_admin_mode_notice,
     build_feature_catalog,
@@ -3754,6 +3760,578 @@ def submit_image_translate_bg_task(
     return task_id
 
 
+def list_task_center_tasks(owner_id: str, task_type: str = ""):
+    with IMAGE_TRANSLATE_BG_LOCK:
+        tasks = [
+            {k: v for k, v in item.items() if k != "future"}
+            for item in IMAGE_TRANSLATE_BG_TASKS.values()
+            if item.get("owner_id") == owner_id
+            and (not task_type or item.get("task_type") == task_type)
+        ]
+    return sorted(tasks, key=lambda x: x.get("created_at", ""), reverse=True)
+
+
+def get_task_center_task(owner_id: str, task_id: str, task_type: str = ""):
+    with IMAGE_TRANSLATE_BG_LOCK:
+        task = IMAGE_TRANSLATE_BG_TASKS.get(task_id)
+        if not task or task.get("owner_id") != owner_id:
+            return None
+        if task_type and task.get("task_type") != task_type:
+            return None
+        return task
+
+
+def remove_task_center_task(owner_id: str, task_id: str):
+    with IMAGE_TRANSLATE_BG_LOCK:
+        task = IMAGE_TRANSLATE_BG_TASKS.get(task_id)
+        if not task or task.get("owner_id") != owner_id:
+            return False
+        if task.get("status") in ("queued", "running"):
+            return False
+        IMAGE_TRANSLATE_BG_TASKS.pop(task_id, None)
+        return True
+
+
+def execute_smart_generation_workload(payload: dict, progress_cb=None, log_cb=None):
+    image_provider = payload.get("image_provider", "Gemini")
+    gemini_api_key = payload.get("gemini_api_key", "")
+    runtime_relay_key = payload.get("relay_key", "")
+    runtime_relay_base = payload.get("relay_base", RELAY_API_BASE)
+    runtime_relay_model = payload.get("relay_model", "gemini-3.1-flash-image-preview")
+    images = payload.get("images", [])
+    name = payload.get("name", "")
+    material = payload.get("material", "")
+    selected_types = payload.get("selected_types", {})
+    total_count = int(payload.get("total_count") or 0)
+    aspect = payload.get("aspect", "1:1")
+    size = payload.get("size", "1K")
+    thinking_level = payload.get("thinking_level", "minimal")
+    enable_title = bool(payload.get("enable_title", False))
+    title_info = payload.get("title_info", "")
+    title_template = payload.get("title_template", "default")
+    templates = get_templates()["smart_types"]
+
+    gemini_image_client = (
+        GeminiClient(gemini_api_key, PRIMARY_IMAGE_MODEL)
+        if image_provider == "Gemini"
+        else None
+    )
+    relay_image_client = (
+        RelayImageClient(
+            runtime_relay_key,
+            runtime_relay_model,
+            base_url=runtime_relay_base or RELAY_API_BASE,
+        )
+        if image_provider == "中转站"
+        else None
+    )
+
+    def push_progress(done, total, phase):
+        if progress_cb:
+            progress_cb(done, total, phase)
+
+    def push_log(msg):
+        if log_cb:
+            log_cb(msg)
+
+    push_log("🤖 分析商品...")
+    anchor, anchor_tokens = build_smart_anchor(
+        image_provider,
+        gemini_api_key,
+        runtime_relay_key,
+        runtime_relay_base,
+        runtime_relay_model,
+        images,
+        name,
+        material or "",
+    )
+
+    results = []
+    errors = []
+    done = 0
+    title_error = ""
+    title_warnings = []
+    generation_tokens = anchor_tokens
+
+    for tk, cnt in selected_types.items():
+        info = templates[tk]
+        for idx in range(cnt):
+            done += 1
+            push_progress(done, total_count, f"生成 {info['name']}")
+            prompt = f"""Professional ecommerce product image.
+Product: {name}
+Material: {material or "not specified"}
+Style: {info["name"]}
+Features: {", ".join(anchor.get("visual_attrs", ["quality"]))}
+CRITICAL: ALL text MUST be ENGLISH only. NO Chinese characters.
+Aspect: {aspect}"""
+            try:
+                s = get_settings()
+                enforce_en = bool(s.get("enforce_english_text", True))
+                en_retries = int(s.get("english_text_max_retries", 2))
+                if image_provider == "Gemini":
+                    if gemini_image_client is None:
+                        raise Exception("当前未配置 Gemini API Key")
+                    img = gemini_image_client.generate_image(
+                        images,
+                        prompt,
+                        aspect,
+                        size,
+                        thinking_level,
+                        enforce_english=enforce_en,
+                        max_attempts=en_retries,
+                    )
+                    generation_tokens = gemini_image_client.get_tokens_used()
+                else:
+                    if relay_image_client is None:
+                        raise Exception("请先配置系统中转站 Key 或前台中转站 Key")
+                    img = relay_image_client.generate_image(
+                        images,
+                        prompt,
+                        aspect,
+                        size,
+                        thinking_level,
+                        enforce_english=enforce_en,
+                        max_attempts=1,
+                    )
+                    generation_tokens += relay_image_client.get_tokens_used()
+                    if img is None:
+                        raise Exception(
+                            relay_image_client.get_last_error() or "中转站返回空图片"
+                        )
+                if img:
+                    filename = f"{str(done).zfill(2)}_{info['name']}.png"
+                    label = f"{info['icon']} {info['name']}"
+                    results.append({"image": img, "filename": filename, "label": label})
+                else:
+                    error_msg = (
+                        gemini_image_client.get_last_error()
+                        if gemini_image_client is not None
+                        else relay_image_client.get_last_error()
+                        if relay_image_client is not None
+                        else "返回空图片"
+                    ) or "返回空图片"
+                    errors.append(f"{info['icon']} {info['name']}: {error_msg}")
+            except Exception as e:
+                errors.append(
+                    f"{info['icon']} {info['name']}: {format_runtime_error_message(e, 220)}"
+                )
+
+    generated_titles = []
+    title_tokens = 0
+    if should_attempt_title_generation(enable_title, images, title_info):
+        try:
+            title_templates_data = get_title_templates()
+            template_prompt = title_templates_data.get(title_template, {}).get(
+                "prompt", DEFAULT_TITLE_TEMPLATES["default"]["prompt"]
+            )
+            title_client = build_text_generation_client(
+                image_provider,
+                gemini_api_key,
+                runtime_relay_key,
+                runtime_relay_base,
+                runtime_relay_model,
+                model=TITLE_TEXT_MODEL,
+            )
+            generated_titles, title_warnings = generate_compliant_titles_or_raise(
+                title_client,
+                images,
+                title_info,
+                template_prompt,
+                compliance_checker=check_compliance,
+                compliance_mode=payload.get("compliance_mode", "strict"),
+            )
+            title_tokens = title_client.get_tokens_used()
+        except Exception as e:
+            title_error = format_runtime_error_message(str(e), 220)
+
+    tokens_used = generation_tokens + title_tokens
+    return {
+        "results": results,
+        "errors": errors,
+        "titles": generated_titles,
+        "title_error": title_error,
+        "title_warnings": title_warnings,
+        "tokens_used": tokens_used,
+        "total_count": total_count,
+    }
+
+
+def execute_combo_generation_workload(payload: dict, progress_cb=None, log_cb=None):
+    image_provider = payload.get("image_provider", "Gemini")
+    gemini_api_key = payload.get("gemini_api_key", "")
+    runtime_relay_key = payload.get("relay_key", "")
+    runtime_relay_base = payload.get("relay_base", RELAY_API_BASE)
+    runtime_relay_model = payload.get("relay_model", "gemini-3.1-flash-image-preview")
+    reqs = payload.get("reqs", [])
+    anchor = payload.get("anchor", {})
+    refs = payload.get("refs", [])
+    aspect = payload.get("aspect", "1:1")
+    size = payload.get("size", "1K")
+    thinking_level = payload.get("thinking_level", "minimal")
+    enable_title = bool(payload.get("enable_title", False))
+    title_info = payload.get("title_info", "")
+    title_template = payload.get("title_template", "default")
+    templates = get_templates()["combo_types"]
+
+    gemini_image_client = (
+        GeminiClient(gemini_api_key, PRIMARY_IMAGE_MODEL)
+        if image_provider == "Gemini"
+        else None
+    )
+    relay_image_client = (
+        RelayImageClient(
+            runtime_relay_key,
+            runtime_relay_model,
+            base_url=runtime_relay_base or RELAY_API_BASE,
+        )
+        if image_provider == "中转站"
+        else None
+    )
+    results = []
+    errors = []
+    title_error = ""
+    title_warnings = []
+    generation_tokens = 0
+
+    for i, r in enumerate(reqs):
+        type_key = r.get("type_key", "img")
+        type_name = r.get("type_name", f"图片{i + 1}")
+        type_info = templates.get(type_key, {})
+        type_icon = type_info.get("icon", "📷")
+        if progress_cb:
+            progress_cb(i + 1, len(reqs), f"生成 {type_name}")
+        try:
+            prompt = compose_combo_image_prompt(anchor, r, aspect)
+            s = get_settings()
+            enforce_en = bool(s.get("enforce_english_text", True))
+            en_retries = int(s.get("english_text_max_retries", 2))
+            if image_provider == "Gemini":
+                if gemini_image_client is None:
+                    raise Exception("当前未配置 Gemini API Key")
+                img = gemini_image_client.generate_image(
+                    refs,
+                    prompt,
+                    aspect,
+                    size,
+                    thinking_level,
+                    enforce_english=enforce_en,
+                    max_attempts=en_retries,
+                )
+                generation_tokens = gemini_image_client.get_tokens_used()
+            else:
+                if relay_image_client is None:
+                    raise Exception("请先配置系统中转站 Key 或前台中转站 Key")
+                img = relay_image_client.generate_image(
+                    refs,
+                    prompt,
+                    aspect,
+                    size,
+                    thinking_level,
+                    enforce_english=enforce_en,
+                    max_attempts=1,
+                )
+                generation_tokens += relay_image_client.get_tokens_used()
+                if img is None:
+                    raise Exception(
+                        relay_image_client.get_last_error() or "中转站返回空图片"
+                    )
+            if img:
+                filename = f"{str(i + 1).zfill(2)}_{type_name}.png"
+                label = f"{type_icon} {type_name}"
+                results.append({"image": img, "filename": filename, "label": label})
+            else:
+                error_msg = (
+                    gemini_image_client.get_last_error()
+                    if gemini_image_client is not None
+                    else relay_image_client.get_last_error()
+                    if relay_image_client is not None
+                    else "返回空图片"
+                ) or "返回空图片"
+                errors.append(f"{type_icon} {type_name}: {error_msg}")
+        except Exception as e:
+            errors.append(
+                f"{type_icon} {type_name}: {format_runtime_error_message(e, 220)}"
+            )
+
+    generated_titles = []
+    title_tokens = 0
+    if should_attempt_title_generation(enable_title, refs, title_info):
+        try:
+            title_templates = get_title_templates()
+            template_prompt = title_templates.get(title_template, {}).get(
+                "prompt", DEFAULT_TITLE_TEMPLATES["default"]["prompt"]
+            )
+            title_client = build_text_generation_client(
+                image_provider,
+                gemini_api_key,
+                runtime_relay_key,
+                runtime_relay_base,
+                runtime_relay_model,
+                model=TITLE_TEXT_MODEL,
+            )
+            generated_titles, title_warnings = generate_compliant_titles_or_raise(
+                title_client,
+                refs,
+                title_info,
+                template_prompt,
+                compliance_checker=check_compliance,
+                compliance_mode=payload.get("compliance_mode", "strict"),
+            )
+            title_tokens = title_client.get_tokens_used()
+        except Exception as e:
+            title_error = format_runtime_error_message(str(e), 220)
+
+    tokens_used = generation_tokens + title_tokens
+    return {
+        "results": results,
+        "errors": errors,
+        "titles": generated_titles,
+        "title_error": title_error,
+        "title_warnings": title_warnings,
+        "tokens_used": tokens_used,
+        "total_count": len(reqs),
+    }
+
+
+def _run_task_center_task(task_id: str, payload: dict):
+    _update_bg_task(task_id, status="running", message="处理中")
+    task_type = payload.get("task_type", "")
+    owner_id = payload.get("owner_id", "")
+    try:
+        if task_type == "image_translate":
+            total = len(payload.get("upload_items") or [])
+            _update_bg_task(task_id, done=0, total=total)
+
+            def progress(done, task_total, phase):
+                _update_bg_task(
+                    task_id,
+                    done=done,
+                    total=task_total,
+                    message=format_translate_status(done, task_total, phase),
+                )
+
+            def log(msg):
+                _update_bg_task(task_id, message=msg)
+
+            results, errors, tokens_used = execute_image_translate_workload(
+                payload.get("api_key"),
+                payload.get("upload_items", []),
+                payload.get("options", {}),
+                progress_cb=progress,
+                log_cb=log,
+            )
+            result_payload = {
+                "results": results,
+                "errors": errors,
+                "tokens_used": tokens_used,
+                "source_items": payload.get("upload_items", []),
+                "last_options": payload.get("last_options", {}),
+            }
+            record_platform_usage_event_safe(
+                feature="image_translate",
+                provider="中转站"
+                if str((payload.get("options") or {}).get("provider") or "").lower()
+                == "relay"
+                else "Gemini",
+                model=str(
+                    (payload.get("options") or {}).get("model_key")
+                    or PRIMARY_IMAGE_MODEL
+                ),
+                request_count=total,
+                output_images=count_generated_images(results),
+                tokens_used=tokens_used,
+                charge_source="system_pool"
+                if payload.get("charge_usage")
+                else "own_key",
+                actor_label=str(owner_id or "background-job"),
+                operation_key=f"bg-image-translate:{task_id}",
+                metadata_json={"mode": "background", "errors": len(errors)},
+            )
+        elif task_type == "smart_generation":
+            result_payload = execute_smart_generation_workload(payload)
+            total = result_payload.get("total_count", 0)
+            results = result_payload.get("results", [])
+            errors = result_payload.get("errors", [])
+            tokens_used = result_payload.get("tokens_used", 0)
+            record_platform_usage_event_safe(
+                feature="smart_image_generation",
+                provider=payload.get("image_provider", "Gemini"),
+                model=payload.get("relay_model")
+                if payload.get("image_provider") == "中转站"
+                else PRIMARY_IMAGE_MODEL,
+                request_count=total,
+                output_images=len(results),
+                tokens_used=tokens_used,
+                charge_source="own_key"
+                if payload.get("use_own_key")
+                else "system_pool",
+                actor_label=str(owner_id or "background-job"),
+                operation_key=f"bg-smart-generation:{task_id}",
+                metadata_json={
+                    "mode": "background",
+                    "errors": len(errors),
+                    "titles_generated": len(result_payload.get("titles", [])),
+                },
+            )
+        elif task_type == "combo_generation":
+            result_payload = execute_combo_generation_workload(payload)
+            total = result_payload.get("total_count", 0)
+            results = result_payload.get("results", [])
+            errors = result_payload.get("errors", [])
+            tokens_used = result_payload.get("tokens_used", 0)
+            record_platform_usage_event_safe(
+                feature="combo_image_generation",
+                provider=payload.get("image_provider", "Gemini"),
+                model=payload.get("relay_model")
+                if payload.get("image_provider") == "中转站"
+                else PRIMARY_IMAGE_MODEL,
+                request_count=total,
+                output_images=len(results),
+                tokens_used=tokens_used,
+                charge_source="own_key"
+                if payload.get("use_own_key")
+                else "system_pool",
+                actor_label=str(owner_id or "background-job"),
+                operation_key=f"bg-combo-generation:{task_id}",
+                metadata_json={
+                    "mode": "background",
+                    "errors": len(errors),
+                    "titles_generated": len(result_payload.get("titles", [])),
+                },
+            )
+        else:
+            raise Exception(f"unsupported task type: {task_type}")
+
+        _update_bg_task(
+            task_id,
+            status="completed",
+            done=total,
+            total=total,
+            message=f"✅ 完成 {max(0, len(results) - len(errors))}/{max(total, len(results))}",
+            result=result_payload,
+            error="",
+        )
+    except Exception as e:
+        _update_bg_task(
+            task_id,
+            status="failed",
+            message="❌ 任务失败",
+            error=format_runtime_error_message(e, 220),
+        )
+
+
+def submit_task_center_task(
+    owner_id: str, task_type: str, payload: dict, max_concurrent: int = 2
+):
+    max_concurrent = max(1, min(6, int(max_concurrent or 2)))
+    with IMAGE_TRANSLATE_BG_LOCK:
+        active_count = sum(
+            1
+            for t in IMAGE_TRANSLATE_BG_TASKS.values()
+            if t.get("owner_id") == owner_id
+            and t.get("status") in ("queued", "running")
+        )
+        if active_count >= max_concurrent:
+            raise ValueError(
+                f"后台并发上限为 {max_concurrent}，请等待已有任务完成后再提交。"
+            )
+        executor = _ensure_image_translate_bg_executor(max_concurrent)
+        task_id = hashlib.md5(
+            f"{time.time()}_{random.random()}_{owner_id}_{task_type}".encode()
+        ).hexdigest()[:12]
+        meta = build_task_type_meta(task_type)
+        task = {
+            "id": task_id,
+            "task_type": task_type,
+            "owner_id": owner_id,
+            "status": "queued",
+            "message": "等待执行",
+            "done": 0,
+            "total": int(payload.get("total") or 0),
+            "result": None,
+            "error": "",
+            "created_at": _bg_now(),
+            "updated_at": _bg_now(),
+            "restore_page": meta.get("page", "工作台"),
+        }
+        IMAGE_TRANSLATE_BG_TASKS[task_id] = task
+        _prune_bg_tasks_locked()
+        wrapped_payload = dict(payload)
+        wrapped_payload["task_type"] = task_type
+        wrapped_payload["owner_id"] = owner_id
+        fut = executor.submit(_run_task_center_task, task_id, wrapped_payload)
+        task["future"] = fut
+    return task_id
+
+
+def restore_task_center_result(task: dict):
+    task_type = task.get("task_type")
+    result_data = task.get("result") or {}
+    if task_type == "image_translate":
+        st.session_state.img_trans_results = result_data.get("results", [])
+        st.session_state.img_trans_errors = result_data.get("errors", [])
+        st.session_state.img_trans_tokens_used = result_data.get("tokens_used", 0)
+        st.session_state.img_trans_source_items = result_data.get("source_items", [])
+        st.session_state.img_trans_last_options = result_data.get("last_options", {})
+        st.session_state.img_trans_done = True
+        st.session_state.current_page = "图片翻译"
+    elif task_type == "smart_generation":
+        st.session_state.smart_results = result_data.get("results", [])
+        st.session_state.smart_errors = result_data.get("errors", [])
+        st.session_state.smart_titles = result_data.get("titles", [])
+        st.session_state.smart_title_error = result_data.get("title_error", "")
+        st.session_state.smart_title_warnings = result_data.get("title_warnings", [])
+        st.session_state.smart_tokens_used = result_data.get("tokens_used", 0)
+        st.session_state.smart_generation_done = True
+        st.session_state.smart_generating = False
+        st.session_state.current_page = "快速出图"
+    elif task_type == "combo_generation":
+        st.session_state.combo_results = result_data.get("results", [])
+        st.session_state.combo_errors = result_data.get("errors", [])
+        st.session_state.combo_titles = result_data.get("titles", [])
+        st.session_state.combo_title_error = result_data.get("title_error", "")
+        st.session_state.combo_title_warnings = result_data.get("title_warnings", [])
+        st.session_state.combo_tokens_used = result_data.get("tokens_used", 0)
+        st.session_state.combo_generation_done = True
+        st.session_state.combo_generating = False
+        st.session_state.current_page = "批量出图"
+
+
+def render_task_center_panel(owner_id: str):
+    tasks = list_task_center_tasks(owner_id)
+    if not tasks:
+        return
+    with st.expander(build_task_panel_title(len(tasks)), expanded=False):
+        for task in tasks[:12]:
+            meta = build_task_type_meta(task.get("task_type", ""))
+            c1, c2, c3 = st.columns([3, 1, 1])
+            with c1:
+                st.markdown(
+                    f"**{meta.get('icon', '●')} {meta.get('title', '任务')}** · {task.get('status', 'unknown')}"
+                )
+                st.caption(task.get("message", ""))
+            with c2:
+                if st.button(
+                    "查看",
+                    key=f"task_view_{task['id']}",
+                    use_container_width=True,
+                ):
+                    full_task = get_task_center_task(owner_id, task["id"])
+                    if full_task:
+                        restore_task_center_result(full_task)
+                        st.rerun()
+            with c3:
+                if task.get("status") not in ("queued", "running"):
+                    if st.button(
+                        "删除",
+                        key=f"task_del_{task['id']}",
+                        use_container_width=True,
+                    ):
+                        remove_task_center_task(owner_id, task["id"])
+                        st.rerun()
+
+
 def normalize_requirements(reqs, types_counts, templates):
     """确保图需数量与用户选择一致，避免只生成8张"""
     if not types_counts:
@@ -4055,7 +4633,7 @@ def render_page_toolbar(
     current_page: str, restart_key: str, restart_label: str = "重新开始当前任务"
 ):
     targets = build_page_switch_targets(current_page)
-    badge = build_task_indicator(len(list_image_translate_bg_tasks(get_user_id())))
+    badge = build_task_badge(count_pending_tasks(list_task_center_tasks(get_user_id())))
     cols = st.columns(len(targets) + 2 if badge["show"] else len(targets) + 1)
     for idx, item in enumerate(targets):
         with cols[idx]:
@@ -4074,7 +4652,8 @@ def render_page_toolbar(
                 key=f"task_badge_{current_page}",
                 use_container_width=True,
             ):
-                set_current_page("图片翻译")
+                st.session_state.show_task_center = True
+                st.rerun()
     with cols[action_col_index]:
         return st.button(restart_label, key=restart_key, use_container_width=True)
 
@@ -4280,6 +4859,7 @@ def init_session():
         "platform_context_error": "",
         "platform_project_options": [],
         "current_page": "工作台",
+        "show_task_center": False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -4316,6 +4896,7 @@ def reset_working_session():
         "platform_context_error",
         "platform_project_options",
         "current_page",
+        "show_task_center",
     }
     for k in list(st.session_state.keys()):
         if k not in keep_keys:
@@ -5731,6 +6312,16 @@ def show_combo_page():
             ):
                 task_desc += " + **中英双语标题**"
             st.markdown(task_desc)
+            combo_run_mode = st.radio(
+                "执行方式",
+                ["前台处理（当前页等待）", "后台排队（可并发）"],
+                index=0,
+                horizontal=True,
+                key="combo_run_mode",
+            )
+            st.caption(
+                f"当前后台并发上限：{int(s.get('translate_bg_max_concurrent', 2))}（提交后台后可切换到其他功能继续操作）"
+            )
             render_action_reasons(
                 "生成前检查",
                 combo_generate_reasons(
@@ -5739,7 +6330,67 @@ def show_combo_page():
                 ),
                 success_note="图需文案已完成，可以开始批量出图。",
             )
-            if st.button("🚀 确认开始生成", type="primary", use_container_width=True):
+            if st.button(
+                "提交后台任务"
+                if combo_run_mode.startswith("后台")
+                else "🚀 确认开始生成",
+                type="primary",
+                use_container_width=True,
+            ):
+                if combo_run_mode.startswith("后台"):
+                    runtime_relay_key, runtime_relay_base, runtime_relay_model = (
+                        resolve_relay_runtime_config(
+                            s,
+                            relay_key,
+                            relay_base,
+                            relay_model,
+                        )
+                    )
+                    try:
+                        task_id = submit_task_center_task(
+                            owner_id=get_user_id(),
+                            task_type="combo_generation",
+                            payload={
+                                "image_provider": image_provider,
+                                "gemini_api_key": gemini_api_key,
+                                "relay_key": runtime_relay_key,
+                                "relay_base": runtime_relay_base,
+                                "relay_model": runtime_relay_model,
+                                "reqs": reqs,
+                                "anchor": st.session_state.combo_anchor,
+                                "refs": st.session_state.combo_images,
+                                "aspect": st.session_state.get("combo_aspect", "1:1"),
+                                "size": st.session_state.get("combo_size", "1K"),
+                                "thinking_level": st.session_state.get(
+                                    "combo_thinking_level", "minimal"
+                                ),
+                                "enable_title": bool(
+                                    st.session_state.get("combo_enable_title", False)
+                                ),
+                                "title_info": st.session_state.get(
+                                    "combo_title_info", ""
+                                ),
+                                "title_template": st.session_state.get(
+                                    "combo_title_template", "default"
+                                ),
+                                "compliance_mode": st.session_state.get(
+                                    "user_compliance_mode", "strict"
+                                ),
+                                "use_own_key": bool(
+                                    st.session_state.get("use_own_key")
+                                ),
+                                "total": len(reqs),
+                            },
+                            max_concurrent=int(s.get("translate_bg_max_concurrent", 2)),
+                        )
+                        st.success(f"✅ 已提交后台任务：{task_id}")
+                        st.info(
+                            "你可以切换到其他功能继续操作，稍后在任务中心查看结果。"
+                        )
+                        return
+                    except Exception as e:
+                        st.error(format_runtime_error_message(e, 220))
+                        return
                 st.session_state.combo_generating = True
                 st.rerun()
         else:
@@ -6093,8 +6744,22 @@ def show_smart_page():
         success_note="素材、商品名称和类型已齐全，可以开始快速出图。",
     )
 
+    smart_run_mode = st.radio(
+        "执行方式",
+        ["前台处理（当前页等待）", "后台排队（可并发）"],
+        index=0,
+        horizontal=True,
+        key="smart_run_mode",
+    )
+    st.caption(
+        f"当前后台并发上限：{int(s.get('translate_bg_max_concurrent', 2))}（提交后台后可切换到其他功能继续操作）"
+    )
+
     if st.button(
-        "🚀 开始生成", type="primary", use_container_width=True, disabled=not can_gen
+        "提交后台任务" if smart_run_mode.startswith("后台") else "🚀 开始生成",
+        type="primary",
+        use_container_width=True,
+        disabled=not can_gen,
     ):
         runtime_relay_key, runtime_relay_base, runtime_relay_model = (
             resolve_relay_runtime_config(
@@ -6104,6 +6769,42 @@ def show_smart_page():
                 relay_model,
             )
         )
+        if smart_run_mode.startswith("后台"):
+            try:
+                task_id = submit_task_center_task(
+                    owner_id=get_user_id(),
+                    task_type="smart_generation",
+                    payload={
+                        "image_provider": image_provider,
+                        "gemini_api_key": gemini_api_key,
+                        "relay_key": runtime_relay_key,
+                        "relay_base": runtime_relay_base,
+                        "relay_model": runtime_relay_model,
+                        "images": images,
+                        "name": name,
+                        "material": material,
+                        "selected_types": selected_types,
+                        "total_count": total_count,
+                        "aspect": aspect,
+                        "size": size,
+                        "thinking_level": thinking_level,
+                        "enable_title": enable_title,
+                        "title_info": title_info,
+                        "title_template": title_template,
+                        "compliance_mode": st.session_state.get(
+                            "user_compliance_mode", "strict"
+                        ),
+                        "use_own_key": bool(st.session_state.get("use_own_key")),
+                        "total": total_count,
+                    },
+                    max_concurrent=int(s.get("translate_bg_max_concurrent", 2)),
+                )
+                st.success(f"✅ 已提交后台任务：{task_id}")
+                st.info("你可以切换到其他功能继续操作，稍后在任务中心查看结果。")
+                return
+            except Exception as e:
+                st.error(format_runtime_error_message(e, 220))
+                return
         gemini_image_client = (
             GeminiClient(gemini_api_key, model) if image_provider == "Gemini" else None
         )
@@ -6581,7 +7282,7 @@ def show_image_translate_page():
     max_file_mb = float(s.get("translate_max_file_mb", 7))
     uid = get_user_id()
 
-    bg_tasks = list_image_translate_bg_tasks(uid)
+    bg_tasks = list_task_center_tasks(uid, task_type="image_translate")
     if bg_tasks:
         st.markdown("### 🧵 后台任务")
         c_refresh, c_hint = st.columns([1, 3])
@@ -6617,29 +7318,16 @@ def show_image_translate_page():
             with c3:
                 if task_status == "completed":
                     if st.button("加载结果", key=f"img_trans_bg_load_{task_id}"):
-                        result_data = task.get("result") or {}
-                        st.session_state.img_trans_results = result_data.get(
-                            "results", []
+                        full_task = get_task_center_task(
+                            uid, task_id, task_type="image_translate"
                         )
-                        st.session_state.img_trans_errors = result_data.get(
-                            "errors", []
-                        )
-                        st.session_state.img_trans_tokens_used = result_data.get(
-                            "tokens_used", 0
-                        )
-                        st.session_state.img_trans_done = True
-                        st.session_state.img_trans_zip_cache = {"key": "", "bytes": b""}
-                        st.session_state.img_trans_source_items = result_data.get(
-                            "source_items", []
-                        )
-                        st.session_state.img_trans_last_options = result_data.get(
-                            "last_options", {}
-                        )
+                        if full_task:
+                            restore_task_center_result(full_task)
                         st.rerun()
             with c4:
                 if task_status in ("completed", "failed"):
                     if st.button("删除", key=f"img_trans_bg_del_{task_id}"):
-                        remove_image_translate_bg_task(uid, task_id)
+                        remove_task_center_task(uid, task_id)
                         st.rerun()
 
     # 已完成结果展示
@@ -7285,15 +7973,17 @@ def show_image_translate_page():
 
         if run_mode.startswith("后台"):
             try:
-                bg_task_id = submit_image_translate_bg_task(
-                    uid,
-                    {
+                bg_task_id = submit_task_center_task(
+                    owner_id=uid,
+                    task_type="image_translate",
+                    payload={
                         "owner_id": uid,
                         "api_key": api_key,
                         "upload_items": upload_items,
                         "options": job_options,
                         "last_options": last_options,
                         "charge_usage": not st.session_state.use_own_key,
+                        "total": len(upload_items),
                     },
                     max_concurrent=int(s.get("translate_bg_max_concurrent", 2)),
                 )
@@ -8058,18 +8748,21 @@ def main_app():
             st.caption("管理员工具模式")
             st.caption("核心功能可直接使用，团队功能已隐藏")
 
-        bg_tasks = list_image_translate_bg_tasks(get_user_id())
+        bg_tasks = list_task_center_tasks(get_user_id())
         if bg_tasks:
             st.markdown("---")
             st.markdown(
                 '<div class="sidebar-section-title">后台任务</div>',
                 unsafe_allow_html=True,
             )
-            st.caption(f"当前有 {len(bg_tasks)} 个图片翻译后台任务")
+            st.caption(
+                f"当前共有 {len(bg_tasks)} 个任务，其中 {count_pending_tasks(bg_tasks)} 个正在排队/执行"
+            )
             if st.button(
-                "打开图片翻译", key="nav_bg_translate", use_container_width=True
+                "打开任务中心", key="nav_bg_translate", use_container_width=True
             ):
-                set_current_page("图片翻译")
+                st.session_state.show_task_center = True
+                st.rerun()
 
         if st.session_state.use_own_key or st.session_state.is_admin:
             st.markdown("---")
@@ -8111,6 +8804,21 @@ def main_app():
             for k in list(st.session_state.keys()):
                 del st.session_state[k]
             st.rerun()
+
+    owner_id = get_user_id()
+    task_center_tasks = list_task_center_tasks(owner_id)
+    task_badge = build_task_badge(count_pending_tasks(task_center_tasks))
+    header_cols = st.columns([8, 2])
+    with header_cols[1]:
+        if task_badge["show"]:
+            if st.button(
+                task_badge["label"], key="global_task_badge", use_container_width=True
+            ):
+                st.session_state.show_task_center = not st.session_state.get(
+                    "show_task_center", False
+                )
+    if st.session_state.get("show_task_center"):
+        render_task_center_panel(owner_id)
 
     if page == "工作台":
         render_workspace_dashboard()
