@@ -44,6 +44,7 @@ from temu_core.auth import (
 from temu_core.bootstrap import bootstrap_platform_runtime
 from temu_core.billing import charge_usage_to_wallet, get_wallet_dashboard
 from temu_core.credential_resolver import resolve_runtime_credentials
+from temu_core.credential_resolver import select_translation_gemini_key
 from temu_core.db import get_database_status, session_scope
 from temu_core.models import EXPECTED_TABLES, User
 from temu_core.platform_status import describe_platform_database_status
@@ -6258,13 +6259,16 @@ def show_image_translate_page():
     )
     render_translation_tips()
 
-    api_key = (
-        st.session_state.own_api_key
-        if st.session_state.use_own_key
-        else get_next_api_key()
+    api_key = select_translation_gemini_key(
+        use_own_credentials=bool(st.session_state.get("use_own_key")),
+        own_provider=st.session_state.get("own_provider", "gemini"),
+        own_gemini_key=st.session_state.get("own_api_key", ""),
+        system_gemini_key=peek_system_api_key(),
     )
     if not api_key:
-        st.error("⚠️ 无可用的API Key")
+        st.warning(
+            "⚠️ 图片翻译当前仍需要 Gemini 官方 Key。若你正在使用中转站，请在系统配置或我的凭据中补充 Gemini Key。"
+        )
         return
     s = get_settings()
     allowed_formats = parse_allowed_formats(

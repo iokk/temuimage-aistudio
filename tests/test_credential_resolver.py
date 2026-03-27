@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import unittest
 
-from temu_core.credential_resolver import resolve_runtime_credentials
+from temu_core.credential_resolver import (
+    resolve_runtime_credentials,
+    select_translation_gemini_key,
+)
 
 
 class CredentialResolverTest(unittest.TestCase):
@@ -59,6 +62,24 @@ class CredentialResolverTest(unittest.TestCase):
         self.assertEqual(result["provider"], "gemini")
         self.assertEqual(result["scope"], "user")
         self.assertEqual(result["api_key"], "AIzaUser")
+
+    def test_translation_prefers_system_gemini_when_personal_provider_is_relay(self):
+        key = select_translation_gemini_key(
+            use_own_credentials=True,
+            own_provider="relay",
+            own_gemini_key="",
+            system_gemini_key="AIzaSystem",
+        )
+        self.assertEqual(key, "AIzaSystem")
+
+    def test_translation_prefers_personal_gemini_when_available(self):
+        key = select_translation_gemini_key(
+            use_own_credentials=True,
+            own_provider="gemini",
+            own_gemini_key="AIzaUser",
+            system_gemini_key="AIzaSystem",
+        )
+        self.assertEqual(key, "AIzaUser")
 
 
 if __name__ == "__main__":

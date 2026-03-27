@@ -52,3 +52,14 @@ def resolve_runtime_credentials(
         "base_url": "",
         "model": "",
     }
+
+
+def select_translation_gemini_key(
+    use_own_credentials: bool,
+    own_provider: str,
+    own_gemini_key: str,
+    system_gemini_key: str,
+) -> str:
+    if use_own_credentials and _clean(own_provider).lower() == "gemini":
+        return _clean(own_gemini_key)
+    return _clean(system_gemini_key)
