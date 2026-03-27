@@ -38,7 +38,7 @@ def validate_relay_models(
                 f"当前模型 `{target_model}` 不支持{CAPABILITY_LABELS.get(capability, capability)}"
             )
             continue
-        ok, msg = probe_func(relay_base, relay_key, target_model)
+        ok, msg = probe_func(relay_base, relay_key, target_model, capability)
         if not ok:
             reasons.append(f"当前模型 `{target_model}` 通道不可用：{msg}")
     seen = []

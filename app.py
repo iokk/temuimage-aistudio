@@ -152,10 +152,10 @@ MAX_TITLE_INFO_CHARS = 1000
 MIN_TITLE_EN_CHARS = 180
 MAX_TITLE_EN_CHARS = 250
 
-# ==================== Gemini 3 模型配置 ====================
+# ==================== 图像模型配置 ====================
 MODELS = {
     "gemini-2.5-flash-image": {
-        "name": "🍌 Nano Banana 2",
+        "name": "Gemini 2.5 Flash Image",
         "resolutions": ["1K"],
         "max_refs": 5,
         "thinking_levels": ["minimal", "high"],
@@ -861,7 +861,7 @@ def get_settings():
         s["daily_limit_user"] = max(int(s.get("daily_limit_user", 100)), 100)
     except Exception:
         s["daily_limit_user"] = 100
-    # 全局锁定出图模型为 Nano Banana 2
+    # 当前默认 Gemini 出图模型
     s["default_model"] = PRIMARY_IMAGE_MODEL
     s["translate_default_model"] = PRIMARY_IMAGE_MODEL
     s["translate_text_model"] = PRIMARY_IMAGE_MODEL
@@ -1865,7 +1865,7 @@ def format_runtime_error_message(error, max_len=220):
 
 # ==================== AI 客户端 ====================
 class GeminiClient:
-    """Gemini Image 客户端（当前锁定 Nano Banana 2）"""
+    """Gemini image client for the default official image workflow."""
 
     def __init__(self, api_key, model=PRIMARY_IMAGE_MODEL, timeout_ms: int = 180000):
         self.api_key = api_key
@@ -2926,6 +2926,52 @@ def probe_relay_api_cached(base_url: str, api_key: str, model: str = ""):
     return result
 
 
+def probe_relay_route_cached(
+    base_url: str, api_key: str, model: str = "", capability: str = "text_generation"
+):
+    cache_key = (
+        "route",
+        str(base_url or RELAY_API_BASE).rstrip("/"),
+        hashlib.md5(str(api_key or "").encode()).hexdigest()[:12],
+        str(model or ""),
+        str(capability or ""),
+    )
+    if cache_key in RELAY_PROBE_CACHE:
+        return RELAY_PROBE_CACHE[cache_key]
+
+    ok, msg = probe_relay_api(base_url, api_key, model)
+    if not ok:
+        RELAY_PROBE_CACHE[cache_key] = (ok, msg)
+        return ok, msg
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    prompt = "Health check. Reply with OK."
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+        "temperature": 0.0,
+        "max_tokens": 8,
+    }
+    try:
+        response = requests.post(
+            f"{str(base_url or RELAY_API_BASE).rstrip('/')}/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=25,
+        )
+        if response.status_code >= 400:
+            result = (False, format_runtime_error_message(response.text, 200))
+        else:
+            result = (True, "ok")
+    except Exception as e:
+        result = (False, format_runtime_error_message(e, 200))
+    RELAY_PROBE_CACHE[cache_key] = result
+    return result
+
+
 def ensure_provider_route_ready(
     provider: str,
     relay_base: str,
@@ -2941,7 +2987,7 @@ def ensure_provider_route_ready(
         image_model=image_model,
         analysis_model=analysis_model,
         required_capabilities=required_capabilities,
-        probe_func=probe_relay_api_cached,
+        probe_func=probe_relay_route_cached,
     )
     if reasons:
         raise Exception("；".join(reasons))
@@ -4967,7 +5013,7 @@ def render_reference_tips():
             <li>优先选择 <b>代表性</b> 图片：白底主图、带文字卖点图、场景/细节图、尺寸/标签图</li>
             <li>避免重复角度/水印/拼图/过度美化，文字尽量清晰无遮挡</li>
             <li>数量建议：每次 2-5 张参考图（过多会增加失败率和延迟）</li>
-            <li>当前全局固定使用 Nano Banana 2 出图</li>
+            <li>当前默认官方出图模型为 Gemini 2.5 Flash Image；中转站模式可使用独立图片模型</li>
         </ul>
         <h4>🛠️ 稳定性建议</h4>
         <ul>
@@ -4989,7 +5035,7 @@ def render_translation_tips():
         <ul>
             <li>文字清晰、无遮挡、对比度足够，可显著提升 OCR 与翻译质量</li>
             <li>避免严重压缩或过小分辨率；批量过大请分批处理</li>
-            <li>翻译出图固定 Nano Banana 2，建议推理级别选 minimal 提速</li>
+            <li>翻译出图取决于当前 provider 和模型能力；不支持时页面会直接提示</li>
         </ul>
         <h4>🛠️ 稳定性建议</h4>
         <ul>
@@ -5301,7 +5347,7 @@ def render_gemini3_settings(prefix: str, model_key: str):
                 index=default_idx,
                 format_func=lambda x: THINKING_LEVEL_DESC.get(x, x),
                 key=f"{prefix}_thinking_level",
-                help="Nano Banana 2 支持 minimal/high，minimal 更快",
+                help="当前 Gemini 出图模型支持 minimal/high，minimal 更快",
             )
     else:
         st.caption("💡 当前模型不支持推理深度调节")
@@ -5407,7 +5453,7 @@ def render_image_engine_selector(prefix: str, settings: dict):
         ):
             st.caption("未填写中转站 Key 时，自动回退使用系统管理员保存的中转站 Key。")
         st.caption(
-            f"当前中转站出图仅接管图片生成，图需分析仍走 Gemini，标题默认走 Gemini 文本模型 {TITLE_TEXT_MODEL}。"
+            f"当前中转站模式下：图片生成使用所选中转站图片模型，分析/标题使用 `{get_relay_analysis_model()}`。"
         )
     return provider, relay_model, relay_key, relay_base
 
@@ -5699,7 +5745,7 @@ def render_registered_system_service_login(s):
     )
 
     with login_tab:
-        st.caption("系统服务模式下，1/2/3/4 功能都要求注册用户登录。")
+        st.caption("团队模式下，官方版注册用户登录后可直接使用 1/2/3/4。")
         username = st.text_input("用户名", key="registered_login_username")
         password = st.text_input(
             "密码", type="password", key="registered_login_password"
@@ -8354,7 +8400,7 @@ def show_admin():
                 in RELAY_IMAGE_MODELS
                 else 0,
             )
-        st.caption("出图模型已全局锁定为 Nano Banana 2。")
+        st.caption("当前官方出图模型为 Gemini 2.5 Flash Image。")
         st.markdown("---")
         s["enforce_english_text"] = st.checkbox(
             "强制英文文本校验（自动重试）", value=s.get("enforce_english_text", False)
@@ -8866,7 +8912,7 @@ def main_app():
         render_brand_mark(width=58)
         st.markdown(
             f"""<div class="sidebar-brand">
-            <div class="sidebar-kicker">TEMU Image System</div>
+            <div class="sidebar-kicker">TEMU AI Studio</div>
             <div class="sidebar-title">{APP_NAME}</div>
             <div class="sidebar-subtitle">{APP_LAST_UPDATED}<br>{APP_TAGLINE}</div>
             </div>""",

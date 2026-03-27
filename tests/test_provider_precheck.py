@@ -14,7 +14,7 @@ class ProviderPrecheckTest(unittest.TestCase):
             image_model="seedream-5.0",
             analysis_model="gemini-3.1-flash-lite-preview",
             required_capabilities=["image_generate"],
-            probe_func=lambda base, key, model: (True, "ok"),
+            probe_func=lambda base, key, model, capability: (True, "ok"),
         )
         self.assertEqual(reasons, [])
 
@@ -26,7 +26,7 @@ class ProviderPrecheckTest(unittest.TestCase):
             image_model="seedream-4.6",
             analysis_model="gemini-3.1-flash-lite-preview",
             required_capabilities=["image_translate"],
-            probe_func=lambda base, key, model: (True, "ok"),
+            probe_func=lambda base, key, model, capability: (True, "ok"),
         )
         self.assertIn("不支持图片翻译出图", reasons[0])
 
@@ -38,9 +38,34 @@ class ProviderPrecheckTest(unittest.TestCase):
             image_model="seedream-5.0",
             analysis_model="gemini-3.1-flash-lite-preview",
             required_capabilities=["image_generate"],
-            probe_func=lambda base, key, model: (False, "no channel"),
+            probe_func=lambda base, key, model, capability: (False, "no channel"),
         )
         self.assertIn("no channel", reasons[0])
+
+    def test_probe_receives_capability_name(self):
+        seen = []
+
+        def probe(base, key, model, capability):
+            seen.append((model, capability))
+            return True, "ok"
+
+        validate_relay_models(
+            provider="relay",
+            relay_base="https://relay.example.com/v1",
+            relay_key="sk-test",
+            image_model="seedream-5.0",
+            analysis_model="gemini-3.1-flash-lite-preview",
+            required_capabilities=["image_analysis", "image_generate"],
+            probe_func=probe,
+        )
+
+        self.assertEqual(
+            seen,
+            [
+                ("gemini-3.1-flash-lite-preview", "image_analysis"),
+                ("seedream-5.0", "image_generate"),
+            ],
+        )
 
 
 if __name__ == "__main__":
