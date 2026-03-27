@@ -7,6 +7,7 @@ from temu_core.ui_content import (
     build_feature_catalog,
     build_page_sections,
     build_result_summary,
+    build_workspace_actions,
 )
 
 
@@ -53,6 +54,11 @@ class UIContentTest(unittest.TestCase):
         )
         self.assertEqual(summary["state"], "partial")
         self.assertIn("2 / 3", summary["headline"])
+
+    def test_workspace_actions_match_four_core_features(self):
+        actions = build_workspace_actions()
+        self.assertEqual(len(actions), 4)
+        self.assertEqual(actions[0]["target"], "批量出图")
 
 
 if __name__ == "__main__":

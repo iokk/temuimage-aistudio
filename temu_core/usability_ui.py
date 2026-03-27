@@ -11,11 +11,7 @@ def build_core_function_nav():
 
 
 def build_page_switch_targets(current_page: str):
-    targets = [{"key": "workspace", "label": "返回首页"}]
-    for item in build_core_function_nav():
-        if item["label"] != current_page:
-            targets.append(item)
-    return targets
+    return [{"key": "workspace", "label": "返回首页"}]
 
 
 def get_thumbnail_sizes():

@@ -20,8 +20,7 @@ class UsabilityUITest(unittest.TestCase):
     def test_page_switch_targets_exclude_current_page(self):
         targets = build_page_switch_targets("批量出图")
         labels = [item["label"] for item in targets]
-        self.assertNotIn("批量出图", labels)
-        self.assertIn("快速出图", labels)
+        self.assertEqual(labels, ["返回首页"])
 
     def test_thumbnail_sizes_are_compact(self):
         size_map = get_thumbnail_sizes()

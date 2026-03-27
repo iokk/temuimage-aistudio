@@ -41,6 +41,15 @@ def build_feature_catalog():
     ]
 
 
+def build_workspace_actions():
+    return [
+        {"target": "批量出图", "label": "进入批量出图"},
+        {"target": "快速出图", "label": "进入快速出图"},
+        {"target": "标题优化", "label": "进入标题优化"},
+        {"target": "图片翻译", "label": "进入图片翻译"},
+    ]
+
+
 def build_admin_mode_notice(has_service_access: bool, team_ready: bool):
     if team_ready:
         return {

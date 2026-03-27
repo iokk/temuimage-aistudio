@@ -108,6 +108,7 @@ from temu_core.ui_content import (
     build_feature_catalog,
     build_page_sections,
     build_result_summary,
+    build_workspace_actions,
 )
 from temu_core.usability_ui import (
     build_task_indicator,
@@ -4624,6 +4625,14 @@ def render_workspace_dashboard():
         '<div class="dashboard-grid">' + "".join(cards) + "</div>",
         unsafe_allow_html=True,
     )
+    action_defs = build_workspace_actions()
+    action_cols = st.columns(4)
+    for idx, action in enumerate(action_defs):
+        with action_cols[idx]:
+            if st.button(
+                action["label"], key=f"workspace_action_{idx}", use_container_width=True
+            ):
+                set_current_page(action["target"])
 
 
 def render_brand_mark(center: bool = False, width: int = 72):
