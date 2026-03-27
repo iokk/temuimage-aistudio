@@ -23,3 +23,15 @@ def should_force_registered_login(
         and not use_own_key
         and not has_auth_user_id
     )
+
+
+def describe_session_mode(
+    is_admin: bool, use_own_key: bool, has_auth_user_id: bool
+) -> str:
+    if is_admin:
+        return "管理员模式"
+    if use_own_key:
+        return "个人模式"
+    if has_auth_user_id:
+        return "团队模式"
+    return "未登录"

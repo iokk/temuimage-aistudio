@@ -75,6 +75,7 @@ from temu_core.relay_first_logic import (
 )
 from temu_core.relay_text_client import RelayTextClient
 from temu_core.runtime_mode import (
+    describe_session_mode,
     get_runtime_mode,
     should_force_registered_login,
     should_show_team_features,
@@ -5570,6 +5571,75 @@ def render_admin_tool_mode_login(s):
             st.error("密码错误")
 
 
+def render_system_init_panel(s):
+    if _has_system_service_access():
+        return
+    with st.expander("🚀 初始化系统配置", expanded=True):
+        st.info("当前尚未配置系统 Gemini 或系统中转站，请先完成管理员初始化。")
+        admin_pwd = st.text_input("管理员密码", type="password", key="init_admin_pwd")
+        keys_text = st.text_area(
+            "系统 Gemini Keys（每行一个，可选）",
+            height=120,
+            placeholder="AIza... 或 AQ...",
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            new_admin_pwd = st.text_input(
+                "新管理员密码",
+                value=s.get("admin_password"),
+                type="password",
+                key="init_new_admin_pwd",
+            )
+        with c2:
+            st.caption(
+                "如果配置了 `PLATFORM_ENCRYPTION_KEY`，系统 API Key 会优先加密存进 PostgreSQL；否则仅保存在本地数据目录。"
+            )
+        relay_base_init = st.text_input(
+            "系统中转站 API 地址（可选）",
+            value=s.get("relay_api_base", RELAY_API_BASE),
+            key="init_relay_base",
+        )
+        relay_key_init = st.text_input(
+            "系统中转站 API Key（可选）",
+            type="password",
+            key="init_relay_key",
+        )
+        relay_model_init = st.selectbox(
+            "系统中转站默认模型",
+            list(RELAY_IMAGE_MODELS.keys()),
+            index=list(RELAY_IMAGE_MODELS.keys()).index(
+                s.get("relay_default_image_model", "gemini-3.1-flash-image-preview")
+            )
+            if s.get("relay_default_image_model", "gemini-3.1-flash-image-preview")
+            in RELAY_IMAGE_MODELS
+            else 0,
+            key="init_relay_model",
+        )
+        if st.button("✅ 保存并启用", type="primary", use_container_width=True):
+            if admin_pwd != s.get("admin_password"):
+                st.error("管理员密码错误")
+            else:
+                keys = [k.strip() for k in (keys_text or "").splitlines() if k.strip()]
+                if not keys and not relay_key_init.strip():
+                    st.error("请至少填写 1 个系统 Gemini Key，或填写系统中转站 Key")
+                else:
+                    if keys:
+                        data = get_api_keys()
+                        data["keys"] = [{"key": k, "enabled": True} for k in keys]
+                        data["current_index"] = 0
+                        save_api_keys(data)
+                    s["relay_api_base"] = (
+                        str(relay_base_init or RELAY_API_BASE).strip().rstrip("/")
+                    )
+                    if relay_key_init.strip():
+                        s["relay_api_key"] = relay_key_init.strip()
+                    s["relay_default_image_model"] = relay_model_init
+                    s["admin_password"] = new_admin_pwd or s.get("admin_password")
+                    save_settings(s)
+                    st.success("已保存！")
+                    st.rerun()
+
+
 def render_registered_system_service_login(s):
     login_tab, register_tab, admin_tab = st.tabs(
         ["👤 用户登录", "📝 用户注册", "🛠️ 管理员"]
@@ -5696,76 +5766,7 @@ def show_login():
 
     bootstrap_runtime_config()
     s = get_settings()
-    allow_user_passwordless_login = bool(s.get("allow_user_passwordless_login", False))
     runtime_mode = current_runtime_mode()
-
-    if not _has_system_service_access():
-        with st.expander("🚀 系统服务初始化", expanded=True):
-            st.info("系统服务尚未配置 Gemini Key 或系统中转站配置")
-            admin_pwd = st.text_input(
-                "管理员密码", type="password", key="init_admin_pwd"
-            )
-            keys_text = st.text_area(
-                "API Keys (每行一个)", height=120, placeholder="AIza... 或 AQ..."
-            )
-            c1, c2 = st.columns(2)
-            with c1:
-                new_admin_pwd = st.text_input(
-                    "新管理员密码",
-                    value=s.get("admin_password"),
-                    type="password",
-                    key="init_new_admin_pwd",
-                )
-            with c2:
-                st.caption(
-                    "如果配置了 `PLATFORM_ENCRYPTION_KEY`，系统 API Key 会优先加密存进 PostgreSQL；否则仅保存在本地数据目录。"
-                )
-            relay_base_init = st.text_input(
-                "系统中转站 API 地址（可选）",
-                value=s.get("relay_api_base", RELAY_API_BASE),
-                key="init_relay_base",
-            )
-            relay_key_init = st.text_input(
-                "系统中转站 API Key（可选）",
-                type="password",
-                key="init_relay_key",
-            )
-            relay_model_init = st.selectbox(
-                "系统中转站默认模型",
-                list(RELAY_IMAGE_MODELS.keys()),
-                index=list(RELAY_IMAGE_MODELS.keys()).index(
-                    s.get("relay_default_image_model", "gemini-3.1-flash-image-preview")
-                )
-                if s.get("relay_default_image_model", "gemini-3.1-flash-image-preview")
-                in RELAY_IMAGE_MODELS
-                else 0,
-                key="init_relay_model",
-            )
-            if st.button("✅ 保存并启用", type="primary", use_container_width=True):
-                if admin_pwd != s.get("admin_password"):
-                    st.error("管理员密码错误")
-                else:
-                    keys = [
-                        k.strip() for k in (keys_text or "").splitlines() if k.strip()
-                    ]
-                    if not keys and not relay_key_init.strip():
-                        st.error("请至少填写 1 个 Gemini Key，或填写系统中转站 Key")
-                    else:
-                        if keys:
-                            data = get_api_keys()
-                            data["keys"] = [{"key": k, "enabled": True} for k in keys]
-                            data["current_index"] = 0
-                            save_api_keys(data)
-                        s["relay_api_base"] = (
-                            str(relay_base_init or RELAY_API_BASE).strip().rstrip("/")
-                        )
-                        if relay_key_init.strip():
-                            s["relay_api_key"] = relay_key_init.strip()
-                        s["relay_default_image_model"] = relay_model_init
-                        s["admin_password"] = new_admin_pwd or s.get("admin_password")
-                        save_settings(s)
-                        st.success("已保存！")
-                        st.rerun()
 
     settings_sections = build_settings_sections()
     runtime_mode_tabs = build_login_tab_labels(current_runtime_mode())
@@ -5778,6 +5779,11 @@ def show_login():
         render_config_cards(
             settings_sections,
             [("personal", "gemini"), ("personal", "relay")],
+        )
+        render_notice_card(
+            "个人模式",
+            "使用自己的 Gemini Key 或自己的中转站直接进入系统。个人模式不依赖团队数据库。",
+            "info",
         )
         st.markdown(
             f'<div class="info-card"><strong>{settings_sections["personal"]["gemini"]["title"]}</strong><br><span style="font-size:13px;color:#64748b">{settings_sections["personal"]["gemini"]["desc"]}</span></div>',
@@ -5863,7 +5869,7 @@ def show_login():
 
     with t2:
         st.markdown(
-            '<div class="info-card"><strong>🎫 系统服务模式</strong></div>',
+            '<div class="info-card"><strong>🛠️ 团队 / 管理员入口</strong></div>',
             unsafe_allow_html=True,
         )
         notice = build_admin_mode_notice(
@@ -5874,20 +5880,11 @@ def show_login():
         if runtime_mode == "team_mode":
             render_registered_system_service_login(s)
         else:
-            st.caption("当前默认使用管理员工具模式；注册用户、钱包和团队项目已隐藏。")
+            st.caption(
+                "当前未启用团队数据库，因此这里作为管理员后台入口与系统初始化入口。"
+            )
+            render_system_init_panel(s)
             render_admin_tool_mode_login(s)
-
-    if t3 is not None:
-        with t3:
-            render_config_cards(
-                settings_sections,
-                [("system", "gemini"), ("system", "relay")],
-            )
-            st.markdown(
-                f'<div class="info-card"><strong>{settings_sections["system"]["relay"]["title"]}</strong><br><span style="font-size:13px;color:#64748b">{settings_sections["system"]["relay"]["desc"]}</span></div>',
-                unsafe_allow_html=True,
-            )
-            render_relay_config_panel("login", s, expanded=True)
 
     show_footer()
 
@@ -8734,6 +8731,12 @@ def main_app():
             _, used, limit = check_user_limit(uid)
             st.info(f"今日: {used}/{limit}")
 
+        session_mode = describe_session_mode(
+            is_admin=bool(st.session_state.get("is_admin")),
+            use_own_key=bool(st.session_state.get("use_own_key")),
+            has_auth_user_id=bool(st.session_state.get("auth_user_id")),
+        )
+
         if should_show_team_features(runtime_mode):
             st.markdown(
                 '<div class="sidebar-section-title">工作区状态</div>',
@@ -8745,8 +8748,13 @@ def main_app():
                 '<div class="sidebar-section-title">当前模式</div>',
                 unsafe_allow_html=True,
             )
-            st.caption("管理员工具模式")
-            st.caption("核心功能可直接使用，团队功能已隐藏")
+            st.caption(session_mode)
+            if session_mode == "个人模式":
+                st.caption("使用自己的凭据直接运行 1/2/3/4。")
+            elif session_mode == "管理员模式":
+                st.caption("使用系统配置运行，团队功能已隐藏。")
+            else:
+                st.caption("请先选择个人模式或管理员入口登录。")
 
         bg_tasks = list_task_center_tasks(get_user_id())
         if bg_tasks:

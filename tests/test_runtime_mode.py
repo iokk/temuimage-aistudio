@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from temu_core.runtime_mode import (
+    describe_session_mode,
     get_runtime_mode,
     should_show_team_features,
     should_force_registered_login,
@@ -26,6 +27,26 @@ class RuntimeModeTest(unittest.TestCase):
                 use_own_key=False,
                 has_auth_user_id=False,
             )
+        )
+
+    def test_describe_session_mode_prefers_admin_then_personal_then_team(self):
+        self.assertEqual(
+            describe_session_mode(
+                is_admin=True, use_own_key=False, has_auth_user_id=False
+            ),
+            "管理员模式",
+        )
+        self.assertEqual(
+            describe_session_mode(
+                is_admin=False, use_own_key=True, has_auth_user_id=False
+            ),
+            "个人模式",
+        )
+        self.assertEqual(
+            describe_session_mode(
+                is_admin=False, use_own_key=False, has_auth_user_id=True
+            ),
+            "团队模式",
         )
         self.assertTrue(
             should_force_registered_login(
