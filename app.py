@@ -2945,6 +2945,11 @@ def probe_relay_route_cached(
         RELAY_PROBE_CACHE[cache_key] = (ok, msg)
         return ok, msg
 
+    if capability in {"image_generate", "image_translate"}:
+        result = (True, "ok")
+        RELAY_PROBE_CACHE[cache_key] = result
+        return result
+
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",

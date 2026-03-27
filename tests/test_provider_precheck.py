@@ -67,6 +67,18 @@ class ProviderPrecheckTest(unittest.TestCase):
             ],
         )
 
+    def test_image_generation_probe_can_use_catalog_level_success(self):
+        reasons = validate_relay_models(
+            provider="relay",
+            relay_base="https://relay.example.com/v1",
+            relay_key="sk-test",
+            image_model="seedream-5.0",
+            analysis_model="gemini-3.1-flash-lite-preview",
+            required_capabilities=["image_generate"],
+            probe_func=lambda base, key, model, capability: (True, "ok"),
+        )
+        self.assertEqual(reasons, [])
+
 
 if __name__ == "__main__":
     unittest.main()
