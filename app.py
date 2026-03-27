@@ -54,6 +54,7 @@ from temu_core.provider_capabilities import (
     model_supports,
 )
 from temu_core.provider_precheck import validate_relay_models
+from temu_core.provider_precheck import describe_capability_reasons
 from temu_core.action_reasons import (
     combo_analysis_reasons,
     combo_generate_reasons,
@@ -6279,6 +6280,20 @@ def show_combo_page():
                 ),
                 success_note="类型选择已完成，可以生成图需文案。",
             )
+            if image_provider == "中转站":
+                render_action_reasons(
+                    "模型能力检查",
+                    describe_capability_reasons(
+                        provider="relay",
+                        image_model=relay_model
+                        or s.get(
+                            "relay_default_image_model",
+                            "gemini-3.1-flash-image-preview",
+                        ),
+                        analysis_model=get_relay_analysis_model(),
+                        required_capabilities=["text_generation"],
+                    ),
+                )
 
             if st.button(
                 "📝 AI生成图需文案",
@@ -6896,6 +6911,20 @@ def show_smart_page():
         ),
         success_note="素材、商品名称和类型已齐全，可以开始快速出图。",
     )
+    if image_provider == "中转站":
+        required_caps = ["image_analysis", "image_generate"]
+        if should_attempt_title_generation(enable_title, images, title_info):
+            required_caps.append("title_from_image")
+        render_action_reasons(
+            "模型能力检查",
+            describe_capability_reasons(
+                provider="relay",
+                image_model=relay_model
+                or s.get("relay_default_image_model", "gemini-3.1-flash-image-preview"),
+                analysis_model=get_relay_analysis_model(),
+                required_capabilities=required_caps,
+            ),
+        )
 
     smart_run_mode = st.radio(
         "执行方式",
@@ -7312,6 +7341,21 @@ def show_title_page():
         ),
         success_note="输入条件已满足，可以生成标题。",
     )
+    if runtime_credentials.get("provider") == "relay":
+        render_action_reasons(
+            "模型能力检查",
+            describe_capability_reasons(
+                provider="relay",
+                image_model=runtime_credentials.get("model")
+                or get_settings().get(
+                    "relay_default_image_model", "gemini-3.1-flash-image-preview"
+                ),
+                analysis_model=get_relay_analysis_model(),
+                required_capabilities=[
+                    "title_from_image" if uploaded_images else "text_generation"
+                ],
+            ),
+        )
 
     if st.button(
         "🚀 生成中英双语标题",
@@ -8108,6 +8152,21 @@ def show_image_translate_page():
         ),
         success_note="当前 provider 支持所选任务，可以开始处理。",
     )
+    if active_provider == "relay":
+        required_caps = []
+        if need_text:
+            required_caps.append("text_generation")
+        if need_image:
+            required_caps.append("image_translate")
+        render_action_reasons(
+            "模型能力检查",
+            describe_capability_reasons(
+                provider="relay",
+                image_model=active_model,
+                analysis_model=relay_text_model,
+                required_capabilities=required_caps,
+            ),
+        )
     if st.button(
         start_label, type="primary", use_container_width=True, disabled=not can_run
     ):

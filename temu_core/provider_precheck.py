@@ -46,3 +46,25 @@ def validate_relay_models(
         if reason not in seen:
             seen.append(reason)
     return seen
+
+
+def describe_capability_reasons(
+    provider: str,
+    image_model: str,
+    analysis_model: str,
+    required_capabilities: list,
+):
+    if str(provider or "").lower() != "relay":
+        return []
+    reasons = []
+    for capability in required_capabilities:
+        target_model = (
+            analysis_model
+            if capability in {"image_analysis", "title_from_image", "text_generation"}
+            else image_model
+        )
+        if not model_supports("relay", target_model, capability):
+            reasons.append(
+                f"当前模型 `{target_model}` 不支持{CAPABILITY_LABELS.get(capability, capability)}"
+            )
+    return reasons
