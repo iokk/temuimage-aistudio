@@ -150,3 +150,90 @@ class RelayTextClient:
         )
         text = self.generate_text(images, prompt, max_tokens=1200)
         return self._clean_title_lines(text)
+
+    def extract_text_from_image(self, image, source_lang: str = "auto"):
+        prompt = (
+            f"Extract visible text from this image. Source language hint: {source_lang}. "
+            'Return JSON only: {"language":"detected language","lines":["line1","line2"]}'
+        )
+        text = self.generate_text([image], prompt, max_tokens=1200)
+        parsed = self.parse_json_response(text, {"language": source_lang, "lines": []})
+        if not isinstance(parsed, dict):
+            return {"language": source_lang, "lines": []}
+        return {
+            "language": parsed.get("language") or source_lang,
+            "lines": [
+                str(line).strip()
+                for line in (parsed.get("lines") or [])
+                if str(line).strip()
+            ],
+        }
+
+    def translate_lines(
+        self,
+        lines,
+        source_lang="auto",
+        target_lang="English",
+        style_hint="Literal",
+        avoid_terms=None,
+        enforce_english=False,
+        max_attempts=1,
+    ):
+        clean_lines = [str(line).strip() for line in (lines or []) if str(line).strip()]
+        if not clean_lines:
+            return []
+        avoid_terms_text = ", ".join(avoid_terms) if avoid_terms else "None"
+        prompt = (
+            f"Translate the following text lines from {source_lang} to {target_lang}.\n"
+            f"Style: {style_hint}.\n"
+            f"Avoid these terms if needed: {avoid_terms_text}.\n"
+            'Return JSON only: {"translated_lines":["line1","line2"]}\n'
+            + "\n".join(clean_lines)
+        )
+        text = self.generate_text([], prompt, max_tokens=1200)
+        parsed = self.parse_json_response(text, {"translated_lines": []})
+        if not isinstance(parsed, dict):
+            return []
+        translated_lines = [
+            str(line).strip()
+            for line in (parsed.get("translated_lines") or [])
+            if str(line).strip()
+        ]
+        return translated_lines
+
+    def extract_and_translate_image_text(
+        self,
+        image,
+        source_lang="auto",
+        target_lang="English",
+        style_hint="Literal",
+        avoid_terms=None,
+        enforce_english=False,
+        max_attempts=1,
+    ):
+        avoid_terms_text = ", ".join(avoid_terms) if avoid_terms else "None"
+        prompt = (
+            f"Extract text from this image and translate it from {source_lang} to {target_lang}.\n"
+            f"Style: {style_hint}.\n"
+            f"Avoid these terms if needed: {avoid_terms_text}.\n"
+            'Return JSON only: {"language":"detected language","source_lines":["line1"],"translated_lines":["line1"]}'
+        )
+        text = self.generate_text([image], prompt, max_tokens=1400)
+        parsed = self.parse_json_response(
+            text, {"language": source_lang, "source_lines": [], "translated_lines": []}
+        )
+        if not isinstance(parsed, dict):
+            return {"language": source_lang, "source_lines": [], "translated_lines": []}
+        return {
+            "language": parsed.get("language") or source_lang,
+            "source_lines": [
+                str(line).strip()
+                for line in (parsed.get("source_lines") or [])
+                if str(line).strip()
+            ],
+            "translated_lines": [
+                str(line).strip()
+                for line in (parsed.get("translated_lines") or [])
+                if str(line).strip()
+            ],
+        }

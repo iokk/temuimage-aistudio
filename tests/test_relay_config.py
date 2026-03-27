@@ -109,6 +109,30 @@ class RelayImageClientTest(unittest.TestCase):
 
         self.assertIsNotNone(image)
 
+    @patch.object(app.RelayImageClient, "_extract_image_from_response")
+    @patch("app.requests.post")
+    def test_relay_image_client_has_translate_image(self, mock_post, mock_extract):
+        response = MagicMock()
+        response.status_code = 200
+        response.text = '{"choices": []}'
+        response.json.return_value = {
+            "choices": [],
+            "usage": {"total_tokens": 24},
+        }
+        mock_post.return_value = response
+        mock_extract.return_value = MagicMock()
+
+        client = app.RelayImageClient(
+            api_key="sk-test",
+            model="gemini-3.1-flash-image-preview",
+            base_url="https://newapi.aisonnet.org/v1",
+        )
+
+        self.assertTrue(hasattr(client, "translate_image"))
+        result = client.translate_image(MagicMock(), target_lang="English")
+        self.assertIsNotNone(result)
+        self.assertEqual(client.get_tokens_used(), 24)
+
 
 class RelayModelCatalogTest(unittest.TestCase):
     def test_priority_models_are_present_in_expected_order(self):

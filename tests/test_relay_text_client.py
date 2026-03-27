@@ -36,6 +36,17 @@ class RelayTextClientTest(unittest.TestCase):
         text = '```json\n{"name": "Bottle"}\n```'
         self.assertEqual(client.parse_json_response(text, {}), {"name": "Bottle"})
 
+    def test_extract_and_translate_response_returns_expected_shape(self):
+        client = RelayTextClient("sk-test", "gemini-3.1-flash-image-preview")
+        client.generate_text = lambda refs, prompt, max_tokens=1200, temperature=0.2: (
+            '{"language":"en","source_lines":["FAST SHIPPING"],"translated_lines":["FAST SHIPPING"]}'
+        )
+        result = client.extract_and_translate_image_text(
+            object(), source_lang="auto", target_lang="English"
+        )
+        self.assertEqual(result["language"], "en")
+        self.assertEqual(result["source_lines"], ["FAST SHIPPING"])
+
 
 if __name__ == "__main__":
     unittest.main()

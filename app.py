@@ -48,6 +48,11 @@ from temu_core.credential_resolver import select_translation_gemini_key
 from temu_core.db import get_database_status, session_scope
 from temu_core.models import EXPECTED_TABLES, User
 from temu_core.platform_status import describe_platform_database_status
+from temu_core.provider_capabilities import (
+    get_model_capabilities,
+    get_translation_provider_message,
+    model_supports,
+)
 from temu_core.relay_config import (
     has_system_service_access,
     resolve_relay_runtime_config,
@@ -336,6 +341,7 @@ DEFAULT_SETTINGS = {
     "relay_api_base": RELAY_API_BASE,
     "relay_api_key": "",
     "relay_default_image_model": "gemini-3.1-flash-image-preview",
+    "relay_analysis_model": "gemini-3.1-flash-image-preview",
     "enforce_english_text": False,
     "english_text_max_retries": 1,
 }
@@ -837,6 +843,8 @@ def get_settings():
     s["relay_api_key"] = str(s.get("relay_api_key", "") or "").strip()
     if s.get("relay_default_image_model") not in RELAY_IMAGE_MODELS:
         s["relay_default_image_model"] = "gemini-3.1-flash-image-preview"
+    if s.get("relay_analysis_model") not in RELAY_IMAGE_MODELS:
+        s["relay_analysis_model"] = "gemini-3.1-flash-image-preview"
     try:
         workers = int(
             s.get(
@@ -2807,6 +2815,45 @@ class RelayImageClient:
                 self.last_error = str(e)
         return None
 
+    def translate_image(
+        self,
+        image,
+        target_lang="English",
+        source_lang="auto",
+        style_hint="Literal",
+        layout_hint="Preserve layout",
+        aspect="1:1",
+        size="1K",
+        thinking_level="minimal",
+        avoid_terms=None,
+        enforce_english=False,
+        max_attempts=1,
+        cleanup_cn_overlay=True,
+    ):
+        if image is None:
+            return None
+        avoid_terms_text = ", ".join(avoid_terms) if avoid_terms else "None"
+        prompt = (
+            f"Translate all visible text from {source_lang or 'auto'} to {target_lang}.\n"
+            f"Style: {style_hint}\n"
+            f"Layout: {layout_hint}\n"
+            f"Avoid these compliance terms in output (if any): {avoid_terms_text}\n"
+            "Output requirement: return one translated ecommerce image, preserve layout and design, remove decorative Chinese overlay text when requested."
+        )
+        if cleanup_cn_overlay:
+            prompt += "\nCleanup policy: Remove non-product Chinese overlay text, corner labels, and decorative stamp marks when they are not part of the real product."
+        if enforce_english or str(target_lang).lower().startswith("english"):
+            prompt += "\nCRITICAL: final rendered text must be English only."
+        return self.generate_image(
+            refs=[image],
+            prompt=prompt,
+            aspect=aspect,
+            size=size,
+            thinking_level=thinking_level,
+            enforce_english=enforce_english,
+            max_attempts=max_attempts,
+        )
+
 
 def probe_relay_api(base_url: str, api_key: str, model: str = ""):
     base_url = str(base_url or RELAY_API_BASE).rstrip("/")
@@ -2831,15 +2878,30 @@ def probe_relay_api(base_url: str, api_key: str, model: str = ""):
         return False, format_runtime_error_message(e)
 
 
-def build_relay_text_client(relay_key: str, relay_model: str, relay_base: str):
+def build_relay_text_client(
+    relay_key: str,
+    relay_model: str,
+    relay_base: str,
+    capability: str = "text_generation",
+):
     if not relay_key:
         raise Exception("请先配置系统中转站 Key 或前台中转站 Key")
     selected_model = relay_model or get_settings().get(
         "relay_default_image_model", "gemini-3.1-flash-image-preview"
     )
+    if not model_supports("relay", selected_model, capability):
+        raise Exception(f"当前模型 `{selected_model}` 不支持任务 `{capability}`")
     return RelayTextClient(
         relay_key, selected_model, base_url=relay_base or RELAY_API_BASE
     )
+
+
+def get_relay_analysis_model() -> str:
+    settings = get_settings()
+    model = settings.get("relay_analysis_model", "gemini-3.1-flash-image-preview")
+    if model not in RELAY_IMAGE_MODELS:
+        return "gemini-3.1-flash-image-preview"
+    return model
 
 
 def build_text_generation_client(
@@ -2851,7 +2913,12 @@ def build_text_generation_client(
     model: str = TITLE_TEXT_MODEL,
 ):
     if image_provider == "中转站":
-        return build_relay_text_client(relay_key, relay_model, relay_base)
+        return build_relay_text_client(
+            relay_key,
+            get_relay_analysis_model(),
+            relay_base,
+            capability="title_from_image",
+        )
     if not gemini_api_key:
         raise Exception("当前未配置 Gemini API Key")
     return GeminiClient(gemini_api_key, model=model)
@@ -2871,7 +2938,12 @@ def build_combo_anchor(
         prompt_template = get_prompts().get(
             "anchor_analysis", DEFAULT_PROMPTS["anchor_analysis"]
         )
-        text_client = build_relay_text_client(relay_key, relay_model, relay_base)
+        text_client = build_relay_text_client(
+            relay_key,
+            get_relay_analysis_model(),
+            relay_base,
+            capability="image_analysis",
+        )
         anchor = analyze_product_with_text_client(
             text_client,
             images,
@@ -2903,7 +2975,12 @@ def build_combo_requirements(
             "en_copy_gen", DEFAULT_PROMPTS["en_copy_gen"]
         )
         templates = get_templates()["combo_types"]
-        text_client = build_relay_text_client(relay_key, relay_model, relay_base)
+        text_client = build_relay_text_client(
+            relay_key,
+            get_relay_analysis_model(),
+            relay_base,
+            capability="text_generation",
+        )
         reqs = generate_requirements_with_text_client(
             text_client,
             anchor,
@@ -2944,7 +3021,12 @@ def build_smart_anchor(
         prompt_template = get_prompts().get(
             "anchor_analysis", DEFAULT_PROMPTS["anchor_analysis"]
         )
-        text_client = build_relay_text_client(relay_key, relay_model, relay_base)
+        text_client = build_relay_text_client(
+            relay_key,
+            get_relay_analysis_model(),
+            relay_base,
+            capability="image_analysis",
+        )
         anchor = analyze_product_with_text_client(
             text_client,
             images,
@@ -3219,6 +3301,8 @@ def execute_image_translate_workload(
     )
     english_retry_max = max(1, min(5, int(opts.get("english_retry_max", 2) or 2)))
     cleanup_cn_overlay = bool(opts.get("cleanup_cn_overlay", True))
+    provider = str(opts.get("provider") or "gemini").strip().lower()
+    relay_base = str(opts.get("relay_base") or RELAY_API_BASE).rstrip("/")
     model_key = opts.get("model_key") or PRIMARY_IMAGE_MODEL
     text_model_key = opts.get("text_model_key") or PRIMARY_IMAGE_MODEL
     batch_size = int(opts.get("batch_size", total) or total)
@@ -3245,8 +3329,20 @@ def execute_image_translate_workload(
     if need_image and size_strategy == "强制1:1" and force_1k:
         size_label = "1K"
 
-    image_client = GeminiClient(api_key, model_key)
-    text_client = GeminiClient(api_key, text_model_key)
+    if provider == "relay":
+        image_client = (
+            RelayImageClient(api_key, model_key, base_url=relay_base)
+            if need_image
+            else None
+        )
+        text_client = (
+            RelayTextClient(api_key, text_model_key, base_url=relay_base)
+            if need_text
+            else None
+        )
+    else:
+        image_client = GeminiClient(api_key, model_key)
+        text_client = GeminiClient(api_key, text_model_key)
     results = []
     errors = []
 
@@ -3259,6 +3355,8 @@ def execute_image_translate_workload(
             log_cb(message)
 
     def process_text_single(entry: dict, image_obj: Image.Image):
+        if text_client is None:
+            return entry
         if fast_text_mode:
             merged = text_client.extract_and_translate_image_text(
                 image_obj,
@@ -3386,6 +3484,8 @@ def execute_image_translate_workload(
                         model_size = (
                             "1K" if (size_strategy == "强制1:1" and force_1k) else size
                         )
+                        if image_client is None:
+                            raise Exception("当前模型不支持图片翻译出图")
                         entry["translated"] = image_client.translate_image(
                             prepared_img,
                             target_lang=target_prompt,
@@ -3519,7 +3619,10 @@ def _run_image_translate_bg_task(task_id: str, payload: dict):
 
         record_platform_usage_event_safe(
             feature="image_translate",
-            provider="Gemini",
+            provider="中转站"
+            if str((payload.get("options") or {}).get("provider") or "").lower()
+            == "relay"
+            else "Gemini",
             model=str(
                 (payload.get("options") or {}).get("model_key") or PRIMARY_IMAGE_MODEL
             ),
@@ -6255,20 +6358,31 @@ def show_image_translate_page():
         unsafe_allow_html=True,
     )
     st.markdown(
-        "上传图片后默认直接生成英文译后图。图片翻译当前固定走 Gemini / Vertex 图文链路。"
+        "上传图片后默认直接生成英文译后图。当前只展示所选 provider 真正支持的翻译能力。"
     )
     render_translation_tips()
 
-    api_key = select_translation_gemini_key(
-        use_own_credentials=bool(st.session_state.get("use_own_key")),
-        own_provider=st.session_state.get("own_provider", "gemini"),
-        own_gemini_key=st.session_state.get("own_api_key", ""),
-        system_gemini_key=peek_system_api_key(),
-    )
-    if not api_key:
-        st.warning(
-            "⚠️ 图片翻译当前仍需要 Gemini 官方 Key。若你正在使用中转站，请在系统配置或我的凭据中补充 Gemini Key。"
+    runtime_credentials = get_runtime_credentials()
+    active_provider = runtime_credentials.get("provider", "gemini")
+    active_model = runtime_credentials.get("model") or PRIMARY_IMAGE_MODEL
+    relay_text_model = get_relay_analysis_model()
+    if active_provider == "relay":
+        st.info(
+            f"当前翻译 provider：中转站 · 出图模型 `{active_model}` · 文本分析模型 `{relay_text_model}`"
         )
+        if not runtime_credentials.get("api_key"):
+            st.warning("⚠️ 当前未配置可用的中转站凭据，请先在系统配置或我的凭据中填写。")
+            return
+    else:
+        st.info(f"当前翻译 provider：Gemini · 模型 `{PRIMARY_IMAGE_MODEL}`")
+        if not runtime_credentials.get("api_key"):
+            st.warning(
+                "⚠️ 当前未配置可用的 Gemini Key，请先在系统配置或我的凭据中填写。"
+            )
+            return
+
+    api_key = runtime_credentials.get("api_key", "")
+    if not api_key:
         return
     s = get_settings()
     allowed_formats = parse_allowed_formats(
@@ -6548,149 +6662,27 @@ def show_image_translate_page():
         failed_indices = list(dict.fromkeys([i for i in failed_indices if i]))
 
         if failed_indices and st.button("重试失败项", use_container_width=True):
-            image_retry_client = GeminiClient(
-                api_key, opts.get("model_key", PRIMARY_IMAGE_MODEL)
-            )
-            text_retry_client = GeminiClient(
-                api_key, opts.get("text_model_key", PRIMARY_IMAGE_MODEL)
-            )
-            source_prompt = LANGUAGE_PROMPT_NAMES.get(
-                opts.get("source_lang", "auto"), "auto"
-            )
-            target_prompt = LANGUAGE_PROMPT_NAMES.get(
-                opts.get("target_lang", "en"), "English"
-            )
-            style_choice = opts.get("style_choice", "北美电商英文（标准）")
-            if style_choice == "北美电商英文（偏营销）":
-                style_hint = "North American ecommerce listing English (Amazon-compliant, TEMU style), persuasive but professional, no slang or colloquial expressions, consistent terminology, US punctuation and units, avoid unsupported absolute claims"
-            else:
-                style_hint = "North American ecommerce listing English (Amazon-compliant, TEMU style), formal and professional, no slang or colloquial expressions, consistent terminology, US punctuation and units, avoid unsupported absolute claims"
-            layout_hint = (
-                "Strictly preserve layout typography and colors"
-                if opts.get("keep_layout", True)
-                else "Minor layout adjustments allowed to improve readability"
-            )
-            avoid_terms = opts.get("avoid_terms", [])
-            size_strategy = opts.get("size_strategy", "保留原比例")
-            ratio_method = opts.get("ratio_method", "补边(白色)")
-            target_ratio = opts.get("target_ratio", "1:1")
-            force_1k = opts.get("force_1k", False)
-            size = opts.get("size", "1K")
-            thinking_level = opts.get("thinking_level", "minimal")
-            fast_mode_retry = bool(opts.get("fast_text_mode", True))
-            force_english_retry = bool(opts.get("force_english_output", False))
-            english_retry_max = max(1, min(5, int(opts.get("english_retry_max", 2))))
-            cleanup_cn_overlay_retry = bool(opts.get("cleanup_cn_overlay", True))
-
+            retry_items = []
             for idx in failed_indices:
-                if not idx or idx - 1 >= len(source_items):
-                    continue
-                item = source_items[idx - 1]
-                img = item.get("image")
-                if img is None:
-                    continue
-                for r in results:
-                    if r.get("index") == idx:
-                        try:
-                            if need_text_last:
-                                if fast_mode_retry:
-                                    merged = text_retry_client.extract_and_translate_image_text(
-                                        img,
-                                        source_lang=source_prompt,
-                                        target_lang=target_prompt,
-                                        style_hint=style_hint,
-                                        avoid_terms=avoid_terms,
-                                        enforce_english=force_english_retry,
-                                        max_attempts=english_retry_max,
-                                    )
-                                    r["extracted_lines"] = merged.get(
-                                        "source_lines", []
-                                    )
-                                    r["translated_lines"] = merged.get(
-                                        "translated_lines", []
-                                    )
-                                else:
-                                    extracted = (
-                                        text_retry_client.extract_text_from_image(
-                                            img, source_prompt
-                                        )
-                                    )
-                                    r["extracted_lines"] = extracted.get("lines", [])
-                                    r["translated_lines"] = (
-                                        text_retry_client.translate_lines(
-                                            r["extracted_lines"],
-                                            source_lang=source_prompt,
-                                            target_lang=target_prompt,
-                                            style_hint=style_hint,
-                                            avoid_terms=avoid_terms,
-                                            enforce_english=force_english_retry,
-                                            max_attempts=english_retry_max,
-                                        )
-                                    )
-                                if (
-                                    force_english_retry
-                                    and r["extracted_lines"]
-                                    and not r["translated_lines"]
-                                ):
-                                    raise Exception(
-                                        text_retry_client.get_last_error()
-                                        or "英文校验未通过，请重试或提高重试次数"
-                                    )
-                                if opts.get("enable_comp") and r["translated_lines"]:
-                                    hits = []
-                                    for line in r["translated_lines"]:
-                                        hits.extend(
-                                            find_compliance_hits(line, avoid_terms)
-                                        )
-                                    r["compliance_hits"] = list(dict.fromkeys(hits))
-                            if need_image_last:
-                                aspect = (
-                                    closest_aspect_ratio(img.size)
-                                    if size_strategy == "保留原比例"
-                                    else target_ratio
-                                )
-                                prepared_img = img
-                                if size_strategy != "保留原比例":
-                                    prepared_img = apply_ratio_strategy(
-                                        img, target_ratio, ratio_method
-                                    )
-                                model_size = (
-                                    "1K"
-                                    if (size_strategy == "强制1:1" and force_1k)
-                                    else size
-                                )
-                                r["translated"] = image_retry_client.translate_image(
-                                    prepared_img,
-                                    target_lang=target_prompt,
-                                    source_lang=source_prompt,
-                                    style_hint=style_hint,
-                                    layout_hint=layout_hint,
-                                    aspect=aspect,
-                                    size=model_size,
-                                    thinking_level=thinking_level,
-                                    avoid_terms=avoid_terms,
-                                    enforce_english=force_english_retry,
-                                    max_attempts=english_retry_max,
-                                    cleanup_cn_overlay=cleanup_cn_overlay_retry,
-                                )
-                                if r["translated"]:
-                                    if size_strategy != "保留原比例":
-                                        r["translated"] = apply_ratio_strategy(
-                                            r["translated"], target_ratio, ratio_method
-                                        )
-                                    if size_strategy == "强制1:1" and force_1k:
-                                        r["translated"] = r["translated"].resize(
-                                            (1024, 1024), Image.Resampling.LANCZOS
-                                        )
-                        except Exception:
-                            pass
-                        break
+                if idx and idx - 1 < len(source_items):
+                    item = source_items[idx - 1]
+                    if item.get("image") is not None:
+                        retry_items.append(item)
+            if retry_items:
+                retried_results, _retry_errors, retry_tokens = (
+                    execute_image_translate_workload(
+                        api_key,
+                        retry_items,
+                        opts,
+                    )
+                )
+                retry_map = {item.get("index"): item for item in retried_results}
+                for i, r in enumerate(results):
+                    idx = r.get("index")
+                    if idx in retry_map:
+                        results[i] = retry_map[idx]
             st.session_state.img_trans_results = results
             st.session_state.img_trans_zip_cache = {"key": "", "bytes": b""}
-            retry_tokens = (
-                image_retry_client.get_tokens_used()
-                + text_retry_client.get_tokens_used()
-            )
             st.session_state.img_trans_tokens_used += retry_tokens
             st.session_state.session_tokens += retry_tokens
             st.rerun()
@@ -6808,13 +6800,22 @@ def show_image_translate_page():
         )
 
     output_options = ["仅文本翻译", "生成翻译图片", "文本+翻译图片"]
+    if active_provider == "relay":
+        if not model_supports("relay", relay_text_model, "text_generation"):
+            st.warning(
+                f"⚠️ 当前 relay 分析模型 `{relay_text_model}` 不支持文本提取/翻译。"
+            )
+            return
+        if not model_supports("relay", active_model, "image_translate"):
+            output_options = ["仅文本翻译"]
+            st.warning(get_translation_provider_message("relay", active_model))
     default_output = s.get("translate_default_output_mode", "生成翻译图片")
     output_mode = st.radio(
         "输出模式",
         output_options,
         index=output_options.index(default_output)
         if default_output in output_options
-        else 1,
+        else 0,
         horizontal=True,
         key="img_trans_mode",
     )
@@ -6872,8 +6873,12 @@ def show_image_translate_page():
     target_ratio = s.get("translate_default_ratio", "1:1")
     force_1k = False
 
-    text_model_key = s.get("translate_text_model", PRIMARY_IMAGE_MODEL)
-    if text_model_key not in MODELS:
+    text_model_key = (
+        get_relay_analysis_model()
+        if active_provider == "relay"
+        else s.get("translate_text_model", PRIMARY_IMAGE_MODEL)
+    )
+    if active_provider != "relay" and text_model_key not in MODELS:
         text_model_key = PRIMARY_IMAGE_MODEL
     text_workers = int(s.get("translate_text_workers", 2))
     text_workers = max(1, min(6, text_workers))
@@ -6928,14 +6933,21 @@ def show_image_translate_page():
             unsafe_allow_html=True,
         )
         s = get_settings()
-        model_key = PRIMARY_IMAGE_MODEL
-        st.caption(f"当前固定模型：{MODELS[model_key]['name']}")
-        size, thinking_level = render_image_translate_settings(
-            "img_trans", model_key, s.get("translate_default_resolution", "1K")
-        )
-        st.caption(
-            f"文本链路模型: {MODELS.get(text_model_key, {}).get('name', text_model_key)}"
-        )
+        if active_provider == "relay":
+            model_key = active_model
+            st.caption(f"当前 relay 出图模型：{model_key}")
+            size = "1K"
+            thinking_level = "minimal"
+            st.caption(f"文本分析模型: {text_model_key}")
+        else:
+            model_key = PRIMARY_IMAGE_MODEL
+            st.caption(f"当前固定模型：{MODELS[model_key]['name']}")
+            size, thinking_level = render_image_translate_settings(
+                "img_trans", model_key, s.get("translate_default_resolution", "1K")
+            )
+            st.caption(
+                f"文本链路模型: {MODELS.get(text_model_key, {}).get('name', text_model_key)}"
+            )
         st.markdown("</div>", unsafe_allow_html=True)
     else:
         st.markdown('<div class="form-card">', unsafe_allow_html=True)
@@ -6943,8 +6955,11 @@ def show_image_translate_page():
             '<div class="section-title">文本翻译模型 <span class="section-chip">速度优先</span></div>',
             unsafe_allow_html=True,
         )
-        text_model_key = PRIMARY_IMAGE_MODEL
-        st.caption(f"当前固定模型：{MODELS[text_model_key]['name']}")
+        if active_provider == "relay":
+            st.caption(f"当前 relay 文本分析模型：{text_model_key}")
+        else:
+            text_model_key = PRIMARY_IMAGE_MODEL
+            st.caption(f"当前固定模型：{MODELS[text_model_key]['name']}")
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="form-card">', unsafe_allow_html=True)
@@ -7032,6 +7047,8 @@ def show_image_translate_page():
         english_retry_max = max(1, min(5, int(english_retry_max)))
 
         last_options = {
+            "provider": active_provider,
+            "relay_base": runtime_credentials.get("base_url") or RELAY_API_BASE,
             "source_lang": source_lang,
             "target_lang": target_lang,
             "style_choice": style_choice,
@@ -7115,7 +7132,7 @@ def show_image_translate_page():
         if results:
             record_platform_usage_event_safe(
                 feature="image_translate",
-                provider="Gemini",
+                provider="中转站" if active_provider == "relay" else "Gemini",
                 model=model_key or PRIMARY_IMAGE_MODEL,
                 request_count=len(upload_items),
                 output_images=count_generated_images(results),
@@ -7498,11 +7515,23 @@ def show_admin():
             "系统中转站默认模型",
             list(RELAY_IMAGE_MODELS.keys()),
             index=list(RELAY_IMAGE_MODELS.keys()).index(
-                s.get("relay_default_image_model", "imagine_x_1")
+                s.get("relay_default_image_model", "gemini-3.1-flash-image-preview")
             )
-            if s.get("relay_default_image_model", "imagine_x_1") in RELAY_IMAGE_MODELS
+            if s.get("relay_default_image_model", "gemini-3.1-flash-image-preview")
+            in RELAY_IMAGE_MODELS
             else 0,
             key="admin_relay_default_model",
+        )
+        relay_analysis_model_value = st.selectbox(
+            "系统中转站分析/标题模型",
+            list(RELAY_IMAGE_MODELS.keys()),
+            index=list(RELAY_IMAGE_MODELS.keys()).index(
+                s.get("relay_analysis_model", "gemini-3.1-flash-image-preview")
+            )
+            if s.get("relay_analysis_model", "gemini-3.1-flash-image-preview")
+            in RELAY_IMAGE_MODELS
+            else 0,
+            key="admin_relay_analysis_model",
         )
         relay_key_input = st.text_input(
             "系统中转站 API Key",
@@ -7521,6 +7550,7 @@ def show_admin():
                     str(relay_base_value or RELAY_API_BASE).strip().rstrip("/")
                 )
                 s["relay_default_image_model"] = relay_model_value
+                s["relay_analysis_model"] = relay_analysis_model_value
                 if relay_key_input.strip():
                     s["relay_api_key"] = relay_key_input.strip()
                 save_settings(s)
