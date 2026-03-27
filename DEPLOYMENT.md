@@ -112,6 +112,14 @@ curl http://localhost:8501/_stcore/health
 
 `docs/post-deploy-checklist.md`
 
+如果只想快速做 5 分钟验收：
+
+`docs/post-deploy-5min-checklist.md`
+
+如果需要直接套用推荐配置：
+
+`docs/recommended-config-templates.md`
+
 ## 6. 常见问题
 
 - `FAILED_PRECONDITION`：优先改走 Vertex Express / Vertex AI 区域端点

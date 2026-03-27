@@ -71,3 +71,11 @@ Zeabur `Deploy Button` requires a Zeabur template entry first. After you create 
 After every Zeabur deployment, run the product validation checklist in:
 
 `docs/post-deploy-checklist.md`
+
+Quick version:
+
+`docs/post-deploy-5min-checklist.md`
+
+Recommended config templates:
+
+`docs/recommended-config-templates.md`

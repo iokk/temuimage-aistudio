@@ -147,6 +147,8 @@ PORT=8501
 - `app.py`：主应用
 - `template.yaml`：Zeabur 模板化部署配置
 - `docs/post-deploy-checklist.md`：每次上线后的验证清单
+- `docs/post-deploy-5min-checklist.md`：5 分钟极速验收版
+- `docs/recommended-config-templates.md`：推荐配置模板清单
 - `scripts/deploy-zeabur.sh`：Zeabur 发布脚本
 - `scripts/deploy-debian.sh`：服务器部署脚本
 - `docker-compose.yml`：本地 / 服务器容器部署
@@ -163,6 +165,14 @@ python3 -m py_compile app.py
 每次重新部署后，建议按这份清单快速验证：
 
 `docs/post-deploy-checklist.md`
+
+如果只想快速做 5 分钟验收：
+
+`docs/post-deploy-5min-checklist.md`
+
+如果你想直接照抄可用配置：
+
+`docs/recommended-config-templates.md`
 
 ## 当前仓库
 
