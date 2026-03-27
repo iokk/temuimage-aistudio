@@ -1,0 +1,14 @@
+{
+  "name": "xiaobaitu-platform",
+  "private": true,
+  "packageManager": "pnpm@9.12.3",
+  "scripts": {
+    "dev:web": "pnpm --filter web dev",
+    "dev:api": "uvicorn apps.api.main:app --reload --port 8000",
+    "build:web": "pnpm --filter web build",
+    "lint:web": "pnpm --filter web lint",
+    "prisma:generate": "pnpm --filter @xiaobaitu/db prisma generate",
+    "prisma:migrate": "pnpm --filter @xiaobaitu/db prisma migrate dev",
+    "prisma:studio": "pnpm --filter @xiaobaitu/db prisma studio"
+  }
+}

@@ -18,6 +18,10 @@ venv/
 data/
 *.json
 !.env.example
+!package.json
+!apps/**/package.json
+!packages/**/package.json
+!apps/**/tsconfig.json
 .env
 output/
 tmp/
@@ -38,6 +42,10 @@ docker-compose.override.yml
 .DS_Store
 Thumbs.db
 .worktrees/
+node_modules/
+.next/
+dist/
+coverage/
 
 # SSL证书
 nginx/ssl/*.pem

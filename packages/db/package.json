@@ -1,0 +1,16 @@
+{
+  "name": "@xiaobaitu/db",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "prisma": "prisma",
+    "generate": "prisma generate",
+    "migrate": "prisma migrate dev"
+  },
+  "dependencies": {
+    "@prisma/client": "5.22.0"
+  },
+  "devDependencies": {
+    "prisma": "5.22.0"
+  }
+}
