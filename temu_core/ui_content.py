@@ -8,14 +8,14 @@ def build_feature_catalog():
             "nav": "工作台",
             "emoji": "⬚",
             "title": "工作台",
-            "subtitle": "统一查看系统模式、引擎状态和四个核心功能入口。",
+            "subtitle": "查看当前模式、默认引擎和四个核心功能入口。",
         },
         {
             "key": "combo",
             "nav": "批量出图",
             "emoji": "▥",
             "title": "批量出图",
-            "subtitle": "多张参考图、多类型卖点图的标准工作流。",
+            "subtitle": "多张参考图、多类型卖点图的标准流程。",
         },
         {
             "key": "smart",
@@ -29,14 +29,14 @@ def build_feature_catalog():
             "nav": "标题优化",
             "emoji": "⌘",
             "title": "标题优化",
-            "subtitle": "结合图片和补充信息输出英文标题。",
+            "subtitle": "结合图片与补充信息输出英文标题。",
         },
         {
             "key": "translate",
             "nav": "图片翻译",
             "emoji": "⇄",
             "title": "图片翻译",
-            "subtitle": "提取文字、翻译并生成译后图。",
+            "subtitle": "提取文字、翻译并生成译后图片。",
         },
     ]
 

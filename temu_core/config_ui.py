@@ -38,7 +38,7 @@ def build_recommended_provider_templates():
     return [
         {
             "title": "推荐模板：中转站主力模式",
-            "summary": "图片生成走中转站，分析/标题走 relay 分析模型，适合管理员模式。",
+            "summary": "图片生成走中转站，分析和标题走 relay 分析模型。",
         },
         {
             "title": "推荐模板：官方 Gemini 模式",

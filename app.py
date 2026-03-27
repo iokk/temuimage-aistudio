@@ -24,6 +24,15 @@ import requests
 from google import genai
 from google.genai import types
 from sqlalchemy import select
+from temu_core.branding import (
+    APP_COMPANY,
+    APP_EN_NAME,
+    APP_LAST_UPDATED,
+    APP_NAME,
+    APP_TAGLINE,
+    APP_VERSION,
+    build_footer_meta,
+)
 from temu_core.auth import (
     authenticate_local_user,
     backup_and_delete_local_user,
@@ -119,9 +128,6 @@ from temu_core.usability_ui import (
 )
 
 # ==================== 配置常量 ====================
-APP_LAST_UPDATED = "最近更新 2026-03-26"
-APP_TAGLINE = "批量出图 · 快速出图 · 标题优化 · 图片翻译"
-APP_NAME = "TEMU AI Studio"
 BRAND_MARK_PATH = Path(__file__).parent / "assets" / "brand-mark.svg"
 
 DATA_DIR = Path("/app/data") if os.path.exists("/app/data") else Path("./data")
@@ -4616,12 +4622,15 @@ def apply_style():
 
 def show_footer():
     today_images = get_today_generated_images_count()
+    footer_meta = build_footer_meta()
     st.markdown(
         f"""
     <div class="footer">
-        <p><strong>{APP_NAME}</strong> · {APP_LAST_UPDATED}</p>
+        <p><strong>{APP_NAME}</strong> · {APP_EN_NAME}</p>
         <p>📈 今日已出图: <strong>{today_images}</strong> 张</p>
         <p>{APP_TAGLINE}</p>
+        <p>{footer_meta["company_line"]}</p>
+        <p>{footer_meta["version_line"]}</p>
         <p style="margin-top:0.75rem;font-size:11px;color:#94a3b8">© {datetime.now().year} All Rights Reserved.</p>
     </div>
     """,
@@ -5847,10 +5856,10 @@ def render_registered_system_service_login(s):
 # ==================== 登录页 ====================
 def show_login():
     render_brand_mark(center=True, width=84)
-    st.markdown(f'<div class="main-title">🍌 {APP_NAME}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="main-title">{APP_NAME}</div>', unsafe_allow_html=True)
     st.markdown(
-        f'<p style="text-align:center;color:#64748b;margin-bottom:0.5rem">{APP_LAST_UPDATED}</p>'
-        f'<p style="text-align:center;color:#94a3b8;margin-bottom:1.5rem">{APP_TAGLINE}</p>',
+        f'<p style="text-align:center;color:#64748b;margin-bottom:0.4rem">{APP_EN_NAME} · {APP_LAST_UPDATED}</p>'
+        f'<p style="text-align:center;color:#94a3b8;margin-bottom:1.2rem">{APP_TAGLINE}</p>',
         unsafe_allow_html=True,
     )
 
@@ -8976,7 +8985,7 @@ def main_app():
         render_brand_mark(width=58)
         st.markdown(
             f"""<div class="sidebar-brand">
-            <div class="sidebar-kicker">AI Studio</div>
+            <div class="sidebar-kicker">{APP_EN_NAME}</div>
             <div class="sidebar-title">{APP_NAME}</div>
             <div class="sidebar-subtitle">{APP_LAST_UPDATED}<br>{APP_TAGLINE}</div>
             </div>""",
