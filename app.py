@@ -43,6 +43,7 @@ from temu_core.auth import (
 )
 from temu_core.bootstrap import bootstrap_platform_runtime
 from temu_core.billing import charge_usage_to_wallet, get_wallet_dashboard
+from temu_core.credential_resolver import resolve_runtime_credentials
 from temu_core.db import get_database_status, session_scope
 from temu_core.models import EXPECTED_TABLES, User
 from temu_core.platform_status import describe_platform_database_status
@@ -57,6 +58,11 @@ from temu_core.relay_first_logic import (
     generate_requirements_with_text_client,
 )
 from temu_core.relay_text_client import RelayTextClient
+from temu_core.runtime_mode import (
+    get_runtime_mode,
+    should_force_registered_login,
+    should_show_team_features,
+)
 from temu_core.settings import (
     database_enabled as platform_database_enabled,
     get_platform_settings,
@@ -1441,6 +1447,39 @@ def clear_registered_auth_session():
     st.session_state.auth_provider = ""
 
 
+def set_own_credential_session(
+    provider: str,
+    gemini_key: str = "",
+    relay_key: str = "",
+    relay_base: str = "",
+    relay_model: str = "",
+):
+    st.session_state.authenticated = True
+    st.session_state.is_admin = False
+    st.session_state.use_own_key = True
+    st.session_state.own_provider = provider
+    st.session_state.own_api_key = str(gemini_key or "").strip()
+    st.session_state.own_relay_key = str(relay_key or "").strip()
+    st.session_state.own_relay_base = (
+        str(relay_base or RELAY_API_BASE).strip().rstrip("/")
+    )
+    st.session_state.own_relay_model = str(
+        relay_model
+        or st.session_state.get("own_relay_model")
+        or "gemini-3.1-flash-image-preview"
+    ).strip()
+    clear_registered_auth_session()
+
+
+def clear_own_credential_session():
+    st.session_state.use_own_key = False
+    st.session_state.own_provider = "gemini"
+    st.session_state.own_api_key = ""
+    st.session_state.own_relay_key = ""
+    st.session_state.own_relay_base = RELAY_API_BASE
+    st.session_state.own_relay_model = "gemini-3.1-flash-image-preview"
+
+
 def platform_auth_status() -> dict:
     return get_database_status(EXPECTED_TABLES)
 
@@ -1451,6 +1490,33 @@ def platform_auth_ready() -> bool:
         status.get("configured")
         and status.get("reachable")
         and not status.get("missing_tables")
+    )
+
+
+def current_runtime_mode() -> str:
+    return get_runtime_mode(platform_database_enabled(), platform_auth_ready())
+
+
+def get_runtime_credentials(preferred_provider: str = ""):
+    settings = get_settings()
+    provider = preferred_provider or settings.get("default_image_provider", "Gemini")
+    provider = "relay" if provider == "中转站" else provider.lower()
+    return resolve_runtime_credentials(
+        preferred_provider=provider,
+        use_own_credentials=bool(st.session_state.get("use_own_key")),
+        own_provider=st.session_state.get("own_provider", "gemini"),
+        own_gemini_key=st.session_state.get("own_api_key", ""),
+        own_relay_key=st.session_state.get("own_relay_key", ""),
+        own_relay_base=st.session_state.get("own_relay_base", RELAY_API_BASE),
+        own_relay_model=st.session_state.get(
+            "own_relay_model", "gemini-3.1-flash-image-preview"
+        ),
+        system_gemini_key=peek_system_api_key(),
+        system_relay_key=settings.get("relay_api_key", ""),
+        system_relay_base=settings.get("relay_api_base", RELAY_API_BASE),
+        system_relay_model=settings.get(
+            "relay_default_image_model", "gemini-3.1-flash-image-preview"
+        ),
     )
 
 
@@ -3873,7 +3939,11 @@ def init_session():
         "authenticated": False,
         "is_admin": False,
         "use_own_key": False,
+        "own_provider": "gemini",
         "own_api_key": "",
+        "own_relay_key": "",
+        "own_relay_base": RELAY_API_BASE,
+        "own_relay_model": "gemini-3.1-flash-image-preview",
         "auth_user_id": "",
         "auth_username": "",
         "auth_display_name": "",
@@ -3919,6 +3989,7 @@ def init_session():
         "platform_wallet_balance": 0,
         "platform_context_error": "",
         "platform_project_options": [],
+        "current_page": "工作台",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -3930,7 +4001,11 @@ def reset_working_session():
         "authenticated",
         "is_admin",
         "use_own_key",
+        "own_provider",
         "own_api_key",
+        "own_relay_key",
+        "own_relay_base",
+        "own_relay_model",
         "auth_user_id",
         "auth_username",
         "auth_display_name",
@@ -3950,6 +4025,7 @@ def reset_working_session():
         "platform_wallet_balance",
         "platform_context_error",
         "platform_project_options",
+        "current_page",
     }
     for k in list(st.session_state.keys()):
         if k not in keep_keys:
@@ -4310,6 +4386,16 @@ def render_gemini3_settings(prefix: str, model_key: str):
 
 def render_image_engine_selector(prefix: str, settings: dict):
     default_provider = settings.get("default_image_provider", "Gemini")
+    if (
+        st.session_state.get("use_own_key")
+        and st.session_state.get("own_provider") == "relay"
+    ):
+        default_provider = "中转站"
+    elif (
+        st.session_state.get("use_own_key")
+        and st.session_state.get("own_provider") == "gemini"
+    ):
+        default_provider = "Gemini"
     provider = st.radio(
         "出图引擎",
         ["Gemini", "中转站"],
@@ -4317,10 +4403,19 @@ def render_image_engine_selector(prefix: str, settings: dict):
         horizontal=True,
         key=f"{prefix}_image_provider",
     )
-    relay_model = settings.get("relay_default_image_model", "imagine_x_1")
+    relay_model = settings.get(
+        "relay_default_image_model", "gemini-3.1-flash-image-preview"
+    )
     relay_key = ""
     relay_base = settings.get("relay_api_base", RELAY_API_BASE)
     saved_relay_key = settings.get("relay_api_key", "")
+    if (
+        st.session_state.get("use_own_key")
+        and st.session_state.get("own_provider") == "relay"
+    ):
+        relay_model = st.session_state.get("own_relay_model", relay_model)
+        relay_base = st.session_state.get("own_relay_base", relay_base)
+        saved_relay_key = st.session_state.get("own_relay_key", saved_relay_key)
     if provider == "Gemini":
         st.caption(f"Gemini 默认模型：{MODELS[PRIMARY_IMAGE_MODEL]['name']}")
     else:
@@ -4363,6 +4458,17 @@ def render_image_engine_selector(prefix: str, settings: dict):
             relay_base_input,
             relay_model,
         )
+        if (
+            st.session_state.get("use_own_key")
+            and st.session_state.get("own_provider") == "relay"
+        ):
+            relay_key = st.session_state.get("own_relay_key", relay_key) or relay_key
+            relay_base = (
+                st.session_state.get("own_relay_base", relay_base) or relay_base
+            )
+            relay_model = (
+                st.session_state.get("own_relay_model", relay_model) or relay_model
+            )
         status = RELAY_MODEL_STATUS.get(relay_model, {})
         if status:
             st.markdown(
@@ -4771,6 +4877,7 @@ def show_login():
     bootstrap_runtime_config()
     s = get_settings()
     allow_user_passwordless_login = bool(s.get("allow_user_passwordless_login", False))
+    runtime_mode = current_runtime_mode()
 
     if not _has_system_service_access():
         with st.expander("🚀 系统服务初始化", expanded=True):
@@ -4840,11 +4947,11 @@ def show_login():
                         st.success("已保存！")
                         st.rerun()
 
-    t1, t2, t3 = st.tabs(["🔑 自己的API Key", "🎫 系统服务", "🛰️ 中转站配置"])
+    t1, t2, t3 = st.tabs(["🔐 我的凭据", "🎫 系统服务", "⚙️ 系统配置"])
 
     with t1:
         st.markdown(
-            '<div class="info-card"><strong>💡 自有 Key 模式</strong><br><span style="font-size:13px;color:#64748b">支持 Gemini API Key（AIza...）和 Vertex Express Key（AQ...）</span></div>',
+            '<div class="info-card"><strong>💡 我的凭据</strong><br><span style="font-size:13px;color:#64748b">你可以使用自己的 Gemini 官方 Key，或自己的中转站 URL / Key / 模型。</span></div>',
             unsafe_allow_html=True,
         )
         key = st.text_input(
@@ -4853,26 +4960,70 @@ def show_login():
             placeholder="AIza... 或 AQ...",
             key="login_key",
         )
-        c1, c2 = st.columns([1, 2])
+        relay_input_base = st.text_input(
+            "我的中转站 API 地址",
+            value=st.session_state.get("own_relay_base", RELAY_API_BASE),
+            key="login_own_relay_base",
+        )
+        relay_input_key = st.text_input(
+            "我的中转站 API Key",
+            type="password",
+            key="login_own_relay_key",
+        )
+        relay_input_model = st.selectbox(
+            "我的中转站模型",
+            list(RELAY_IMAGE_MODELS.keys()),
+            index=list(RELAY_IMAGE_MODELS.keys()).index(
+                st.session_state.get(
+                    "own_relay_model", "gemini-3.1-flash-image-preview"
+                )
+            )
+            if st.session_state.get("own_relay_model", "gemini-3.1-flash-image-preview")
+            in RELAY_IMAGE_MODELS
+            else 0,
+            key="login_own_relay_model",
+        )
+        c1, c2, c3 = st.columns([1, 1, 2])
         with c1:
-            if st.button("🚀 立即使用", type="primary", use_container_width=True):
+            if st.button(
+                "使用我的 Gemini Key", type="primary", use_container_width=True
+            ):
                 key = (key or "").strip()
                 if key and (key.startswith("AIza") or key.startswith("AQ.")):
                     try:
                         create_genai_client(key)
-                        st.session_state.authenticated = True
-                        st.session_state.use_own_key = True
-                        st.session_state.own_api_key = key
-                        st.session_state.is_admin = False
-                        clear_registered_auth_session()
+                        set_own_credential_session("gemini", gemini_key=key)
                         st.rerun()
                     except Exception as e:
                         st.error(f"❌ 验证失败: {str(e)[:80]}")
                 else:
                     st.error("请输入有效的 API Key（`AIza...` 或 `AQ...`）")
         with c2:
+            if st.button("使用我的中转站", use_container_width=True):
+                relay_runtime_key, relay_runtime_base, relay_runtime_model = (
+                    resolve_relay_runtime_config(
+                        get_settings(),
+                        relay_input_key,
+                        relay_input_base,
+                        relay_input_model,
+                    )
+                )
+                ok, msg = probe_relay_api(
+                    relay_runtime_base, relay_runtime_key, relay_runtime_model
+                )
+                if not ok:
+                    st.error(f"❌ 中转站验证失败: {msg}")
+                else:
+                    set_own_credential_session(
+                        "relay",
+                        relay_key=relay_runtime_key,
+                        relay_base=relay_runtime_base,
+                        relay_model=relay_runtime_model,
+                    )
+                    st.rerun()
+        with c3:
             st.markdown(
-                '<a href="https://aistudio.google.com/apikey" target="_blank" style="color:#6366f1;font-size:13px">🔗 获取 Gemini API Key →</a>',
+                '<a href="https://aistudio.google.com/apikey" target="_blank" style="color:#6366f1;font-size:13px">🔗 获取 Gemini API Key →</a><br><span style="font-size:12px;color:#64748b">如果你选择中转站，登录后 1/2/3 会优先复用你自己的中转站配置。</span>',
                 unsafe_allow_html=True,
             )
 
@@ -4883,27 +5034,18 @@ def show_login():
         )
         notice = build_admin_mode_notice(
             has_service_access=_has_system_service_access(),
-            team_ready=platform_auth_ready(),
+            team_ready=(runtime_mode == "team_mode"),
         )
         render_notice_card(notice["title"], notice["body"], notice["level"])
-        if platform_auth_ready():
+        if runtime_mode == "team_mode":
             render_registered_system_service_login(s)
         else:
-            db_info = describe_platform_database_status(
-                platform_auth_status(),
-                auto_migrate=get_platform_settings().platform_auto_migrate,
-                has_service_access=_has_system_service_access(),
-            )
-            if db_info.get("detail"):
-                st.caption(db_info["detail"])
-            st.caption(
-                "当前默认使用管理员模式；如需注册用户、钱包和团队项目，再启用数据库。"
-            )
+            st.caption("当前默认使用管理员工具模式；注册用户、钱包和团队项目已隐藏。")
             render_legacy_system_service_login(s, allow_user_passwordless_login)
 
     with t3:
         st.markdown(
-            '<div class="info-card"><strong>🛰️ 中转站入口</strong><br><span style="font-size:13px;color:#64748b">这里可以直接填写中转站 API 地址、API Key，并测试连通性。</span></div>',
+            '<div class="info-card"><strong>⚙️ 系统配置入口</strong><br><span style="font-size:13px;color:#64748b">这里用于管理员统一配置系统级中转站，普通用户自己的凭据请在「我的凭据」中处理。</span></div>',
             unsafe_allow_html=True,
         )
         render_relay_config_panel("login", s, expanded=True)
@@ -5880,14 +6022,15 @@ Aspect: {aspect}"""
 def show_title_page():
     st.markdown('<div class="page-title">3 标题优化</div>', unsafe_allow_html=True)
 
-    api_key = (
-        st.session_state.own_api_key
-        if st.session_state.use_own_key
-        else get_next_api_key()
+    runtime_credentials = get_runtime_credentials(
+        "relay"
+        if st.session_state.get("use_own_key")
+        and st.session_state.get("own_provider") == "relay"
+        else "gemini"
     )
 
-    if not api_key:
-        st.error("⚠️ 无可用的API Key")
+    if not runtime_credentials.get("api_key"):
+        st.error("⚠️ 当前未配置可用凭据，请先在“我的凭据”或“系统配置”中配置。")
         return
 
     title_templates = get_title_templates()
@@ -6020,7 +6163,20 @@ def show_title_page():
     ):
         with st.spinner("🤖 AI生成中..."):
             try:
-                client = GeminiClient(api_key, model=TITLE_TEXT_MODEL)
+                if runtime_credentials.get("provider") == "relay":
+                    client = RelayTextClient(
+                        runtime_credentials.get("api_key", ""),
+                        runtime_credentials.get("model")
+                        or get_settings().get(
+                            "relay_default_image_model",
+                            "gemini-3.1-flash-image-preview",
+                        ),
+                        base_url=runtime_credentials.get("base_url") or RELAY_API_BASE,
+                    )
+                else:
+                    client = GeminiClient(
+                        runtime_credentials.get("api_key", ""), model=TITLE_TEXT_MODEL
+                    )
                 titles, title_warnings = generate_compliant_titles_or_raise(
                     client,
                     uploaded_images,
@@ -6039,8 +6195,12 @@ def show_title_page():
 
                     record_platform_usage_event_safe(
                         feature="title_optimization",
-                        provider="Gemini",
-                        model=TITLE_TEXT_MODEL,
+                        provider="Gemini"
+                        if runtime_credentials.get("provider") == "gemini"
+                        else "中转站",
+                        model=TITLE_TEXT_MODEL
+                        if runtime_credentials.get("provider") == "gemini"
+                        else runtime_credentials.get("model") or "relay-text",
                         request_count=1,
                         output_images=0,
                         tokens_used=client.get_tokens_used(),
@@ -6979,22 +7139,21 @@ def show_admin():
     st.markdown('<div class="page-title">⚙️ 管理后台</div>', unsafe_allow_html=True)
 
     s = get_settings()
-    tabs = st.tabs(
-        [
-            "📊 基础设置",
-            "🔐 密码配额",
-            "🔑 API Keys",
-            "🛡️ 合规设置",
-            "📝 提示词",
-            "🏷️ 标题模板",
-            "🎨 组图模板",
-            "👥 用户管理",
-            "🏢 团队工作区",
-            "💳 定价规则",
-            "🏦 钱包账本",
-            "🎟️ 兑换码",
-        ]
-    )
+    runtime_mode = current_runtime_mode()
+    tab_labels = [
+        "📊 基础设置",
+        "🔐 密码配额",
+        "🔑 API Keys",
+        "🛡️ 合规设置",
+        "📝 提示词",
+        "🏷️ 标题模板",
+        "🎨 组图模板",
+    ]
+    if should_show_team_features(runtime_mode):
+        tab_labels.extend(
+            ["👥 用户管理", "🏢 团队工作区", "💳 定价规则", "🏦 钱包账本", "🎟️ 兑换码"]
+        )
+    tabs = st.tabs(tab_labels)
 
     with tabs[0]:
         st.markdown("### 📊 系统统计")
@@ -7561,38 +7720,39 @@ def show_admin():
             save_templates(templates)
             st.success("✅ 已保存")
 
-    with tabs[7]:
-        st.markdown("### 注册用户管理")
-        st.caption("管理员可以一键停用注册、重置密码、备份并删除用户。")
-        render_user_admin_tab()
+    if should_show_team_features(runtime_mode):
+        with tabs[7]:
+            st.markdown("### 注册用户管理")
+            st.caption("管理员可以一键停用注册、重置密码、备份并删除用户。")
+            render_user_admin_tab()
 
-    with tabs[8]:
-        st.markdown("### Workspace Foundation")
-        st.caption(
-            "Projects and members are provisioned in PostgreSQL while the legacy session auth remains untouched to avoid conflicts."
-        )
-        render_workspace_admin_tab()
+        with tabs[8]:
+            st.markdown("### Workspace Foundation")
+            st.caption(
+                "Projects and members are provisioned in PostgreSQL while the legacy session auth remains untouched to avoid conflicts."
+            )
+            render_workspace_admin_tab()
 
-    with tabs[9]:
-        st.markdown("### Pricing Foundation")
-        st.caption(
-            "Shared-wallet debits use these pricing rules. BYOK traffic records usage but skips wallet debits."
-        )
-        render_pricing_admin_tab()
+        with tabs[9]:
+            st.markdown("### Pricing Foundation")
+            st.caption(
+                "Shared-wallet debits use these pricing rules. BYOK traffic records usage but skips wallet debits."
+            )
+            render_pricing_admin_tab()
 
-    with tabs[10]:
-        st.markdown("### Team Wallet Foundation")
-        st.caption(
-            "This tab uses the new PostgreSQL billing foundation and is ready for Zeabur managed databases."
-        )
-        render_billing_admin_tab()
+        with tabs[10]:
+            st.markdown("### Team Wallet Foundation")
+            st.caption(
+                "This tab uses the new PostgreSQL billing foundation and is ready for Zeabur managed databases."
+            )
+            render_billing_admin_tab()
 
-    with tabs[11]:
-        st.markdown("### Redeem Code Foundation")
-        st.caption(
-            "Use batches for admin-issued recharge codes, offline transfer fulfillment, and future channel distribution."
-        )
-        render_redeem_code_admin_tab()
+        with tabs[11]:
+            st.markdown("### Redeem Code Foundation")
+            st.caption(
+                "Use batches for admin-issued recharge codes, offline transfer fulfillment, and future channel distribution."
+            )
+            render_redeem_code_admin_tab()
 
     st.markdown("---")
     if st.button("← 返回", use_container_width=True):
@@ -7602,8 +7762,13 @@ def show_admin():
 
 # ==================== 主应用 ====================
 def main_app():
+    runtime_mode = current_runtime_mode()
     feature_catalog = build_feature_catalog()
     page_options = [item["nav"] for item in feature_catalog]
+    if not should_show_team_features(runtime_mode):
+        page_options = [item for item in page_options if item != "工作台"]
+        if st.session_state.get("current_page") == "工作台":
+            st.session_state.current_page = "批量出图"
     with st.sidebar:
         st.markdown(
             f"""<div class="sidebar-brand">
@@ -7621,6 +7786,7 @@ def main_app():
             "功能",
             page_options,
             label_visibility="collapsed",
+            key="current_page",
         )
         st.markdown("---")
 
@@ -7631,11 +7797,19 @@ def main_app():
             _, used, limit = check_user_limit(uid)
             st.info(f"今日: {used}/{limit}")
 
-        st.markdown(
-            '<div class="sidebar-section-title">工作区状态</div>',
-            unsafe_allow_html=True,
-        )
-        render_platform_workspace_sidebar()
+        if should_show_team_features(runtime_mode):
+            st.markdown(
+                '<div class="sidebar-section-title">工作区状态</div>',
+                unsafe_allow_html=True,
+            )
+            render_platform_workspace_sidebar()
+        else:
+            st.markdown(
+                '<div class="sidebar-section-title">当前模式</div>',
+                unsafe_allow_html=True,
+            )
+            st.caption("管理员工具模式")
+            st.caption("核心功能可直接使用，团队功能已隐藏")
 
         if st.session_state.use_own_key or st.session_state.is_admin:
             st.markdown("---")
@@ -7697,7 +7871,9 @@ def main():
         show_login()
         return
 
-    if platform_auth_ready() and st.session_state.get("auth_user_id"):
+    runtime_mode = current_runtime_mode()
+
+    if runtime_mode == "team_mode" and st.session_state.get("auth_user_id"):
         if not validate_active_registered_session():
             for key in list(st.session_state.keys()):
                 if key not in {"remember_login", "remember_role", "remember_until"}:
@@ -7706,11 +7882,11 @@ def main():
             show_login()
             return
 
-    if (
-        platform_auth_ready()
-        and not st.session_state.get("is_admin")
-        and not st.session_state.get("use_own_key")
-        and not st.session_state.get("auth_user_id")
+    if should_force_registered_login(
+        runtime_mode=runtime_mode,
+        is_admin=bool(st.session_state.get("is_admin")),
+        use_own_key=bool(st.session_state.get("use_own_key")),
+        has_auth_user_id=bool(st.session_state.get("auth_user_id")),
     ):
         for key in list(st.session_state.keys()):
             if key not in {"remember_login", "remember_role", "remember_until"}:
@@ -7719,7 +7895,8 @@ def main():
         show_login()
         return
 
-    sync_platform_session_context()
+    if runtime_mode == "team_mode":
+        sync_platform_session_context()
 
     if st.session_state.get("show_admin") and st.session_state.is_admin:
         show_admin()
