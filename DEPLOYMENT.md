@@ -106,6 +106,12 @@ PORT=8501
 curl http://localhost:8501/_stcore/health
 ```
 
+## 5.1 上线后验证
+
+部署完成后，建议按这份清单快速验证：
+
+`docs/post-deploy-checklist.md`
+
 ## 6. 常见问题
 
 - `FAILED_PRECONDITION`：优先改走 Vertex Express / Vertex AI 区域端点

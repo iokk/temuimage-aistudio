@@ -65,3 +65,9 @@ The app should remain stateless. Persistent business state must not depend on `/
 ## Deploy Button note
 
 Zeabur `Deploy Button` requires a Zeabur template entry first. After you create the template from `template.yaml`, you can generate a reusable Deploy Button in the Zeabur dashboard and paste it into `README.md`.
+
+## Post-deploy checklist
+
+After every Zeabur deployment, run the product validation checklist in:
+
+`docs/post-deploy-checklist.md`
