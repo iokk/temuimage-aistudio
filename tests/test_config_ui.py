@@ -12,11 +12,11 @@ from temu_core.config_ui import (
 class ConfigUITest(unittest.TestCase):
     def test_login_tabs_hide_system_config_in_admin_mode(self):
         tabs = build_login_tab_labels("admin_tool_mode")
-        self.assertEqual(tabs, ["🔐 我的凭据", "🎫 系统服务"])
+        self.assertEqual(tabs, ["👤 个人模式", "🛠️ 团队/管理员"])
 
     def test_login_tabs_show_system_config_in_team_mode(self):
         tabs = build_login_tab_labels("team_mode")
-        self.assertEqual(tabs, ["🔐 我的凭据", "🎫 系统服务", "⚙️ 系统配置"])
+        self.assertEqual(tabs, ["👤 个人模式", "🛠️ 团队/管理员"])
 
     def test_settings_sections_have_personal_and_system_blocks(self):
         sections = build_settings_sections()

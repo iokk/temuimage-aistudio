@@ -101,6 +101,11 @@ from temu_core.ui_content import (
     build_page_sections,
     build_result_summary,
 )
+from temu_core.usability_ui import (
+    build_core_function_nav,
+    build_page_switch_targets,
+    get_thumbnail_sizes,
+)
 
 # ==================== 配置常量 ====================
 APP_LAST_UPDATED = "最近更新 2026-03-26"
@@ -4015,6 +4020,109 @@ def render_action_reasons(title: str, reasons: list, success_note: str = ""):
         render_notice_card(title, success_note, "success")
 
 
+def set_current_page(page: str):
+    st.session_state.current_page = page
+    st.rerun()
+
+
+def render_sidebar_primary_nav(current_page: str):
+    home_col, reset_col = st.columns(2)
+    with home_col:
+        if st.button("⌂ 首页", key="nav_home", use_container_width=True):
+            set_current_page("工作台")
+    with reset_col:
+        if st.button("↺ 新任务", key="nav_new_task", use_container_width=True):
+            reset_working_session()
+            st.rerun()
+
+    nav_items = build_core_function_nav()
+    for row_start in range(0, len(nav_items), 2):
+        cols = st.columns(2)
+        for idx, item in enumerate(nav_items[row_start : row_start + 2]):
+            label = item["label"]
+            button_label = f"● {label}" if current_page == label else label
+            with cols[idx]:
+                if st.button(
+                    button_label,
+                    key=f"nav_{item['key']}",
+                    use_container_width=True,
+                ):
+                    set_current_page(label)
+
+
+def render_page_toolbar(
+    current_page: str, restart_key: str, restart_label: str = "重新开始当前任务"
+):
+    targets = build_page_switch_targets(current_page)
+    cols = st.columns(len(targets) + 1)
+    for idx, item in enumerate(targets):
+        with cols[idx]:
+            if st.button(
+                item["label"],
+                key=f"toolbar_{current_page}_{item['key']}",
+                use_container_width=True,
+            ):
+                target = "工作台" if item["key"] == "workspace" else item["label"]
+                set_current_page(target)
+    with cols[-1]:
+        return st.button(restart_label, key=restart_key, use_container_width=True)
+
+
+def render_thumbnail_gallery(images: list, kind: str, max_visible: int = 8):
+    if not images:
+        return
+    size = get_thumbnail_sizes().get(kind, 84)
+    visible = images[:max_visible]
+    cols = st.columns(min(len(visible), 4))
+    for idx, image in enumerate(visible):
+        with cols[idx % len(cols)]:
+            st.image(image, caption=f"图{idx + 1}", width=size)
+    if len(images) > max_visible:
+        st.caption(f"已加载 {len(images)} 张，仅显示前 {max_visible} 张缩略图。")
+
+
+def reset_combo_task_state():
+    st.session_state.combo_anchor = None
+    st.session_state.combo_reqs = []
+    st.session_state.combo_images = []
+    st.session_state.combo_results = []
+    st.session_state.combo_errors = []
+    st.session_state.combo_titles = []
+    st.session_state.combo_title_error = ""
+    st.session_state.combo_title_warnings = []
+    st.session_state.combo_generation_done = False
+    st.session_state.combo_generating = False
+
+
+def reset_smart_task_state():
+    st.session_state.smart_results = []
+    st.session_state.smart_errors = []
+    st.session_state.smart_titles = []
+    st.session_state.smart_title_error = ""
+    st.session_state.smart_title_warnings = []
+    st.session_state.smart_generation_done = False
+    st.session_state.smart_generating = False
+
+
+def reset_title_task_state():
+    for key in [
+        "title_input_mode",
+        "title_product_info",
+        "title_template_select",
+        "title_custom_prompt",
+    ]:
+        if key in st.session_state:
+            st.session_state.pop(key, None)
+
+
+def reset_translate_task_state():
+    st.session_state.img_trans_results = []
+    st.session_state.img_trans_errors = []
+    st.session_state.img_trans_tokens_used = 0
+    st.session_state.img_trans_done = False
+    st.session_state.img_trans_zip_cache = {"key": "", "bytes": b""}
+
+
 def render_section_frame(section: dict, index: int):
     st.markdown(
         f"""<div class="section-frame"><div class="section-eyebrow">Step {index}</div><div class="section-heading">{section.get("title", "")}</div><div class="section-caption">{section.get("desc", "")}</div></div>""",
@@ -5195,6 +5303,9 @@ def show_login():
 # ==================== 智能组图页面 ====================
 def show_combo_page():
     st.markdown('<div class="page-title">1 批量出图</div>', unsafe_allow_html=True)
+    if render_page_toolbar("批量出图", "combo_restart", "重新开始批量任务"):
+        reset_combo_task_state()
+        st.rerun()
     st.markdown(
         '<div class="info-card">标准批量工作流：先准备素材，再确认类型与图需，最后统一生成和查看结果。</div>',
         unsafe_allow_html=True,
@@ -5344,16 +5455,12 @@ def show_combo_page():
 
         if files:
             images = []
-            display_count = min(len(files), 6)
-            cols = st.columns(display_count)
+            display_count = min(len(files), MAX_IMAGES)
             for i, f in enumerate(files[:display_count]):
                 img = Image.open(f).convert("RGB")
                 images.append(img)
-                with cols[i]:
-                    st.image(img, caption=f"图{i + 1}", use_container_width=True)
-            for f in files[display_count:MAX_IMAGES]:
-                images.append(Image.open(f).convert("RGB"))
             st.session_state.combo_images = images
+            render_thumbnail_gallery(images, "combo")
             st.success(f"✅ 已加载 {len(images)} 张图片")
             ref_limit = recommended_ref_limit(model_key)
             if len(images) > ref_limit:
@@ -5841,6 +5948,9 @@ def show_combo_page():
 # ==================== 快速出图页面 ====================
 def show_smart_page():
     st.markdown('<div class="page-title">2 快速出图</div>', unsafe_allow_html=True)
+    if render_page_toolbar("快速出图", "smart_restart", "重新开始快速任务"):
+        reset_smart_task_state()
+        st.rerun()
     st.markdown(
         '<div class="info-card">快速工作流：上传商品图、选择类型、直接生成。适合单批高频操作。</div>',
         unsafe_allow_html=True,
@@ -5916,22 +6026,11 @@ def show_smart_page():
 
     images = []
     if files:
-        num_files = len(files)
-        if num_files == 1:
-            col1, col2, col3 = st.columns([1, 2, 1])
-            with col1:
-                img = Image.open(files[0]).convert("RGB")
-                images.append(img)
-                st.image(img, caption="图1", width=100)
-        else:
-            cols = st.columns(min(num_files, 6))
-            for i, f in enumerate(files[:6]):
-                img = Image.open(f).convert("RGB")
-                images.append(img)
-                with cols[i]:
-                    st.image(img, caption=f"图{i + 1}", width=80)
-            for f in files[6:MAX_IMAGES]:
-                images.append(Image.open(f).convert("RGB"))
+        for f in files[:MAX_IMAGES]:
+            img = Image.open(f).convert("RGB")
+            images.append(img)
+
+        render_thumbnail_gallery(images, "smart")
 
         st.success(f"✅ 已加载 {len(images)} 张图片")
 
@@ -6189,6 +6288,9 @@ Aspect: {aspect}"""
 # ==================== 标题生成页面 ====================
 def show_title_page():
     st.markdown('<div class="page-title">3 标题优化</div>', unsafe_allow_html=True)
+    if render_page_toolbar("标题优化", "title_restart", "重新开始标题任务"):
+        reset_title_task_state()
+        st.rerun()
 
     runtime_credentials = get_runtime_credentials(
         "relay"
@@ -6241,12 +6343,10 @@ def show_title_page():
         )
 
         if title_files:
-            cols = st.columns(min(len(title_files), 5))
-            for i, f in enumerate(title_files[:5]):
+            for i, f in enumerate(title_files[:MAX_IMAGES]):
                 img = Image.open(f).convert("RGB")
                 uploaded_images.append(img)
-                with cols[i]:
-                    st.image(img, caption=f"图{i + 1}", width=60)
+            render_thumbnail_gallery(uploaded_images, "title")
             st.success(f"✅ 已加载 {len(uploaded_images)} 张图片")
 
     if input_mode in ["📝 文字描述", "🔀 图片+文字"]:
@@ -6419,6 +6519,9 @@ def show_title_page():
 
 # ==================== 图片翻译页面 ====================
 def show_image_translate_page():
+    if render_page_toolbar("图片翻译", "translate_restart", "重新开始翻译任务"):
+        reset_translate_task_state()
+        st.rerun()
     st.markdown(
         """
     <div class="translate-header">
@@ -6833,10 +6936,9 @@ def show_image_translate_page():
             )
 
         if upload_items:
-            cols = st.columns(min(len(upload_items), 6))
-            for i, item in enumerate(upload_items[:6]):
-                with cols[i]:
-                    st.image(item["image"], caption=f"图{i + 1}", width=90)
+            render_thumbnail_gallery(
+                [item["image"] for item in upload_items], "translate"
+            )
             st.success(f"✅ 已加载 {len(upload_items)} 张图片")
 
         if invalid_msgs:
@@ -7902,10 +8004,10 @@ def main_app():
     runtime_mode = current_runtime_mode()
     feature_catalog = build_feature_catalog()
     page_options = [item["nav"] for item in feature_catalog]
-    if not should_show_team_features(runtime_mode):
-        page_options = [item for item in page_options if item != "工作台"]
-        if st.session_state.get("current_page") == "工作台":
-            st.session_state.current_page = "批量出图"
+    current_page = st.session_state.get("current_page") or "工作台"
+    if current_page not in page_options:
+        current_page = "工作台"
+        st.session_state.current_page = current_page
     with st.sidebar:
         render_brand_mark(width=58)
         st.markdown(
@@ -7920,12 +8022,8 @@ def main_app():
         st.markdown(
             '<div class="sidebar-section-title">核心功能</div>', unsafe_allow_html=True
         )
-        page = st.radio(
-            "功能",
-            page_options,
-            label_visibility="collapsed",
-            key="current_page",
-        )
+        render_sidebar_primary_nav(current_page)
+        page = st.session_state.get("current_page") or current_page
         st.markdown("---")
 
         if st.session_state.use_own_key:
@@ -7948,6 +8046,19 @@ def main_app():
             )
             st.caption("管理员工具模式")
             st.caption("核心功能可直接使用，团队功能已隐藏")
+
+        bg_tasks = list_image_translate_bg_tasks(get_user_id())
+        if bg_tasks:
+            st.markdown("---")
+            st.markdown(
+                '<div class="sidebar-section-title">后台任务</div>',
+                unsafe_allow_html=True,
+            )
+            st.caption(f"当前有 {len(bg_tasks)} 个图片翻译后台任务")
+            if st.button(
+                "打开图片翻译", key="nav_bg_translate", use_container_width=True
+            ):
+                set_current_page("图片翻译")
 
         if st.session_state.use_own_key or st.session_state.is_admin:
             st.markdown("---")

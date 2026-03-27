@@ -2,10 +2,7 @@ from __future__ import annotations
 
 
 def build_login_tab_labels(runtime_mode: str):
-    labels = ["🔐 我的凭据", "🎫 系统服务"]
-    if runtime_mode == "team_mode":
-        labels.append("⚙️ 系统配置")
-    return labels
+    return ["👤 个人模式", "🛠️ 团队/管理员"]
 
 
 def build_settings_sections():
