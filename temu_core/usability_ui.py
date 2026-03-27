@@ -25,3 +25,11 @@ def get_thumbnail_sizes():
         "title": 72,
         "translate": 88,
     }
+
+
+def build_task_indicator(task_count: int):
+    count = max(int(task_count or 0), 0)
+    return {
+        "show": count > 0,
+        "label": f"● 后台任务 {count}",
+    }

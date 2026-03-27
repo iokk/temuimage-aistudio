@@ -102,6 +102,7 @@ from temu_core.ui_content import (
     build_result_summary,
 )
 from temu_core.usability_ui import (
+    build_task_indicator,
     build_core_function_nav,
     build_page_switch_targets,
     get_thumbnail_sizes,
@@ -4054,7 +4055,8 @@ def render_page_toolbar(
     current_page: str, restart_key: str, restart_label: str = "重新开始当前任务"
 ):
     targets = build_page_switch_targets(current_page)
-    cols = st.columns(len(targets) + 1)
+    badge = build_task_indicator(len(list_image_translate_bg_tasks(get_user_id())))
+    cols = st.columns(len(targets) + 2 if badge["show"] else len(targets) + 1)
     for idx, item in enumerate(targets):
         with cols[idx]:
             if st.button(
@@ -4064,7 +4066,16 @@ def render_page_toolbar(
             ):
                 target = "工作台" if item["key"] == "workspace" else item["label"]
                 set_current_page(target)
-    with cols[-1]:
+    action_col_index = len(cols) - 1
+    if badge["show"]:
+        with cols[-2]:
+            if st.button(
+                badge["label"],
+                key=f"task_badge_{current_page}",
+                use_container_width=True,
+            ):
+                set_current_page("图片翻译")
+    with cols[action_col_index]:
         return st.button(restart_label, key=restart_key, use_container_width=True)
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from temu_core.usability_ui import (
+    build_task_indicator,
     build_core_function_nav,
     build_page_switch_targets,
     get_thumbnail_sizes,
@@ -28,6 +29,10 @@ class UsabilityUITest(unittest.TestCase):
         self.assertLessEqual(size_map["smart"], 96)
         self.assertLessEqual(size_map["title"], 80)
         self.assertLessEqual(size_map["translate"], 96)
+
+    def test_task_indicator_only_shows_when_pending_tasks_exist(self):
+        self.assertFalse(build_task_indicator(0)["show"])
+        self.assertTrue(build_task_indicator(2)["show"])
 
 
 if __name__ == "__main__":
