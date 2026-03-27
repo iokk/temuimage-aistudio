@@ -8,12 +8,53 @@ datasource db {
 }
 
 model User {
-  id          String   @id @default(cuid())
-  email       String   @unique
+  id          String       @id @default(cuid())
+  email       String       @unique
   name        String?
-  mode        String   @default("personal")
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  mode        String       @default("personal")
+  memberships Membership[]
+  credentials Credential[]
+  jobs        Job[]        @relation("UserJobs")
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+}
+
+model Organization {
+  id          String       @id @default(cuid())
+  name        String
+  slug        String       @unique
+  memberships Membership[]
+  credentials Credential[]
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+}
+
+model Membership {
+  id             String       @id @default(cuid())
+  userId         String
+  organizationId String
+  role           String       @default("member")
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([userId, organizationId])
+}
+
+model Credential {
+  id               String        @id @default(cuid())
+  ownerType        String
+  ownerId          String
+  provider         String
+  encryptedSecret  String
+  configJson       Json
+  userId           String?
+  organizationId   String?
+  user             User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  organization     Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
 }
 
 model Job {
@@ -21,6 +62,7 @@ model Job {
   type        String
   status      String   @default("queued")
   ownerId     String
+  owner       User     @relation("UserJobs", fields: [ownerId], references: [id], onDelete: Cascade)
   payload     Json
   result      Json?
   createdAt   DateTime @default(now())
