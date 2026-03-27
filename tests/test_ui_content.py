@@ -59,6 +59,7 @@ class UIContentTest(unittest.TestCase):
         actions = build_workspace_actions()
         self.assertEqual(len(actions), 4)
         self.assertEqual(actions[0]["target"], "批量出图")
+        self.assertEqual(actions[0]["label"], "批量出图")
 
 
 if __name__ == "__main__":

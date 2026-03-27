@@ -67,6 +67,30 @@ class ProviderPrecheckTest(unittest.TestCase):
             ],
         )
 
+    def test_shared_analysis_model_is_probed_once(self):
+        seen = []
+
+        def probe(base, key, model, capability):
+            seen.append((model, capability))
+            return True, "ok"
+
+        validate_relay_models(
+            provider="relay",
+            relay_base="https://relay.example.com/v1",
+            relay_key="sk-test",
+            image_model="seedream-5.0",
+            analysis_model="gemini-3.1-flash-lite-preview",
+            required_capabilities=[
+                "image_analysis",
+                "title_from_image",
+                "text_generation",
+            ],
+            probe_func=probe,
+        )
+
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0][0], "gemini-3.1-flash-lite-preview")
+
     def test_image_generation_probe_can_use_catalog_level_success(self):
         reasons = validate_relay_models(
             provider="relay",

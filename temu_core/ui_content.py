@@ -43,10 +43,10 @@ def build_feature_catalog():
 
 def build_workspace_actions():
     return [
-        {"target": "批量出图", "label": "进入批量出图"},
-        {"target": "快速出图", "label": "进入快速出图"},
-        {"target": "标题优化", "label": "进入标题优化"},
-        {"target": "图片翻译", "label": "进入图片翻译"},
+        {"target": "批量出图", "label": "批量出图"},
+        {"target": "快速出图", "label": "快速出图"},
+        {"target": "标题优化", "label": "标题优化"},
+        {"target": "图片翻译", "label": "图片翻译"},
     ]
 
 
@@ -62,7 +62,7 @@ def build_admin_mode_notice(has_service_access: bool, team_ready: bool):
         return {
             "level": "info",
             "title": "当前为管理员模式",
-            "body": "系统中转站或系统 Gemini 已可直接使用。只有注册用户、钱包、项目等团队功能才需要数据库。",
+            "body": "系统 Gemini 或系统中转站已可直接使用。团队功能需要数据库时再启用。",
         }
 
     return {

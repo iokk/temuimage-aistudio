@@ -4647,7 +4647,7 @@ def render_workspace_dashboard():
     usage_value = "无限额度" if st.session_state.use_own_key else f"{used}/{limit}"
     st.markdown(
         f"""<div class="shell-banner">
-            <div class="shell-kicker">Workspace Overview</div>
+            <div class="shell-kicker">AI Studio Dashboard</div>
             <div class="shell-heading">{APP_NAME}</div>
             <div class="shell-subtext">{APP_LAST_UPDATED} · {APP_TAGLINE}</div>
         </div>""",
@@ -8976,7 +8976,7 @@ def main_app():
         render_brand_mark(width=58)
         st.markdown(
             f"""<div class="sidebar-brand">
-            <div class="sidebar-kicker">TEMU AI Studio</div>
+            <div class="sidebar-kicker">AI Studio</div>
             <div class="sidebar-title">{APP_NAME}</div>
             <div class="sidebar-subtitle">{APP_LAST_UPDATED}<br>{APP_TAGLINE}</div>
             </div>""",

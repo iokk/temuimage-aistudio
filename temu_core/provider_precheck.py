@@ -26,6 +26,7 @@ def validate_relay_models(
     reasons = []
     if not str(relay_key or "").strip():
         return ["当前未配置可用的中转站 Key"]
+    probed = {}
 
     for capability in required_capabilities:
         target_model = (
@@ -38,7 +39,11 @@ def validate_relay_models(
                 f"当前模型 `{target_model}` 不支持{CAPABILITY_LABELS.get(capability, capability)}"
             )
             continue
-        ok, msg = probe_func(relay_base, relay_key, target_model, capability)
+        if target_model not in probed:
+            probed[target_model] = probe_func(
+                relay_base, relay_key, target_model, capability
+            )
+        ok, msg = probed[target_model]
         if not ok:
             reasons.append(f"当前模型 `{target_model}` 通道不可用：{msg}")
     seen = []
