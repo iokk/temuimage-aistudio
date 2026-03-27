@@ -4768,13 +4768,8 @@ def display_generation_results(
         display_generated_titles(titles, prefix)
 
 
-def render_legacy_system_service_login(s, allow_user_passwordless_login: bool):
-    user_role_name = (
-        "👤 普通用户（免密）" if allow_user_passwordless_login else "👤 普通用户"
-    )
-    role = st.radio(
-        "身份", [user_role_name, "🛠️ 管理员"], horizontal=True, key="role_select"
-    )
+def render_admin_tool_mode_login(s):
+    st.caption("当前为管理员工具模式，不提供注册用户/系统普通用户入口。")
     remember_default = st.session_state.get("remember_login", False)
     remember_login = st.checkbox(
         "记住本次登录（8小时）", value=remember_default, key="remember_login"
@@ -4784,75 +4779,28 @@ def render_legacy_system_service_login(s, allow_user_passwordless_login: bool):
         remember_login
         and st.session_state.get("remember_until", 0) > datetime.now().timestamp()
     ):
-        if role.startswith("👤"):
-            if (
-                _has_system_service_access()
-                and st.session_state.get("remember_role") == "user"
-            ):
-                st.session_state.authenticated = True
-                st.session_state.use_own_key = False
-                st.session_state.is_admin = False
-                clear_registered_auth_session()
-                st.rerun()
-        else:
-            if st.session_state.get("remember_role") == "admin":
-                st.session_state.authenticated = True
-                st.session_state.is_admin = True
-                st.session_state.use_own_key = False
-                clear_registered_auth_session()
-                st.rerun()
+        if st.session_state.get("remember_role") == "admin":
+            st.session_state.authenticated = True
+            st.session_state.is_admin = True
+            st.session_state.use_own_key = False
+            clear_registered_auth_session()
+            clear_own_credential_session()
+            st.rerun()
 
-    if role.startswith("👤"):
-        if allow_user_passwordless_login:
-            st.success("✅ 已开启系统服务用户免密登录")
-            if st.button("👤 直接进入", type="primary", use_container_width=True):
-                if not _has_system_service_access():
-                    st.warning("⚠️ 系统未配置 Gemini Key 或系统中转站配置")
-                else:
-                    st.session_state.authenticated = True
-                    st.session_state.use_own_key = False
-                    st.session_state.is_admin = False
-                    clear_registered_auth_session()
-                    if remember_login:
-                        st.session_state.remember_role = "user"
-                        st.session_state.remember_until = (
-                            datetime.now().timestamp() + 8 * 3600
-                        )
-                    st.rerun()
+    admin_pwd = st.text_input("管理员密码", type="password", key="admin_pwd")
+    if st.button("🛠️ 进入后台", use_container_width=True):
+        if admin_pwd == s.get("admin_password"):
+            st.session_state.authenticated = True
+            st.session_state.is_admin = True
+            st.session_state.use_own_key = False
+            clear_registered_auth_session()
+            clear_own_credential_session()
+            if remember_login:
+                st.session_state.remember_role = "admin"
+                st.session_state.remember_until = datetime.now().timestamp() + 8 * 3600
+            st.rerun()
         else:
-            pwd = st.text_input("访问密码", type="password", key="login_pwd")
-            if st.button("👤 用户登录", type="primary", use_container_width=True):
-                if not _has_system_service_access():
-                    st.warning("⚠️ 系统未配置 Gemini Key 或系统中转站配置")
-                elif pwd == s.get("user_password"):
-                    st.session_state.authenticated = True
-                    st.session_state.use_own_key = False
-                    st.session_state.is_admin = False
-                    clear_registered_auth_session()
-                    if remember_login:
-                        st.session_state.remember_role = "user"
-                        st.session_state.remember_until = (
-                            datetime.now().timestamp() + 8 * 3600
-                        )
-                    st.rerun()
-                else:
-                    st.error("密码错误")
-    else:
-        admin_pwd = st.text_input("管理员密码", type="password", key="admin_pwd")
-        if st.button("🛠️ 进入后台", use_container_width=True):
-            if admin_pwd == s.get("admin_password"):
-                st.session_state.authenticated = True
-                st.session_state.is_admin = True
-                st.session_state.use_own_key = False
-                clear_registered_auth_session()
-                if remember_login:
-                    st.session_state.remember_role = "admin"
-                    st.session_state.remember_until = (
-                        datetime.now().timestamp() + 8 * 3600
-                    )
-                st.rerun()
-            else:
-                st.error("密码错误")
+            st.error("密码错误")
 
 
 def render_registered_system_service_login(s):
@@ -5051,7 +4999,13 @@ def show_login():
                         st.success("已保存！")
                         st.rerun()
 
-    t1, t2, t3 = st.tabs(["🔐 我的凭据", "🎫 系统服务", "⚙️ 系统配置"])
+    runtime_mode_tabs = ["🔐 我的凭据", "🎫 系统服务"]
+    if current_runtime_mode() == "team_mode":
+        runtime_mode_tabs.append("⚙️ 系统配置")
+    tabs = st.tabs(runtime_mode_tabs)
+    t1 = tabs[0]
+    t2 = tabs[1]
+    t3 = tabs[2] if len(tabs) > 2 else None
 
     with t1:
         st.markdown(
@@ -5145,14 +5099,15 @@ def show_login():
             render_registered_system_service_login(s)
         else:
             st.caption("当前默认使用管理员工具模式；注册用户、钱包和团队项目已隐藏。")
-            render_legacy_system_service_login(s, allow_user_passwordless_login)
+            render_admin_tool_mode_login(s)
 
-    with t3:
-        st.markdown(
-            '<div class="info-card"><strong>⚙️ 系统配置入口</strong><br><span style="font-size:13px;color:#64748b">这里用于管理员统一配置系统级中转站，普通用户自己的凭据请在「我的凭据」中处理。</span></div>',
-            unsafe_allow_html=True,
-        )
-        render_relay_config_panel("login", s, expanded=True)
+    if t3 is not None:
+        with t3:
+            st.markdown(
+                '<div class="info-card"><strong>⚙️ 系统配置入口</strong><br><span style="font-size:13px;color:#64748b">这里用于管理员统一配置系统级中转站，普通用户自己的凭据请在「我的凭据」中处理。</span></div>',
+                unsafe_allow_html=True,
+            )
+            render_relay_config_panel("login", s, expanded=True)
 
     show_footer()
 
@@ -7232,34 +7187,31 @@ def show_admin():
             st.success("✅ 已保存")
 
     with tabs[1]:
-        if platform_auth_ready():
+        if current_runtime_mode() == "team_mode":
             st.info(
                 "团队数据库已启用时，普通用户通过注册账号登录；这里保留的是管理员密码和旧版回退设置。"
             )
         c1, c2 = st.columns(2)
         with c1:
-            s["user_password"] = st.text_input(
-                "旧版用户密码（仅数据库未就绪时回退使用）",
-                s.get("user_password"),
-                type="password",
-            )
-            s["daily_limit_user"] = st.number_input(
-                "普通用户日限额", 1, 1000, s.get("daily_limit_user", 30)
-            )
-        with c2:
             s["admin_password"] = st.text_input(
                 "管理员密码", s.get("admin_password"), type="password"
             )
-            s["daily_limit_vip"] = st.number_input(
-                "VIP日限额", 1, 1000, s.get("daily_limit_vip", 100)
+        with c2:
+            s["daily_limit_user"] = st.number_input(
+                "管理员工具模式默认日限额", 1, 1000, s.get("daily_limit_user", 30)
             )
-        s["allow_user_passwordless_login"] = st.checkbox(
-            "允许旧版系统服务用户免密登录（仅数据库未就绪时回退使用）",
-            value=bool(s.get("allow_user_passwordless_login", False)),
-        )
-        if _parse_env_bool("ALLOW_PASSWORDLESS_USER_LOGIN") is not None:
-            st.info(
-                "检测到环境变量 `ALLOW_PASSWORDLESS_USER_LOGIN`，重启后会按环境变量值覆盖。"
+        if current_runtime_mode() == "team_mode":
+            s["allow_user_passwordless_login"] = st.checkbox(
+                "允许旧版系统服务用户免密登录（仅数据库未就绪时回退使用）",
+                value=bool(s.get("allow_user_passwordless_login", False)),
+            )
+            if _parse_env_bool("ALLOW_PASSWORDLESS_USER_LOGIN") is not None:
+                st.info(
+                    "检测到环境变量 `ALLOW_PASSWORDLESS_USER_LOGIN`，重启后会按环境变量值覆盖。"
+                )
+        else:
+            st.caption(
+                "当前为管理员工具模式，普通系统服务用户入口与团队注册入口已隐藏。"
             )
         if (os.getenv("ADMIN_PASSWORD_FIXED") or "").strip() or (
             os.getenv("USER_PASSWORD_FIXED") or ""
@@ -7855,9 +7807,21 @@ def main_app():
                 show_user_compliance()
         st.markdown("---")
         st.markdown(
-            '<div class="sidebar-section-title">系统引擎</div>', unsafe_allow_html=True
+            '<div class="sidebar-section-title">当前凭据</div>', unsafe_allow_html=True
         )
-        render_relay_config_panel("sidebar", get_settings(), expanded=False)
+        runtime_credentials = get_runtime_credentials()
+        provider_label = (
+            "中转站" if runtime_credentials.get("provider") == "relay" else "Gemini"
+        )
+        scope_label = (
+            "我的凭据" if runtime_credentials.get("scope") == "user" else "系统配置"
+        )
+        st.caption(f"Provider: {provider_label}")
+        st.caption(f"来源: {scope_label}")
+        if runtime_credentials.get("provider") == "relay":
+            st.caption(
+                f"模型: {runtime_credentials.get('model') or get_settings().get('relay_default_image_model', 'gemini-3.1-flash-image-preview')}"
+            )
 
         if st.session_state.is_admin:
             st.markdown("---")
