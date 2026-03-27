@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from temu_core.config_ui import build_login_tab_labels, build_settings_sections
+from temu_core.config_ui import (
+    build_login_tab_labels,
+    build_recommended_provider_templates,
+    build_settings_sections,
+)
 
 
 class ConfigUITest(unittest.TestCase):
@@ -20,6 +24,11 @@ class ConfigUITest(unittest.TestCase):
         self.assertIn("system", sections)
         self.assertIn("relay", sections["personal"])
         self.assertIn("relay", sections["system"])
+
+    def test_recommended_provider_templates_exist(self):
+        templates = build_recommended_provider_templates()
+        self.assertEqual(len(templates), 2)
+        self.assertIn("中转站", templates[0]["title"])
 
 
 if __name__ == "__main__":

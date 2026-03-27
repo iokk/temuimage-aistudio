@@ -62,6 +62,7 @@ from temu_core.action_reasons import (
     translate_generate_reasons,
 )
 from temu_core.config_ui import build_login_tab_labels, build_settings_sections
+from temu_core.config_ui import build_recommended_provider_templates
 from temu_core.relay_config import (
     has_system_service_access,
     resolve_relay_runtime_config,
@@ -3849,6 +3850,15 @@ def apply_style():
     .notice-card.warning { background: linear-gradient(135deg, rgba(217,119,6,0.09), rgba(245,158,11,0.06)); }
     .notice-title { font-size: 15px; font-weight: 700; color: var(--text); margin-bottom: 4px; }
     .notice-body { font-size: 13px; color: var(--muted); }
+    .config-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 0.75rem 0 1rem; }
+    .config-card { background: rgba(255,255,255,0.98); border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px; box-shadow: 0 8px 20px rgba(15,23,42,0.04); }
+    .config-badge { display: inline-flex; align-items: center; justify-content: center; padding: 4px 8px; font-size: 10px; font-weight: 700; border-radius: 999px; background: rgba(37,99,235,0.1); color: var(--accent); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px; }
+    .config-title { font-size: 15px; font-weight: 750; color: var(--text); margin-bottom: 6px; }
+    .config-desc { font-size: 13px; line-height: 1.65; color: var(--muted); }
+    .mini-guide-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 0.75rem 0 1rem; }
+    .mini-guide-card { background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.98)); border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px; }
+    .mini-guide-title { font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+    .mini-guide-desc { font-size: 12px; color: var(--muted); line-height: 1.65; }
     .status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 1rem 0 1.2rem; }
     .status-card { background: rgba(255,255,255,0.9); border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px; box-shadow: 0 6px 18px rgba(15, 23, 42, 0.04); }
     .status-label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
@@ -3914,7 +3924,7 @@ def apply_style():
     .step.active { background: linear-gradient(135deg, #e6f4ff 0%, #f0f5ff 100%); border-color: #91caff; color: #1e293b; }
     .step.active .step-num { background: #1677ff; color: #fff; }
     @media (max-width: 900px) {
-      .status-grid, .dashboard-grid, .result-summary-grid { grid-template-columns: 1fr; }
+      .status-grid, .dashboard-grid, .result-summary-grid, .config-grid, .mini-guide-grid { grid-template-columns: 1fr; }
       .shell-heading { font-size: 22px; }
     }
     </style>""",
@@ -4023,6 +4033,35 @@ def render_result_summary_shell(summary: dict):
         f"""<div class="result-shell"><div class="results-toolbar"><div><div class="results-toolbar-title">{summary.get("title", "结果")}</div><div class="results-toolbar-subtitle">{state_label}</div></div></div><div class="result-summary-grid"><div class="result-summary-card"><div class="result-summary-label">完成情况</div><div class="result-summary-value">{summary.get("headline", "")}</div></div><div class="result-summary-card"><div class="result-summary-label">Token</div><div class="result-summary-value">{summary.get("token_text", "")}</div></div><div class="result-summary-card"><div class="result-summary-label">警告</div><div class="result-summary-value">{summary.get("warning_text", "")}</div></div><div class="result-summary-card"><div class="result-summary-label">错误</div><div class="result-summary-value">{summary.get("error_text", "")}</div></div></div></div>""",
         unsafe_allow_html=True,
     )
+
+
+def render_config_cards(section_defs: dict, keys: list):
+    cards = []
+    for section_key, item_key in keys:
+        item = section_defs.get(section_key, {}).get(item_key, {})
+        if not item:
+            continue
+        cards.append(
+            f"""<div class="config-card"><div class="config-badge">{item.get("badge", "配置")}</div><div class="config-title">{item.get("title", "")}</div><div class="config-desc">{item.get("desc", "")}</div></div>"""
+        )
+    if cards:
+        st.markdown(
+            '<div class="config-grid">' + "".join(cards) + "</div>",
+            unsafe_allow_html=True,
+        )
+
+
+def render_recommended_templates_cards():
+    cards = []
+    for item in build_recommended_provider_templates():
+        cards.append(
+            f"""<div class="mini-guide-card"><div class="mini-guide-title">{item.get("title", "")}</div><div class="mini-guide-desc">{item.get("summary", "")}</div></div>"""
+        )
+    if cards:
+        st.markdown(
+            '<div class="mini-guide-grid">' + "".join(cards) + "</div>",
+            unsafe_allow_html=True,
+        )
 
 
 def inject_browser_key_persistence():
@@ -5036,6 +5075,10 @@ def show_login():
     t3 = tabs[2] if len(tabs) > 2 else None
 
     with t1:
+        render_config_cards(
+            settings_sections,
+            [("personal", "gemini"), ("personal", "relay")],
+        )
         st.markdown(
             f'<div class="info-card"><strong>{settings_sections["personal"]["gemini"]["title"]}</strong><br><span style="font-size:13px;color:#64748b">{settings_sections["personal"]["gemini"]["desc"]}</span></div>',
             unsafe_allow_html=True,
@@ -5116,6 +5159,7 @@ def show_login():
             f'<div class="info-card"><strong>{settings_sections["personal"]["relay"]["title"]}</strong><br><span style="font-size:13px;color:#64748b">{settings_sections["personal"]["relay"]["desc"]}</span></div>',
             unsafe_allow_html=True,
         )
+        render_recommended_templates_cards()
 
     with t2:
         st.markdown(
@@ -5135,6 +5179,10 @@ def show_login():
 
     if t3 is not None:
         with t3:
+            render_config_cards(
+                settings_sections,
+                [("system", "gemini"), ("system", "relay")],
+            )
             st.markdown(
                 f'<div class="info-card"><strong>{settings_sections["system"]["relay"]["title"]}</strong><br><span style="font-size:13px;color:#64748b">{settings_sections["system"]["relay"]["desc"]}</span></div>',
                 unsafe_allow_html=True,
