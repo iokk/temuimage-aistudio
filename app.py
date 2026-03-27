@@ -53,6 +53,7 @@ from temu_core.provider_capabilities import (
     get_translation_provider_message,
     model_supports,
 )
+from temu_core.provider_precheck import validate_relay_models
 from temu_core.action_reasons import (
     combo_analysis_reasons,
     combo_generate_reasons,
@@ -162,7 +163,9 @@ MODELS = {
     }
 }
 PRIMARY_IMAGE_MODEL = "gemini-2.5-flash-image"
-TITLE_TEXT_MODEL = (os.getenv("TITLE_TEXT_MODEL") or "gemini-3.1-pro").strip()
+TITLE_TEXT_MODEL = (
+    os.getenv("TITLE_TEXT_MODEL") or "gemini-3.1-flash-lite-preview"
+).strip()
 LEGACY_IMAGE_MODELS = {"gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview"}
 MODEL_NAME_NANO_BANANA_2 = MODELS[PRIMARY_IMAGE_MODEL]["name"]
 
@@ -175,6 +178,10 @@ RELAY_IMAGE_MODELS = {
     "imagine_x_1": {"name": "imagine_x_1"},
     "hunyuan-image-3": {"name": "hunyuan-image-3"},
     "grok-imagine-image": {"name": "grok-imagine-image"},
+}
+RELAY_ANALYSIS_MODELS = {
+    "gemini-3.1-flash-lite-preview": {"name": "gemini-3.1-flash-lite-preview"},
+    "gemini-3.1-flash-image-preview": {"name": "gemini-3.1-flash-image-preview"},
 }
 RELAY_TEXT_MODELS = {
     "nano-banana-pro-reverse": {"name": "nano-banana-pro-reverse"},
@@ -365,7 +372,7 @@ DEFAULT_SETTINGS = {
     "relay_api_base": RELAY_API_BASE,
     "relay_api_key": "",
     "relay_default_image_model": "gemini-3.1-flash-image-preview",
-    "relay_analysis_model": "gemini-3.1-flash-image-preview",
+    "relay_analysis_model": "gemini-3.1-flash-lite-preview",
     "enforce_english_text": False,
     "english_text_max_retries": 1,
 }
@@ -867,8 +874,8 @@ def get_settings():
     s["relay_api_key"] = str(s.get("relay_api_key", "") or "").strip()
     if s.get("relay_default_image_model") not in RELAY_IMAGE_MODELS:
         s["relay_default_image_model"] = "gemini-3.1-flash-image-preview"
-    if s.get("relay_analysis_model") not in RELAY_IMAGE_MODELS:
-        s["relay_analysis_model"] = "gemini-3.1-flash-image-preview"
+    if s.get("relay_analysis_model") not in RELAY_ANALYSIS_MODELS:
+        s["relay_analysis_model"] = "gemini-3.1-flash-lite-preview"
     try:
         workers = int(
             s.get(
@@ -2902,6 +2909,43 @@ def probe_relay_api(base_url: str, api_key: str, model: str = ""):
         return False, format_runtime_error_message(e)
 
 
+RELAY_PROBE_CACHE = {}
+
+
+def probe_relay_api_cached(base_url: str, api_key: str, model: str = ""):
+    cache_key = (
+        str(base_url or RELAY_API_BASE).rstrip("/"),
+        hashlib.md5(str(api_key or "").encode()).hexdigest()[:12],
+        str(model or ""),
+    )
+    if cache_key in RELAY_PROBE_CACHE:
+        return RELAY_PROBE_CACHE[cache_key]
+    result = probe_relay_api(base_url, api_key, model)
+    RELAY_PROBE_CACHE[cache_key] = result
+    return result
+
+
+def ensure_provider_route_ready(
+    provider: str,
+    relay_base: str,
+    relay_key: str,
+    image_model: str,
+    analysis_model: str,
+    required_capabilities: list,
+):
+    reasons = validate_relay_models(
+        provider=provider,
+        relay_base=relay_base,
+        relay_key=relay_key,
+        image_model=image_model,
+        analysis_model=analysis_model,
+        required_capabilities=required_capabilities,
+        probe_func=probe_relay_api_cached,
+    )
+    if reasons:
+        raise Exception("；".join(reasons))
+
+
 def build_relay_text_client(
     relay_key: str,
     relay_model: str,
@@ -2922,9 +2966,9 @@ def build_relay_text_client(
 
 def get_relay_analysis_model() -> str:
     settings = get_settings()
-    model = settings.get("relay_analysis_model", "gemini-3.1-flash-image-preview")
-    if model not in RELAY_IMAGE_MODELS:
-        return "gemini-3.1-flash-image-preview"
+    model = settings.get("relay_analysis_model", "gemini-3.1-flash-lite-preview")
+    if model not in RELAY_ANALYSIS_MODELS:
+        return "gemini-3.1-flash-lite-preview"
     return model
 
 
@@ -6102,6 +6146,14 @@ def show_combo_page():
                             relay_model,
                         )
                     )
+                    ensure_provider_route_ready(
+                        provider="relay" if image_provider == "中转站" else "gemini",
+                        relay_base=runtime_relay_base,
+                        relay_key=runtime_relay_key,
+                        image_model=runtime_relay_model,
+                        analysis_model=get_relay_analysis_model(),
+                        required_capabilities=["image_analysis"],
+                    )
                     anchor, used_tokens = build_combo_anchor(
                         image_provider,
                         gemini_api_key,
@@ -6188,6 +6240,16 @@ def show_combo_page():
                                 relay_base,
                                 relay_model,
                             )
+                        )
+                        ensure_provider_route_ready(
+                            provider="relay"
+                            if image_provider == "中转站"
+                            else "gemini",
+                            relay_base=runtime_relay_base,
+                            relay_key=runtime_relay_key,
+                            image_model=runtime_relay_model,
+                            analysis_model=get_relay_analysis_model(),
+                            required_capabilities=["text_generation"],
                         )
                         reqs, used_tokens = build_combo_requirements(
                             image_provider,
@@ -6334,7 +6396,7 @@ def show_combo_page():
                 type="primary",
                 use_container_width=True,
             ):
-                if combo_run_mode.startswith("后台"):
+                try:
                     runtime_relay_key, runtime_relay_base, runtime_relay_model = (
                         resolve_relay_runtime_config(
                             s,
@@ -6343,6 +6405,25 @@ def show_combo_page():
                             relay_model,
                         )
                     )
+                    required_caps = ["image_generate"]
+                    if should_attempt_title_generation(
+                        st.session_state.get("combo_enable_title", False),
+                        st.session_state.get("combo_images", []),
+                        st.session_state.get("combo_title_info", ""),
+                    ):
+                        required_caps.append("title_from_image")
+                    ensure_provider_route_ready(
+                        provider="relay" if image_provider == "中转站" else "gemini",
+                        relay_base=runtime_relay_base,
+                        relay_key=runtime_relay_key,
+                        image_model=runtime_relay_model,
+                        analysis_model=get_relay_analysis_model(),
+                        required_capabilities=required_caps,
+                    )
+                except Exception as e:
+                    st.error(format_runtime_error_message(e, 220))
+                    return
+                if combo_run_mode.startswith("后台"):
                     try:
                         task_id = submit_task_center_task(
                             owner_id=get_user_id(),
@@ -6406,6 +6487,26 @@ def show_combo_page():
                     relay_model,
                 )
             )
+            try:
+                required_caps = ["image_generate"]
+                if should_attempt_title_generation(
+                    st.session_state.get("combo_enable_title", False),
+                    refs,
+                    st.session_state.get("combo_title_info", ""),
+                ):
+                    required_caps.append("title_from_image")
+                ensure_provider_route_ready(
+                    provider="relay" if image_provider == "中转站" else "gemini",
+                    relay_base=runtime_relay_base,
+                    relay_key=runtime_relay_key,
+                    image_model=runtime_relay_model,
+                    analysis_model=get_relay_analysis_model(),
+                    required_capabilities=required_caps,
+                )
+            except Exception as e:
+                st.error(format_runtime_error_message(e, 220))
+                st.session_state.combo_generating = False
+                return
             gemini_image_client = (
                 GeminiClient(gemini_api_key, model)
                 if image_provider == "Gemini"
@@ -6766,6 +6867,21 @@ def show_smart_page():
                 relay_model,
             )
         )
+        try:
+            required_caps = ["image_analysis", "image_generate"]
+            if should_attempt_title_generation(enable_title, images, title_info):
+                required_caps.append("title_from_image")
+            ensure_provider_route_ready(
+                provider="relay" if image_provider == "中转站" else "gemini",
+                relay_base=runtime_relay_base,
+                relay_key=runtime_relay_key,
+                image_model=runtime_relay_model,
+                analysis_model=get_relay_analysis_model(),
+                required_capabilities=required_caps,
+            )
+        except Exception as e:
+            st.error(format_runtime_error_message(e, 220))
+            return
         if smart_run_mode.startswith("后台"):
             try:
                 task_id = submit_task_center_task(
@@ -7151,13 +7267,26 @@ def show_title_page():
         with st.spinner("🤖 AI生成中..."):
             try:
                 if runtime_credentials.get("provider") == "relay":
-                    client = RelayTextClient(
-                        runtime_credentials.get("api_key", ""),
-                        runtime_credentials.get("model")
+                    required_capability = (
+                        "title_from_image" if uploaded_images else "text_generation"
+                    )
+                    ensure_provider_route_ready(
+                        provider="relay",
+                        relay_base=runtime_credentials.get("base_url")
+                        or RELAY_API_BASE,
+                        relay_key=runtime_credentials.get("api_key", ""),
+                        image_model=runtime_credentials.get("model")
                         or get_settings().get(
                             "relay_default_image_model",
                             "gemini-3.1-flash-image-preview",
                         ),
+                        analysis_model=get_relay_analysis_model(),
+                        required_capabilities=[required_capability],
+                    )
+                if runtime_credentials.get("provider") == "relay":
+                    client = RelayTextClient(
+                        runtime_credentials.get("api_key", ""),
+                        get_relay_analysis_model(),
                         base_url=runtime_credentials.get("base_url") or RELAY_API_BASE,
                     )
                 else:
@@ -7931,6 +8060,24 @@ def show_image_translate_page():
             st.warning("请先上传图片")
             return
 
+        try:
+            required_caps = []
+            if need_text:
+                required_caps.append("text_generation")
+            if need_image:
+                required_caps.append("image_translate")
+            ensure_provider_route_ready(
+                provider=active_provider,
+                relay_base=runtime_credentials.get("base_url") or RELAY_API_BASE,
+                relay_key=runtime_credentials.get("api_key", ""),
+                image_model=active_model,
+                analysis_model=relay_text_model,
+                required_capabilities=required_caps,
+            )
+        except Exception as e:
+            st.error(format_runtime_error_message(e, 220))
+            return
+
         if not st.session_state.use_own_key:
             allowed, used, limit = check_user_limit(uid)
             if not allowed or (limit > 0 and used + len(upload_items) > limit):
@@ -8427,12 +8574,12 @@ def show_admin():
         )
         relay_analysis_model_value = st.selectbox(
             "系统中转站分析/标题模型",
-            list(RELAY_IMAGE_MODELS.keys()),
-            index=list(RELAY_IMAGE_MODELS.keys()).index(
-                s.get("relay_analysis_model", "gemini-3.1-flash-image-preview")
+            list(RELAY_ANALYSIS_MODELS.keys()),
+            index=list(RELAY_ANALYSIS_MODELS.keys()).index(
+                s.get("relay_analysis_model", "gemini-3.1-flash-lite-preview")
             )
-            if s.get("relay_analysis_model", "gemini-3.1-flash-image-preview")
-            in RELAY_IMAGE_MODELS
+            if s.get("relay_analysis_model", "gemini-3.1-flash-lite-preview")
+            in RELAY_ANALYSIS_MODELS
             else 0,
             key="admin_relay_analysis_model",
         )

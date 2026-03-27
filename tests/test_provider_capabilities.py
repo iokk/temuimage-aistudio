@@ -17,6 +17,13 @@ class ProviderCapabilitiesTest(unittest.TestCase):
         self.assertTrue(caps["image_analysis"])
         self.assertTrue(caps["title_from_image"])
 
+    def test_flash_lite_preview_is_analysis_only_model(self):
+        caps = get_model_capabilities("relay", "gemini-3.1-flash-lite-preview")
+        self.assertFalse(caps["image_generate"])
+        self.assertTrue(caps["image_analysis"])
+        self.assertTrue(caps["title_from_image"])
+        self.assertTrue(caps["text_generation"])
+
     def test_seedream_5_supports_translation_but_not_analysis(self):
         caps = get_model_capabilities("relay", "seedream-5.0")
         self.assertTrue(caps["image_generate"])

@@ -18,6 +18,11 @@ CAPABILITY_MATRIX = {
         "title_from_image": True,
         "text_generation": True,
     },
+    ("relay", "gemini-3.1-flash-lite-preview"): {
+        "image_analysis": True,
+        "title_from_image": True,
+        "text_generation": True,
+    },
     ("relay", "seedream-5.0"): {
         "image_generate": True,
         "image_translate": True,

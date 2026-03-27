@@ -77,6 +77,9 @@ class GeminiClientModelSelectionTest(unittest.TestCase):
         client = app.GeminiClient("AIzaFake", model="gemini-3.1-pro")
         self.assertEqual(client.model, "gemini-3.1-pro")
 
+    def test_title_text_model_uses_flash_lite_preview(self):
+        self.assertEqual(app.TITLE_TEXT_MODEL, "gemini-3.1-flash-lite-preview")
+
 
 if __name__ == "__main__":
     unittest.main()
