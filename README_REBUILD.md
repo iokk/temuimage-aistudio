@@ -12,7 +12,7 @@
 
 ## 当前 V1 已完成
 
-- Casdoor 登录骨架与模式分流
+- Casdoor + 内置引导账号双登录入口与模式分流
 - 四个核心能力页：`批量出图`、`快速出图`、`标题优化`、`图片翻译`
 - 统一任务中心、任务详情、状态时间线
 - 管理后台运行诊断
@@ -25,15 +25,17 @@
 
 1. 准备环境变量，参考 `.env.rebuild.example`
 2. 启动基础设施：`docker compose -f docker-compose.rebuild.yml up -d postgres redis`
-3. 初始化数据库：`pnpm deploy:db`
-4. 启动 API / Worker / Web：`docker compose -f docker-compose.rebuild.yml up --build`
+3. 启动 API / Worker / Web：`docker compose -f docker-compose.rebuild.yml up --build`
+4. 使用 `BOOTSTRAP_LOGIN_EMAIL` + `BOOTSTRAP_LOGIN_PASSWORD` 登录
 
 ## 生产建议
 
 - `JOB_STORE_BACKEND=database`
 - `ASYNC_JOB_BACKEND=celery`
 - PostgreSQL 与 Redis 必须同时可用
-- 先执行 `pnpm deploy:db`，再启动 API / Worker / Web
+- 首发建议先启用 `BOOTSTRAP_LOGIN_EMAIL` + `BOOTSTRAP_LOGIN_PASSWORD`
+- 后续如需企业统一登录，再补 Casdoor OIDC 参数
+- `pnpm deploy:db` 仅用于后续 Prisma migration 升级
 - 若系统回退到 `memory` 或 `inline`，请先查看管理后台和团队设置里的运行警告
 - 发布前逐项核对 `docs/rebuild-v1-release-checklist.md`
 - 部署执行步骤参考 `docs/rebuild-v1-deploy-runbook.md`

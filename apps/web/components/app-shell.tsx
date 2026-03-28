@@ -72,7 +72,7 @@ export async function AppShell({
                 {session?.user?.name || "未登录"}
               </p>
               <p className="mt-1 text-xs text-slate-500">
-                {session?.user?.email || "请先使用 Casdoor 登录后再进入个人或团队配置。"}
+                {session?.user?.email || "请先完成登录后再进入个人或团队配置。"}
               </p>
               {session ? (
                 <form action={signOutCurrentUser} className="mt-4">

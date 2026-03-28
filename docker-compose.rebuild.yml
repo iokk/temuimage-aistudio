@@ -39,6 +39,7 @@ services:
       AUTO_BOOTSTRAP_DB: "true"
       API_APP_NAME: XiaoBaiTu API
       API_APP_VERSION: 1.0.0
+      BOOTSTRAP_LOGIN_EMAIL: admin@example.com
       TEAM_ADMIN_EMAILS: admin@example.com
       TEAM_ALLOWED_EMAIL_DOMAINS: example.com
     depends_on:
@@ -73,9 +74,12 @@ services:
       NEXT_PUBLIC_API_BASE_URL: http://api:8000
       NEXTAUTH_URL: http://localhost:3000
       NEXTAUTH_SECRET: change-me-in-production
-      CASDOOR_ISSUER: https://casdoor.example.com
-      CASDOOR_CLIENT_ID: change-me
-      CASDOOR_CLIENT_SECRET: change-me
+      CASDOOR_ISSUER: ""
+      CASDOOR_CLIENT_ID: ""
+      CASDOOR_CLIENT_SECRET: ""
+      BOOTSTRAP_LOGIN_EMAIL: admin@example.com
+      BOOTSTRAP_LOGIN_PASSWORD: change-me-bootstrap-password
+      BOOTSTRAP_LOGIN_NAME: Platform Admin
       TEAM_ADMIN_EMAILS: admin@example.com
       TEAM_ALLOWED_EMAIL_DOMAINS: example.com
     depends_on:

@@ -10,6 +10,16 @@ export async function signInWithCasdoor(formData: FormData) {
   await signIn("casdoor", { redirectTo })
 }
 
+export async function signInWithBootstrap(formData: FormData) {
+  const mode = formData.get("mode") === "personal" ? "personal" : "team"
+  const redirectTo =
+    mode === "personal" ? "/settings/personal" : "/settings/team"
+  const email = String(formData.get("email") || "").trim()
+  const password = String(formData.get("password") || "")
+
+  await signIn("bootstrap", { email, password, redirectTo })
+}
+
 export async function signOutCurrentUser() {
   await signOut({ redirectTo: "/login" })
 }

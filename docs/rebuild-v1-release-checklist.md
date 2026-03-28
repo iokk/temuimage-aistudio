@@ -9,9 +9,10 @@
 - Set `AUTO_BOOTSTRAP_DB=true` on API and `false` on worker
 - Set `NEXTAUTH_URL`
 - Set `NEXTAUTH_SECRET`
-- Set `CASDOOR_ISSUER`
-- Set `CASDOOR_CLIENT_ID`
-- Set `CASDOOR_CLIENT_SECRET`
+- Set `BOOTSTRAP_LOGIN_EMAIL`
+- Set `BOOTSTRAP_LOGIN_PASSWORD`
+- Set `BOOTSTRAP_LOGIN_NAME`
+- Set Casdoor envs only if you need SSO on day one
 - Set `TEAM_ADMIN_EMAILS`
 - Set `TEAM_ALLOWED_EMAIL_DOMAINS`
 

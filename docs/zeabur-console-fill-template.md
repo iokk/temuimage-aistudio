@@ -27,37 +27,57 @@
 - 填写方式：32 位以上随机字符串
 - 填写示例：`请使用 scripts/generate_zeabur_env.py 生成`
 
-### 4. `CASDOOR_ISSUER`
+### 4. `BOOTSTRAP_LOGIN_EMAIL`
+
+- 含义：首发内置管理员登录邮箱
+- 必填：强烈建议是
+- 填写示例：`owner@example.com`
+
+### 5. `BOOTSTRAP_LOGIN_PASSWORD`
+
+- 含义：首发内置管理员登录密码
+- 必填：强烈建议是
+- 填写方式：高强度随机字符串
+- 填写示例：`请使用 scripts/generate_zeabur_env.py 生成`
+
+### 6. `BOOTSTRAP_LOGIN_NAME`
+
+- 含义：首发内置管理员显示名称
+- 必填：否
+- 填写示例：`Platform Admin`
+
+### 7. `CASDOOR_ISSUER`
 
 - 含义：Casdoor OIDC Issuer 地址
-- 必填：是
+- 必填：否（首发可留空）
 - 填写示例：`https://casdoor.example.com`
 
-### 5. `CASDOOR_CLIENT_ID`
+### 8. `CASDOOR_CLIENT_ID`
 
 - 含义：Casdoor 应用 Client ID
-- 必填：是
+- 必填：否（首发可留空）
 
-### 6. `CASDOOR_CLIENT_SECRET`
+### 9. `CASDOOR_CLIENT_SECRET`
 
 - 含义：Casdoor 应用 Client Secret
-- 必填：是
+- 必填：否（首发可留空）
 
-### 7. `TEAM_ADMIN_EMAILS`
+### 10. `TEAM_ADMIN_EMAILS`
 
 - 含义：团队管理员邮箱
 - 必填：建议是
 - 填写格式：逗号分隔
-- 填写示例：`admin@example.com,ops@example.com`
+- 填写示例：`owner@example.com,ops@example.com`
+- 推荐：至少包含 `BOOTSTRAP_LOGIN_EMAIL`
 
-### 8. `TEAM_ALLOWED_EMAIL_DOMAINS`
+### 11. `TEAM_ALLOWED_EMAIL_DOMAINS`
 
 - 含义：允许进入团队模式的邮箱域名
 - 必填：建议是
 - 填写格式：逗号分隔
 - 填写示例：`example.com`
 
-### 9. `SYSTEM_ENCRYPTION_KEY`
+### 12. `SYSTEM_ENCRYPTION_KEY`
 
 - 含义：后端系统加密密钥
 - 必填：是
@@ -108,6 +128,7 @@
   - `JOB_STORE_BACKEND=database`
   - `ASYNC_JOB_BACKEND=celery`
   - `AUTO_BOOTSTRAP_DB=true`
+  - `BOOTSTRAP_LOGIN_EMAIL=你的管理员邮箱`
 
 ### `worker`
 
@@ -127,6 +148,9 @@
   - `NEXT_PUBLIC_API_BASE_URL`
   - `NEXTAUTH_URL`
   - `NEXTAUTH_SECRET`
+  - `BOOTSTRAP_LOGIN_EMAIL`
+  - `BOOTSTRAP_LOGIN_PASSWORD`
+  - `BOOTSTRAP_LOGIN_NAME`
 
 ## 六、数据库初始化
 
@@ -162,8 +186,15 @@ API_BASE_URL=https://你的API域名 WEB_BASE_URL=https://你的前端域名 ./s
 - `active_execution_backend = celery`
 - 没有 blocking warnings
 
-## 九、推荐做法
+## 九、首次登录方式
+
+- 打开 `https://你的前端域名/login`
+- 输入 `BOOTSTRAP_LOGIN_EMAIL`
+- 输入 `BOOTSTRAP_LOGIN_PASSWORD`
+- 登录后先访问 `https://你的前端域名/admin`
+
+## 十、推荐做法
 
 - 先运行 `python3 scripts/generate_zeabur_env.py`
 - 把生成结果复制到 Zeabur 控制台
-- 再创建模板和服务
+- 首发先用内置引导账号完成验收，再决定是否切到 Casdoor

@@ -52,6 +52,7 @@ class RebuildDeployReadyTest(unittest.TestCase):
         self.assertIn("Readiness", runbook_text)
         self.assertIn("ASYNC_JOB_BACKEND=celery", env_text)
         self.assertIn("AUTO_BOOTSTRAP_DB=true", env_text)
+        self.assertIn("BOOTSTRAP_LOGIN_PASSWORD", env_text)
 
     def test_zeabur_specific_release_support_exists(self):
         zeabur_env = Path(".env.zeabur.production.example").read_text()
@@ -67,8 +68,10 @@ class RebuildDeployReadyTest(unittest.TestCase):
         self.assertIn("WEB_DOMAIN", fill_template)
         self.assertIn("Zeabur 控制台逐项填写模板", fill_template)
         self.assertIn("AUTO_BOOTSTRAP_DB=true", zeabur_env)
+        self.assertIn("BOOTSTRAP_LOGIN_EMAIL", zeabur_env)
         self.assertIn("AUTO_BOOTSTRAP_DB=true", zeabur_doc)
         self.assertIn("NEXTAUTH_SECRET", generator_script)
+        self.assertIn("BOOTSTRAP_LOGIN_PASSWORD", generator_script)
         self.assertIn("SYSTEM_ENCRYPTION_KEY", generator_script)
 
 

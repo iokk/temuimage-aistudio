@@ -23,6 +23,8 @@ class ZeaburTemplateTest(unittest.TestCase):
         self.assertIn("dockerfile: apps/web/Dockerfile", content)
         self.assertIn("dockerfile: apps/api/Dockerfile", content)
         self.assertIn("dockerfile: apps/worker/Dockerfile", content)
+        self.assertIn("BOOTSTRAP_LOGIN_EMAIL", content)
+        self.assertIn("BOOTSTRAP_LOGIN_PASSWORD", content)
         self.assertIn(
             "DATABASE_URL:\n            default: ${POSTGRES_CONNECTION_STRING}",
             content,

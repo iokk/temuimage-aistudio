@@ -25,7 +25,7 @@ export default async function HomePage() {
           </h3>
           <p className="mt-3 text-sm leading-7 text-slate-600">
             {session
-              ? "当前骨架已接通 Casdoor 登录状态，下一步会把个人配置、团队配置、任务中心和四个核心能力逐步迁移进新栈。"
+              ? "当前系统已接通统一登录、任务中心和四个核心能力页，可直接进入部署联调。"
               : "新系统不再提供访客模式。登录后可根据个人模式或团队模式进入对应配置区，再开始批量出图、快速出图、标题优化和图片翻译。"}
           </p>
           <div className="mt-6 flex flex-wrap gap-3">

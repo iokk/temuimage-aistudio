@@ -25,7 +25,16 @@ def _build_runtime_payload() -> dict:
     storage_meta = job_repository.get_backend_meta()
     async_meta = get_async_backend_meta()
     team_admins = _parse_csv(os.getenv("TEAM_ADMIN_EMAILS"))
+    bootstrap_login_email = os.getenv("BOOTSTRAP_LOGIN_EMAIL", "").strip()
+    if bootstrap_login_email and bootstrap_login_email not in team_admins:
+        team_admins.append(bootstrap_login_email)
     team_domains = _parse_csv(os.getenv("TEAM_ALLOWED_EMAIL_DOMAINS"))
+    casdoor_enabled = bool(
+        os.getenv("CASDOOR_ISSUER")
+        and os.getenv("CASDOOR_CLIENT_ID")
+        and os.getenv("CASDOOR_CLIENT_SECRET")
+    )
+    bootstrap_enabled = bool(bootstrap_login_email)
     warnings: list[str] = []
 
     if not settings.database_url:
@@ -38,6 +47,17 @@ def _build_runtime_payload() -> dict:
         warnings.append("当前执行后端与任务存储不兼容，系统会自动回退到 inline。")
     if not team_admins:
         warnings.append("未配置 TEAM_ADMIN_EMAILS，团队管理员入口仍不稳定。")
+    if not casdoor_enabled and not bootstrap_enabled:
+        warnings.append("未配置可用登录方式，至少需要 Casdoor 或内置引导账号。")
+
+    if casdoor_enabled and bootstrap_enabled:
+        auth_provider = "Casdoor + Bootstrap"
+    elif casdoor_enabled:
+        auth_provider = "Casdoor"
+    elif bootstrap_enabled:
+        auth_provider = "Bootstrap"
+    else:
+        auth_provider = "Unconfigured"
 
     ready_for_distributed_workers = bool(
         settings.database_url
@@ -51,7 +71,7 @@ def _build_runtime_payload() -> dict:
         "app_version": settings.app_version,
         "database_configured": bool(settings.database_url),
         "redis_configured": bool(settings.redis_url),
-        "auth_provider": "Casdoor",
+        "auth_provider": auth_provider,
         "team_admin_count": len(team_admins),
         "team_allowed_domain_count": len(team_domains),
         "default_title_model": TITLE_MODEL,

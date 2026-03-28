@@ -3,7 +3,8 @@
 ## 1. Prepare env
 
 - Copy `.env.rebuild.production.example`
-- Fill Casdoor, database, Redis, secrets, and team admin values
+- Fill database, Redis, secrets, bootstrap login, and team admin values
+- Casdoor is optional for the first production release
 
 ## 2. Prepare database
 
@@ -45,7 +46,7 @@ python3 scripts/rebuild_release_smoke.py --api-base https://your-api-domain.exam
 
 ## 6. Functional spot checks
 
-- Login through Casdoor
+- Login through bootstrap account or Casdoor
 - Open `/title` and submit one task
 - Open `/tasks` and confirm status updates
 - Open `/tasks/[jobId]` and confirm timeline + structured result
