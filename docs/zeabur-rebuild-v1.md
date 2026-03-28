@@ -11,6 +11,7 @@
 ## Environment source
 
 - Use `.env.zeabur.production.example`
+- Control-panel copy template: `docs/zeabur-console-fill-template.md`
 - Web and API/Worker share Casdoor and team access envs
 - API and Worker must share the same `DATABASE_URL` and `REDIS_URL`
 
@@ -56,6 +57,12 @@ Use:
 
 ```bash
 API_BASE_URL=https://api.example.com WEB_BASE_URL=https://web.example.com ./scripts/zeabur_rebuild_release.sh
+```
+
+You can first generate a fill-ready secret template with:
+
+```bash
+python3 scripts/generate_zeabur_env.py --web-domain studio.example.com --api-domain api.example.com
 ```
 
 ## Success criteria

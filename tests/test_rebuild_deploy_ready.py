@@ -54,11 +54,17 @@ class RebuildDeployReadyTest(unittest.TestCase):
         zeabur_env = Path(".env.zeabur.production.example").read_text()
         zeabur_doc = Path("docs/zeabur-rebuild-v1.md").read_text()
         zeabur_script = Path("scripts/zeabur_rebuild_release.sh").read_text()
+        fill_template = Path("docs/zeabur-console-fill-template.md").read_text()
+        generator_script = Path("scripts/generate_zeabur_env.py").read_text()
         self.assertIn("NEXT_PUBLIC_API_BASE_URL", zeabur_env)
         self.assertIn("apps/api/Dockerfile", zeabur_doc)
         self.assertIn("apps/worker/Dockerfile", zeabur_doc)
         self.assertIn("pnpm deploy:db", zeabur_script)
         self.assertIn("--require-ready", zeabur_script)
+        self.assertIn("WEB_DOMAIN", fill_template)
+        self.assertIn("Zeabur 控制台逐项填写模板", fill_template)
+        self.assertIn("NEXTAUTH_SECRET", generator_script)
+        self.assertIn("SYSTEM_ENCRYPTION_KEY", generator_script)
 
 
 if __name__ == "__main__":

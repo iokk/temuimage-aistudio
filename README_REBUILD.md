@@ -38,6 +38,7 @@
 - 发布前逐项核对 `docs/rebuild-v1-release-checklist.md`
 - 部署执行步骤参考 `docs/rebuild-v1-deploy-runbook.md`
 - Zeabur 专项部署参考 `docs/zeabur-rebuild-v1.md`
+- Zeabur 控制台逐项填写模板：`docs/zeabur-console-fill-template.md`
 
 ## 当前限制
 
