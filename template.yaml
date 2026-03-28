@@ -67,6 +67,7 @@ spec:
     - `REDIS_URL` from Redis
     - `JOB_STORE_BACKEND=database`
     - `ASYNC_JOB_BACKEND=celery`
+    - `AUTO_BOOTSTRAP_DB=true` on `api`
     - `NEXT_PUBLIC_API_BASE_URL` from the API domain
     - `NEXTAUTH_URL` from the web domain
 
@@ -80,11 +81,14 @@ spec:
     - `TEAM_ALLOWED_EMAIL_DOMAINS`
     - `SYSTEM_ENCRYPTION_KEY`
 
+    On first deployment the `api` service auto-creates the SQLAlchemy tables it needs
+    and seeds `system@xiaobaitu.local` when `AUTO_BOOTSTRAP_DB=true`.
+
     After deployment:
 
-    1. Run `pnpm deploy:db` against the production `DATABASE_URL`
-    2. Restart `api` and `worker`
-    3. Open `/admin` and confirm `Readiness = ready`
+    1. Wait for `postgresql`, `redis`, and `api` to become healthy
+    2. Open `/admin` and confirm `Readiness = ready`
+    3. Run `pnpm deploy:db` only when you need to apply Prisma migrations for later schema upgrades
 
   services:
     - name: postgresql
@@ -176,6 +180,8 @@ spec:
             default: database
           ASYNC_JOB_BACKEND:
             default: celery
+          AUTO_BOOTSTRAP_DB:
+            default: "true"
           API_APP_NAME:
             default: XiaoBaiTu API
           API_APP_VERSION:
@@ -214,6 +220,8 @@ spec:
             default: database
           ASYNC_JOB_BACKEND:
             default: celery
+          AUTO_BOOTSTRAP_DB:
+            default: "false"
           TEAM_ADMIN_EMAILS:
             default: ${TEAM_ADMIN_EMAILS}
           TEAM_ALLOWED_EMAIL_DOMAINS:

@@ -8,8 +8,9 @@
 ## 2. Prepare database
 
 - Run `pnpm prisma:validate`
-- Run `pnpm deploy:db`
-- Confirm the `system` user seed completed
+- Set `AUTO_BOOTSTRAP_DB=true` on the API service for first deploy
+- Let API startup create missing SQLAlchemy tables and seed `system@xiaobaitu.local`
+- Run `pnpm deploy:db` only for Prisma-led schema upgrades after initial bootstrap
 
 ## 3. Start services
 
@@ -18,6 +19,7 @@
 - Start API
 - Start Worker
 - Start Web
+- Keep `AUTO_BOOTSTRAP_DB=false` on the worker
 
 ## 4. Verify runtime
 

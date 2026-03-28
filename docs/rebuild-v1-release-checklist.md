@@ -6,6 +6,7 @@
 - Set `REDIS_URL`
 - Set `JOB_STORE_BACKEND=database`
 - Set `ASYNC_JOB_BACKEND=celery`
+- Set `AUTO_BOOTSTRAP_DB=true` on API and `false` on worker
 - Set `NEXTAUTH_URL`
 - Set `NEXTAUTH_SECRET`
 - Set `CASDOOR_ISSUER`
@@ -17,8 +18,8 @@
 ## Database
 
 - Run `pnpm prisma:validate`
-- Run `pnpm deploy:db`
-- Confirm `system@xiaobaitu.local` is seeded
+- Let API first startup create missing tables and seed `system@xiaobaitu.local`
+- Run `pnpm deploy:db` only when shipping Prisma schema changes beyond first bootstrap
 
 ## Services
 

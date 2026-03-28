@@ -1,5 +1,6 @@
 from fastapi import APIRouter, FastAPI
 
+from apps.api.bootstrap_db import bootstrap_database
 from apps.api.core.config import get_settings
 from apps.api.routers.batch import router as batch_router
 from apps.api.routers.jobs import router as jobs_router
@@ -11,6 +12,12 @@ from apps.api.routers.translate import router as translate_router
 
 settings = get_settings()
 app = FastAPI(title=settings.app_name, version=settings.app_version)
+
+
+@app.on_event("startup")
+def startup_bootstrap():
+    if settings.auto_bootstrap_db:
+        bootstrap_database(settings.database_url)
 
 
 @app.get("/health")

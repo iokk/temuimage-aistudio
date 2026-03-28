@@ -82,6 +82,7 @@
 - `REDIS_URL`
 - `JOB_STORE_BACKEND=database`
 - `ASYNC_JOB_BACKEND=celery`
+- `AUTO_BOOTSTRAP_DB=true`（仅 `api`）
 - `NEXT_PUBLIC_API_BASE_URL=https://${API_DOMAIN}`
 - `NEXTAUTH_URL=https://${WEB_DOMAIN}`
 
@@ -106,6 +107,7 @@
   - `REDIS_URL`
   - `JOB_STORE_BACKEND=database`
   - `ASYNC_JOB_BACKEND=celery`
+  - `AUTO_BOOTSTRAP_DB=true`
 
 ### `worker`
 
@@ -115,6 +117,7 @@
   - `REDIS_URL`
   - `JOB_STORE_BACKEND=database`
   - `ASYNC_JOB_BACKEND=celery`
+  - `AUTO_BOOTSTRAP_DB=false`
 
 ### `web`
 
@@ -127,17 +130,22 @@
 
 ## 六、数据库初始化
 
-部署完模板后，必须再执行一次：
+首次部署时，不需要额外手动执行数据库初始化命令。
+
+只要 `api` 服务里是：
+
+- `AUTO_BOOTSTRAP_DB=true`
+
+它首次启动时会自动：
+
+- 创建 FastAPI 当前需要的 SQLAlchemy 表
+- seed `system@xiaobaitu.local`
+
+只有在你后续发布包含 Prisma migration 的版本时，才需要额外执行：
 
 ```bash
 pnpm deploy:db
 ```
-
-这一步会：
-
-- 执行 Prisma migration
-- 生成 Prisma client
-- seed `system@xiaobaitu.local`
 
 ## 七、发布 smoke 检查
 

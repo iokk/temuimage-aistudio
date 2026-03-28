@@ -34,6 +34,7 @@
 - `REDIS_URL`
 - `JOB_STORE_BACKEND=database`
 - `ASYNC_JOB_BACKEND=celery`
+- `AUTO_BOOTSTRAP_DB=true` on API for first-start table creation + `system` seed
 - `API_APP_NAME`
 - `API_APP_VERSION`
 - `SYSTEM_ENCRYPTION_KEY`
@@ -48,8 +49,9 @@
 4. Create `worker` service from `apps/worker/Dockerfile`
 5. Create `web` service from `apps/web/Dockerfile`
 6. Fill env vars from `.env.zeabur.production.example`
-7. Run `pnpm deploy:db` from a trusted CI/local machine with production `DATABASE_URL`
-8. Restart `api` and `worker`
+7. Confirm `api` has `AUTO_BOOTSTRAP_DB=true` and `worker` has `AUTO_BOOTSTRAP_DB=false`
+8. Wait for `api` startup to create tables and seed `system@xiaobaitu.local`
+9. Run `pnpm deploy:db` later only when a release adds Prisma migrations that `create_all()` cannot apply
 
 ## Release verification
 
@@ -71,3 +73,4 @@ python3 scripts/generate_zeabur_env.py --web-domain studio.example.com --api-dom
 - `active_backend = database`
 - `active_execution_backend = celery`
 - No blocking warnings remain
+- `system@xiaobaitu.local` exists without a manual seed step on first deploy

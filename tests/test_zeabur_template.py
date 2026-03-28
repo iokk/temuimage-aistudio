@@ -32,6 +32,8 @@ class ZeaburTemplateTest(unittest.TestCase):
         )
         self.assertIn("JOB_STORE_BACKEND:\n            default: database", content)
         self.assertIn("ASYNC_JOB_BACKEND:\n            default: celery", content)
+        self.assertIn('AUTO_BOOTSTRAP_DB:\n            default: "true"', content)
+        self.assertIn('AUTO_BOOTSTRAP_DB:\n            default: "false"', content)
         self.assertIn("NEXTAUTH_SECRET", content)
         self.assertIn("CASDOOR_ISSUER", content)
 
