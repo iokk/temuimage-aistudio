@@ -5,6 +5,7 @@ WORKDIR /app
 COPY apps/api/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
-COPY apps/worker ./apps/worker
+COPY apps ./apps
+COPY temu_core ./temu_core
 
 CMD ["python", "-m", "celery", "-A", "apps.worker.celery_app.celery_app", "worker", "--loglevel=INFO"]

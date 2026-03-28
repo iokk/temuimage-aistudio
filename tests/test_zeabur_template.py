@@ -12,12 +12,17 @@ class ZeaburTemplateTest(unittest.TestCase):
 
         self.assertIn("apiVersion: zeabur.com/v1", content)
         self.assertIn("kind: Template", content)
-        self.assertIn("- name: temu-app", content)
+        self.assertIn("- name: web", content)
+        self.assertIn("- name: api", content)
+        self.assertIn("- name: worker", content)
         self.assertIn("- name: postgresql", content)
         self.assertIn("- name: redis", content)
         self.assertIn("template: GIT", content)
         self.assertIn("repoID: 1184397680", content)
         self.assertIn("branch: main", content)
+        self.assertIn("dockerfile: apps/web/Dockerfile", content)
+        self.assertIn("dockerfile: apps/api/Dockerfile", content)
+        self.assertIn("dockerfile: apps/worker/Dockerfile", content)
         self.assertIn(
             "DATABASE_URL:\n            default: ${POSTGRES_CONNECTION_STRING}",
             content,
@@ -25,8 +30,10 @@ class ZeaburTemplateTest(unittest.TestCase):
         self.assertIn(
             "REDIS_URL:\n            default: ${REDIS_CONNECTION_STRING}", content
         )
-        self.assertIn('PLATFORM_AUTO_MIGRATE:\n            default: "true"', content)
-        self.assertIn("TITLE_TEXT_MODEL:\n            default: gemini-3.1-pro", content)
+        self.assertIn("JOB_STORE_BACKEND:\n            default: database", content)
+        self.assertIn("ASYNC_JOB_BACKEND:\n            default: celery", content)
+        self.assertIn("NEXTAUTH_SECRET", content)
+        self.assertIn("CASDOOR_ISSUER", content)
 
 
 if __name__ == "__main__":

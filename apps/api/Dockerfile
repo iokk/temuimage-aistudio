@@ -5,7 +5,8 @@ WORKDIR /app
 COPY apps/api/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
-COPY apps/api ./apps/api
+COPY apps ./apps
+COPY temu_core ./temu_core
 
 EXPOSE 8000
 

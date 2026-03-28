@@ -1,5 +1,8 @@
 import Link from "next/link"
 
+import { auth } from "../auth"
+import { signOutCurrentUser } from "../app/actions/auth-actions"
+
 const navItems = [
   { href: "/batch", label: "批量出图" },
   { href: "/quick", label: "快速出图" },
@@ -7,7 +10,7 @@ const navItems = [
   { href: "/translate", label: "图片翻译" },
 ]
 
-export function AppShell({
+export async function AppShell({
   title,
   subtitle,
   children,
@@ -16,6 +19,13 @@ export function AppShell({
   subtitle: string
   children: React.ReactNode
 }) {
+  const session = await auth()
+  const today = new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date())
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-950">
       <div className="mx-auto flex min-h-screen max-w-[1600px]">
@@ -56,10 +66,48 @@ export function AppShell({
                 管理后台
               </Link>
             </div>
+
+            <div className="mt-8 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
+              <p className="font-semibold text-slate-900">
+                {session?.user?.name || "未登录"}
+              </p>
+              <p className="mt-1 text-xs text-slate-500">
+                {session?.user?.email || "请先使用 Casdoor 登录后再进入个人或团队配置。"}
+              </p>
+              {session ? (
+                <form action={signOutCurrentUser} className="mt-4">
+                  <button
+                    type="submit"
+                    className="w-full rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-700"
+                  >
+                    退出登录
+                  </button>
+                </form>
+              ) : (
+                <Link
+                  href="/login"
+                  className="mt-4 block rounded-xl bg-sky-600 px-4 py-2 text-center text-sm font-medium text-white transition hover:bg-sky-500"
+                >
+                  去登录
+                </Link>
+              )}
+            </div>
           </div>
         </aside>
 
         <main className="flex-1 px-6 py-8 lg:px-10">
+          <div className="mb-6 grid gap-2 xl:hidden sm:grid-cols-2">
+            {navItems.map((item) => (
+              <Link
+                key={item.href}
+                href={item.href}
+                className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 shadow-sm transition hover:border-sky-300 hover:bg-sky-50"
+              >
+                {item.label}
+              </Link>
+            ))}
+          </div>
+
           <div className="rounded-3xl border border-slate-200 bg-white p-8 shadow-sm">
             <p className="text-xs font-semibold uppercase tracking-[0.18em] text-sky-700">
               {subtitle}
@@ -70,6 +118,10 @@ export function AppShell({
           </div>
 
           <div className="mt-6">{children}</div>
+
+          <footer className="mt-8 rounded-3xl border border-slate-200 bg-white px-6 py-4 text-sm text-slate-500 shadow-sm">
+            深圳祖尔科技有限公司 · {today} · v0.1.0
+          </footer>
         </main>
       </div>
     </div>

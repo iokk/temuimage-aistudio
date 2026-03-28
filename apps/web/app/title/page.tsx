@@ -1,12 +1,14 @@
+import { requireSignedIn } from "../../lib/guards"
 import { AppShell } from "../../components/app-shell"
-import { PagePlaceholder } from "../../components/page-placeholder"
+import { TitleWorkspace } from "../../components/title-workspace"
 
-export default function TitlePage() {
+export default async function TitlePage() {
+  await requireSignedIn()
+
   return (
     <AppShell title="标题优化" subtitle="Title Optimization">
-      <PagePlaceholder
-        heading="标题优化工作区"
-        description="后续会迁移图片+文字标题优化、标题模型切换和结果展示能力。当前阶段先完成页面骨架。"
+      <TitleWorkspace
+        apiBaseUrl={process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000"}
       />
     </AppShell>
   )

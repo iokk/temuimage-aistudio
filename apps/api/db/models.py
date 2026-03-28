@@ -9,62 +9,108 @@ from .base import Base
 
 
 class User(Base):
-    __tablename__ = "users"
+    __tablename__ = "User"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     mode: Mapped[str] = mapped_column(String(32), nullable=False, default="personal")
+    created_at: Mapped[datetime] = mapped_column(
+        "createdAt", DateTime, default=datetime.utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        "updatedAt", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
 
 
 class Organization(Base):
-    __tablename__ = "organizations"
+    __tablename__ = "Organization"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        "createdAt", DateTime, default=datetime.utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        "updatedAt", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
 
 
 class Membership(Base):
-    __tablename__ = "memberships"
+    __tablename__ = "Membership"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    user_id: Mapped[str] = mapped_column(
+        "userId", ForeignKey("User.id"), nullable=False
+    )
     organization_id: Mapped[str] = mapped_column(
-        ForeignKey("organizations.id"), nullable=False
+        "organizationId", ForeignKey("Organization.id"), nullable=False
     )
     role: Mapped[str] = mapped_column(String(32), nullable=False, default="member")
+    created_at: Mapped[datetime] = mapped_column(
+        "createdAt", DateTime, default=datetime.utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        "updatedAt", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
 
 
 class Credential(Base):
-    __tablename__ = "credentials"
+    __tablename__ = "Credential"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    owner_type: Mapped[str] = mapped_column(String(32), nullable=False)
-    owner_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    owner_type: Mapped[str] = mapped_column("ownerType", String(32), nullable=False)
+    owner_id: Mapped[str] = mapped_column("ownerId", String(64), nullable=False)
     provider: Mapped[str] = mapped_column(String(32), nullable=False)
-    encrypted_secret: Mapped[str] = mapped_column(Text, nullable=False)
-    config_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    encrypted_secret: Mapped[str] = mapped_column(
+        "encryptedSecret", Text, nullable=False
+    )
+    config_json: Mapped[dict] = mapped_column("configJson", JSON, default=dict)
+    user_id: Mapped[str | None] = mapped_column(
+        "userId", ForeignKey("User.id"), nullable=True
+    )
+    organization_id: Mapped[str | None] = mapped_column(
+        "organizationId", ForeignKey("Organization.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        "createdAt", DateTime, default=datetime.utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        "updatedAt", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
 
 
 class Job(Base):
-    __tablename__ = "jobs"
+    __tablename__ = "Job"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     type: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
-    owner_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    owner_id: Mapped[str] = mapped_column(
+        "ownerId", ForeignKey("User.id"), nullable=False
+    )
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
     result: Mapped[dict | None] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        "createdAt", DateTime, default=datetime.utcnow
+    )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+        "updatedAt", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )
 
 
 class SystemConfig(Base):
-    __tablename__ = "system_configs"
+    __tablename__ = "SystemConfig"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    config_key: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
-    config_value: Mapped[dict] = mapped_column(JSON, nullable=False)
+    config_key: Mapped[str] = mapped_column(
+        "configKey", String(120), unique=True, nullable=False
+    )
+    config_value: Mapped[dict] = mapped_column("configValue", JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        "createdAt", DateTime, default=datetime.utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        "updatedAt", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )

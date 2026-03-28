@@ -1,12 +1,14 @@
+import { requireSignedIn } from "../../lib/guards"
 import { AppShell } from "../../components/app-shell"
-import { PagePlaceholder } from "../../components/page-placeholder"
+import { TasksWorkspace } from "../../components/tasks-workspace"
 
-export default function TasksPage() {
+export default async function TasksPage() {
+  await requireSignedIn()
+
   return (
     <AppShell title="任务中心" subtitle="Task Center">
-      <PagePlaceholder
-        heading="统一任务中心"
-        description="后续会迁移批量出图、快速出图、标题优化、图片翻译的统一后台任务中心，并支持历史任务回看。"
+      <TasksWorkspace
+        apiBaseUrl={process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000"}
       />
     </AppShell>
   )

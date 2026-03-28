@@ -1,12 +1,17 @@
+import { auth } from "../../../auth"
 import { AppShell } from "../../../components/app-shell"
-import { PagePlaceholder } from "../../../components/page-placeholder"
+import { PersonalSettingsPanel } from "../../../components/personal-settings-panel"
+import { requireSignedIn } from "../../../lib/guards"
 
-export default function PersonalSettingsPage() {
+export default async function PersonalSettingsPage() {
+  await requireSignedIn()
+  const session = await auth()
+
   return (
     <AppShell title="个人模式" subtitle="Personal Settings">
-      <PagePlaceholder
-        heading="个人凭据配置"
-        description="后续会迁移个人 Gemini Key、个人中转站 URL / Key / 模型配置能力。"
+      <PersonalSettingsPanel
+        apiBaseUrl={process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000"}
+        session={session}
       />
     </AppShell>
   )

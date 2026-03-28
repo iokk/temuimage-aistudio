@@ -1,12 +1,14 @@
+import { requireAdmin } from "../../lib/guards"
 import { AppShell } from "../../components/app-shell"
-import { PagePlaceholder } from "../../components/page-placeholder"
+import { AdminRuntimePanel } from "../../components/admin-runtime-panel"
 
-export default function AdminPage() {
+export default async function AdminPage() {
+  await requireAdmin()
+
   return (
     <AppShell title="管理后台" subtitle="Admin Panel">
-      <PagePlaceholder
-        heading="管理后台骨架"
-        description="后续会迁移系统配置、用户管理、模板管理、任务中心和审计能力。"
+      <AdminRuntimePanel
+        apiBaseUrl={process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000"}
       />
     </AppShell>
   )

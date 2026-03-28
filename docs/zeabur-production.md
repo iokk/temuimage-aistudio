@@ -1,81 +1,64 @@
-# Zeabur Production Plan
+# Zeabur Production Plan For Rebuild V1
 
 ## Target topology
 
-- `temu-app` on Zeabur
+- `web` on Zeabur
+- `api` on Zeabur
+- `worker` on Zeabur
 - managed PostgreSQL
 - managed Redis
-- S3-compatible object storage
 
 Repository-shipped `template.yaml` is now the recommended deployment entrypoint.
 
-The app should remain stateless. Persistent business state must not depend on `/app/data`.
+The services should remain stateless. Persistent business state must live in PostgreSQL and Redis.
 
 ## Required env vars
 
 - `DATABASE_URL`
 - `REDIS_URL`
-- `PLATFORM_AUTO_MIGRATE=true`
-- `PLATFORM_SEED_DEFAULTS=true`
-- `PLATFORM_DEFAULT_ORG_NAME`
-- `PLATFORM_DEFAULT_PROJECT_NAME`
-- `PLATFORM_ENCRYPTION_KEY`
-- `TITLE_TEXT_MODEL=gemini-3.1-pro`
-- `S3_ENDPOINT`
-- `S3_BUCKET`
-- `S3_REGION`
-- `S3_ACCESS_KEY`
-- `S3_SECRET_KEY`
+- `JOB_STORE_BACKEND=database`
+- `ASYNC_JOB_BACKEND=celery`
+- `NEXTAUTH_URL`
+- `NEXTAUTH_SECRET`
+- `CASDOOR_ISSUER`
+- `CASDOOR_CLIENT_ID`
+- `CASDOOR_CLIENT_SECRET`
+- `TEAM_ADMIN_EMAILS`
+- `TEAM_ALLOWED_EMAIL_DOMAINS`
+- `SYSTEM_ENCRYPTION_KEY`
 
 ## Recommended rollout
 
 ### Path A: Template-first (recommended)
 
 1. Create a Zeabur template from this repository's `template.yaml`
-2. Deploy the template so `temu-app`, `postgresql`, and `redis` come up together
-3. Fill only the required variables:
-   - `SYSTEM_API_KEYS_FIXED`
-   - `ADMIN_PASSWORD_FIXED`
-   - `PLATFORM_ENCRYPTION_KEY`
-4. Wait for the app to start with `PLATFORM_AUTO_MIGRATE=true`
-5. Verify the login page shows team auth as ready, not fallback mode
+2. Deploy the template so `web`, `api`, `worker`, `postgresql`, and `redis` come up together
+3. Fill the required variables in Zeabur secrets
+4. Run `pnpm deploy:db` against the production `DATABASE_URL`
+5. Restart `api` and `worker`
+6. Verify `/admin` shows `Readiness = ready`
 
 ### Path B: Raw GitHub import (fallback)
 
 1. Create managed PostgreSQL in Zeabur
 2. Create managed Redis in Zeabur
-3. Connect object storage credentials if needed
-4. Deploy app with `DATABASE_URL`, `REDIS_URL`, `PLATFORM_AUTO_MIGRATE=true`, and `PLATFORM_SEED_DEFAULTS=true`
-5. Verify the admin console shows the team database as ready
+3. Deploy `api`, `worker`, and `web` separately from this GitHub repo with their respective Dockerfiles
+4. Fill env vars from `.env.zeabur.production.example`
+5. Run `pnpm deploy:db`
+6. Verify the admin console shows `ready`
 
 ## Backup policy
 
 - Daily PostgreSQL dump with `scripts/backup-postgres.sh`
-- Store dumps in offsite object storage
-- Retention target: 7 daily, 4 weekly, 3 monthly
-- Export `wallet_ledger_entries`, `redeem_codes`, and `usage_events` periodically for audit recovery
-
-## Restore checklist
-
-1. Restore PostgreSQL from the latest verified dump
-2. Restore object storage artifacts if needed
-3. Re-run `python3 -m alembic upgrade head`
-4. Verify wallet balance totals against ledger sums
+- Store dumps in offsite storage
+- Keep Redis as disposable queue/cache state
 
 ## Deploy Button note
 
 Zeabur `Deploy Button` requires a Zeabur template entry first. After you create the template from `template.yaml`, you can generate a reusable Deploy Button in the Zeabur dashboard and paste it into `README.md`.
 
-## Post-deploy checklist
+## Rebuild V1 references
 
-After every Zeabur deployment, run the product validation checklist in:
-
-`docs/post-deploy-checklist.md`
-
-Quick version:
-
-`docs/post-deploy-5min-checklist.md`
-
-Recommended config templates:
-
-`docs/recommended-config-templates.md`
+- `docs/zeabur-rebuild-v1.md`
+- `docs/rebuild-v1-release-checklist.md`
+- `docs/rebuild-v1-deploy-runbook.md`

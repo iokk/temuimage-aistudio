@@ -1,4 +1,4 @@
-# Zeabur Phase 1 Topology
+# Zeabur V1 Topology
 
 ## Planned Services
 
@@ -13,18 +13,28 @@
 ### Web
 
 - `NEXT_PUBLIC_API_BASE_URL`
-- `AUTH_SECRET`
+- `NEXTAUTH_URL`
+- `NEXTAUTH_SECRET`
+- `TEAM_ADMIN_EMAILS`
+- `TEAM_ALLOWED_EMAIL_DOMAINS`
 - `CASDOOR_CLIENT_ID`
 - `CASDOOR_CLIENT_SECRET`
-- `CASDOOR_ENDPOINT`
+- `CASDOOR_ISSUER`
 
 ### API / Worker
 
 - `DATABASE_URL`
 - `REDIS_URL`
+- `JOB_STORE_BACKEND=database`
+- `ASYNC_JOB_BACKEND=celery`
+- `API_APP_NAME`
+- `API_APP_VERSION`
+- `TEAM_ADMIN_EMAILS`
+- `TEAM_ALLOWED_EMAIL_DOMAINS`
 - `SYSTEM_ENCRYPTION_KEY`
-- `CASDOOR_ENDPOINT`
+- `CASDOOR_ISSUER`
 - `CASDOOR_CLIENT_ID`
+- `CASDOOR_CLIENT_SECRET`
 
 ## Deployment sequence
 
@@ -34,7 +44,9 @@
 4. Worker
 5. Web
 
-## Notes
+## V1 readiness rules
 
-- Phase 1 only delivers the skeleton. Business capability migration comes later.
-- The existing Streamlit app remains the current production system until the new stack is feature-complete.
+- `Celery` only should be used with persistent job storage
+- If `JOB_STORE_BACKEND` stays on `memory`, the API will force async execution back to `inline`
+- Run `pnpm deploy:db` before bringing API / Worker online
+- Confirm the admin runtime panel shows no blocking warnings before switching traffic

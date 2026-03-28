@@ -2,10 +2,10 @@
 apiVersion: zeabur.com/v1
 kind: Template
 metadata:
-  name: TEMU AI Studio
+  name: XiaoBaiTu Rebuild V1
 
 spec:
-  description: TEMU image generation, title optimization, and translation workspace with team auth, PostgreSQL, and Redis.
+  description: Next.js + FastAPI + Celery + PostgreSQL + Redis deployment for XiaoBaiTu V1.
   icon: https://avatars.githubusercontent.com/u/47072738?v=4
   tags:
     - AI
@@ -13,47 +13,78 @@ spec:
     - E-commerce
 
   variables:
-    - key: PUBLIC_DOMAIN
+    - key: WEB_DOMAIN
       type: DOMAIN
-      name: Public Domain
-      description: Optional public domain for the TEMU AI Studio web app.
-    - key: SYSTEM_API_KEYS_FIXED
+      name: Web Domain
+      description: Public domain for the Next.js frontend.
+    - key: API_DOMAIN
+      type: DOMAIN
+      name: API Domain
+      description: Public domain for the FastAPI service.
+    - key: NEXTAUTH_SECRET
       type: STRING
-      name: Gemini System API Keys
-      description: Required. One or more Gemini or Vertex keys, separated by commas or new lines.
-    - key: ADMIN_PASSWORD_FIXED
+      name: NextAuth Secret
+      description: Required. Secret used by Auth.js session signing.
+    - key: CASDOOR_ISSUER
       type: STRING
-      name: Admin Password
-      description: Required. Initial admin password for the system backend.
-    - key: PLATFORM_ENCRYPTION_KEY
+      name: Casdoor Issuer
+      description: Required. Casdoor OIDC issuer URL.
+    - key: CASDOOR_CLIENT_ID
       type: STRING
-      name: Platform Encryption Key
-      description: Required. High-entropy secret used to encrypt stored system API keys.
+      name: Casdoor Client ID
+      description: Required. Casdoor OAuth client ID.
+    - key: CASDOOR_CLIENT_SECRET
+      type: STRING
+      name: Casdoor Client Secret
+      description: Required. Casdoor OAuth client secret.
+    - key: TEAM_ADMIN_EMAILS
+      type: STRING
+      name: Team Admin Emails
+      description: Comma-separated admin emails.
+    - key: TEAM_ALLOWED_EMAIL_DOMAINS
+      type: STRING
+      name: Team Allowed Domains
+      description: Comma-separated domains allowed into team mode.
+    - key: SYSTEM_ENCRYPTION_KEY
+      type: STRING
+      name: System Encryption Key
+      description: Required. High-entropy key for backend secrets.
 
   readme: |
-    # TEMU AI Studio
+    # XiaoBaiTu Rebuild V1
 
-    Recommended Zeabur deployment for the repository:
+    This template provisions the full new stack:
 
-    - App service from this GitHub repository
-    - PostgreSQL for team auth, projects, and wallet data
-    - Redis for queue/cache readiness
+    - `web` — Next.js 15
+    - `api` — FastAPI
+    - `worker` — Celery
+    - `postgresql` — PostgreSQL
+    - `redis` — Redis
 
     ## What this template auto-configures
 
-    - `DATABASE_URL` from the PostgreSQL service
-    - `REDIS_URL` from the Redis service
-    - `PLATFORM_AUTO_MIGRATE=true`
-    - `PLATFORM_SEED_DEFAULTS=true`
-    - `TITLE_TEXT_MODEL=gemini-3.1-pro`
+    - `DATABASE_URL` from PostgreSQL
+    - `REDIS_URL` from Redis
+    - `JOB_STORE_BACKEND=database`
+    - `ASYNC_JOB_BACKEND=celery`
+    - `NEXT_PUBLIC_API_BASE_URL` from the API domain
+    - `NEXTAUTH_URL` from the web domain
 
     ## What you still need to provide
 
-    - `SYSTEM_API_KEYS_FIXED`
-    - `ADMIN_PASSWORD_FIXED`
-    - `PLATFORM_ENCRYPTION_KEY`
+    - `NEXTAUTH_SECRET`
+    - `CASDOOR_ISSUER`
+    - `CASDOOR_CLIENT_ID`
+    - `CASDOOR_CLIENT_SECRET`
+    - `TEAM_ADMIN_EMAILS`
+    - `TEAM_ALLOWED_EMAIL_DOMAINS`
+    - `SYSTEM_ENCRYPTION_KEY`
 
-    After deployment, log in with the admin password and verify that the login page no longer falls back to the legacy system-service flow.
+    After deployment:
+
+    1. Run `pnpm deploy:db` against the production `DATABASE_URL`
+    2. Restart `api` and `worker`
+    3. Open `/admin` and confirm `Readiness = ready`
 
   services:
     - name: postgresql
@@ -71,9 +102,9 @@ spec:
             dir: /var/lib/postgresql/data
         env:
           POSTGRES_DB:
-            default: temu
+            default: xiaobaitu
           POSTGRES_USER:
-            default: temu
+            default: postgres
             expose: true
             readonly: true
           POSTGRES_PASSWORD:
@@ -91,11 +122,6 @@ spec:
             default: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
             expose: true
             readonly: true
-        instructions:
-          - type: TEXT
-            title: PostgreSQL Connection String
-            content: ${POSTGRES_CONNECTION_STRING}
-            category: Database
 
     - name: redis
       icon: https://raw.githubusercontent.com/zeabur/service-icons/main/marketplace/redis.svg
@@ -123,16 +149,11 @@ spec:
             default: redis://${REDIS_HOST}:${REDIS_PORT}/0
             expose: true
             readonly: true
-        instructions:
-          - type: TEXT
-            title: Redis Connection String
-            content: ${REDIS_CONNECTION_STRING}
-            category: Cache
 
-    - name: temu-app
-      icon: https://avatars.githubusercontent.com/u/47072738?v=4
+    - name: api
+      icon: https://raw.githubusercontent.com/zeabur/service-icons/main/marketplace/fastapi.svg
       template: GIT
-      domainKey: PUBLIC_DOMAIN
+      domainKey: API_DOMAIN
       dependencies:
         - postgresql
         - redis
@@ -141,48 +162,101 @@ spec:
           type: GITHUB
           repoID: 1184397680
           branch: main
+          dockerfile: apps/api/Dockerfile
         ports:
-          - id: web
-            port: 8501
+          - id: api
+            port: 8000
             type: HTTP
-        volumes:
-          - id: data
-            dir: /app/data
         env:
-          PORT:
-            default: "8501"
-          APP_PORT:
-            default: "8501"
           DATABASE_URL:
             default: ${POSTGRES_CONNECTION_STRING}
           REDIS_URL:
             default: ${REDIS_CONNECTION_STRING}
-          PLATFORM_AUTO_MIGRATE:
-            default: "true"
-          PLATFORM_SEED_DEFAULTS:
-            default: "true"
-          PLATFORM_DEFAULT_ORG_NAME:
-            default: TEMU Team Workspace
-          PLATFORM_DEFAULT_PROJECT_NAME:
-            default: Default Project
-          PLATFORM_ENCRYPTION_KEY:
-            default: ${PLATFORM_ENCRYPTION_KEY}
-          TITLE_TEXT_MODEL:
-            default: gemini-3.1-pro
-          SYSTEM_API_KEYS_FIXED:
-            default: ${SYSTEM_API_KEYS_FIXED}
-          SYSTEM_API_KEYS_SYNC_MODE:
-            default: replace
-          ADMIN_PASSWORD_FIXED:
-            default: ${ADMIN_PASSWORD_FIXED}
-          FILE_STORAGE_TYPE:
-            default: local
-          FILE_STORAGE_PATH:
-            default: /app/data/files
-        instructions:
-          - type: DOMAIN
-            title: TEMU AI Studio
-            content: https://${PUBLIC_DOMAIN}/
-          - type: TEXT
-            title: Login Mode
-            content: Team auth is enabled automatically when PostgreSQL is ready.
+          JOB_STORE_BACKEND:
+            default: database
+          ASYNC_JOB_BACKEND:
+            default: celery
+          API_APP_NAME:
+            default: XiaoBaiTu API
+          API_APP_VERSION:
+            default: 1.0.0
+          TEAM_ADMIN_EMAILS:
+            default: ${TEAM_ADMIN_EMAILS}
+          TEAM_ALLOWED_EMAIL_DOMAINS:
+            default: ${TEAM_ALLOWED_EMAIL_DOMAINS}
+          SYSTEM_ENCRYPTION_KEY:
+            default: ${SYSTEM_ENCRYPTION_KEY}
+          CASDOOR_ISSUER:
+            default: ${CASDOOR_ISSUER}
+          CASDOOR_CLIENT_ID:
+            default: ${CASDOOR_CLIENT_ID}
+          CASDOOR_CLIENT_SECRET:
+            default: ${CASDOOR_CLIENT_SECRET}
+
+    - name: worker
+      icon: https://raw.githubusercontent.com/zeabur/service-icons/main/marketplace/python.svg
+      template: GIT
+      dependencies:
+        - postgresql
+        - redis
+      spec:
+        source:
+          type: GITHUB
+          repoID: 1184397680
+          branch: main
+          dockerfile: apps/worker/Dockerfile
+        env:
+          DATABASE_URL:
+            default: ${POSTGRES_CONNECTION_STRING}
+          REDIS_URL:
+            default: ${REDIS_CONNECTION_STRING}
+          JOB_STORE_BACKEND:
+            default: database
+          ASYNC_JOB_BACKEND:
+            default: celery
+          TEAM_ADMIN_EMAILS:
+            default: ${TEAM_ADMIN_EMAILS}
+          TEAM_ALLOWED_EMAIL_DOMAINS:
+            default: ${TEAM_ALLOWED_EMAIL_DOMAINS}
+          SYSTEM_ENCRYPTION_KEY:
+            default: ${SYSTEM_ENCRYPTION_KEY}
+          CASDOOR_ISSUER:
+            default: ${CASDOOR_ISSUER}
+          CASDOOR_CLIENT_ID:
+            default: ${CASDOOR_CLIENT_ID}
+          CASDOOR_CLIENT_SECRET:
+            default: ${CASDOOR_CLIENT_SECRET}
+
+    - name: web
+      icon: https://raw.githubusercontent.com/zeabur/service-icons/main/marketplace/nextjs.svg
+      template: GIT
+      domainKey: WEB_DOMAIN
+      dependencies:
+        - api
+      spec:
+        source:
+          type: GITHUB
+          repoID: 1184397680
+          branch: main
+          dockerfile: apps/web/Dockerfile
+        ports:
+          - id: web
+            port: 3000
+            type: HTTP
+        env:
+          NEXT_PUBLIC_API_BASE_URL:
+            default: https://${API_DOMAIN}
+          NEXTAUTH_URL:
+            default: https://${WEB_DOMAIN}
+          NEXTAUTH_SECRET:
+            default: ${NEXTAUTH_SECRET}
+          TEAM_ADMIN_EMAILS:
+            default: ${TEAM_ADMIN_EMAILS}
+          TEAM_ALLOWED_EMAIL_DOMAINS:
+            default: ${TEAM_ALLOWED_EMAIL_DOMAINS}
+          CASDOOR_ISSUER:
+            default: ${CASDOOR_ISSUER}
+          CASDOOR_CLIENT_ID:
+            default: ${CASDOOR_CLIENT_ID}
+          CASDOOR_CLIENT_SECRET:
+            default: ${CASDOOR_CLIENT_SECRET}
