@@ -7,9 +7,7 @@ export default async function TitlePage() {
 
   return (
     <AppShell title="标题优化" subtitle="Title Optimization">
-      <TitleWorkspace
-        apiBaseUrl={process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000"}
-      />
+      <TitleWorkspace apiBaseUrl="/api/platform" />
     </AppShell>
   )
 }

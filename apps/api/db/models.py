@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, JSON, String, Text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    JSON,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
@@ -10,11 +18,20 @@ from .base import Base
 
 class User(Base):
     __tablename__ = "User"
+    __table_args__ = (
+        UniqueConstraint("issuer", "subject", name="User_issuer_subject_key"),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     mode: Mapped[str] = mapped_column(String(32), nullable=False, default="personal")
+    issuer: Mapped[str] = mapped_column(String(255), nullable=False, default="internal")
+    subject: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    email_verified: Mapped[bool] = mapped_column(
+        "emailVerified", Boolean, nullable=False, default=False
+    )
+    last_login_at: Mapped[datetime | None] = mapped_column("lastLoginAt", DateTime)
     created_at: Mapped[datetime] = mapped_column(
         "createdAt", DateTime, default=datetime.utcnow
     )

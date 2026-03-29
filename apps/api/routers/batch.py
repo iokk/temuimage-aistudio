@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
+
+from apps.api.core.auth import Principal, get_current_principal
 
 
 router = APIRouter(prefix="/batch", tags=["batch"])
 
-DEFAULT_IMAGE_MODEL = "seedream-5.0"
-DEFAULT_TITLE_MODEL = "gemini-3.1-flash-lite-preview"
+DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-image-preview"
+DEFAULT_TITLE_MODEL = "gemini-3.1-pro"
 
 
 class BatchPreviewRequest(BaseModel):
@@ -48,7 +50,7 @@ def build_batch_outputs(image_types: list[str], include_titles: bool) -> list[di
 
 
 @router.get("/meta")
-def batch_meta():
+def batch_meta(_principal: Principal = Depends(get_current_principal)):
     return {
         "image_types": [
             "main_visual",
@@ -64,7 +66,10 @@ def batch_meta():
 
 
 @router.post("/preview")
-def batch_preview(payload: BatchPreviewRequest):
+def batch_preview(
+    payload: BatchPreviewRequest,
+    _principal: Principal = Depends(get_current_principal),
+):
     outputs = build_batch_outputs(payload.image_types, payload.include_titles)
     return {
         "image_model": DEFAULT_IMAGE_MODEL,

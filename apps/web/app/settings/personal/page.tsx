@@ -9,10 +9,7 @@ export default async function PersonalSettingsPage() {
 
   return (
     <AppShell title="个人模式" subtitle="Personal Settings">
-      <PersonalSettingsPanel
-        apiBaseUrl={process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000"}
-        session={session}
-      />
+      <PersonalSettingsPanel session={session} />
     </AppShell>
   )
 }

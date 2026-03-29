@@ -7,9 +7,7 @@ export default async function AdminPage() {
 
   return (
     <AppShell title="管理后台" subtitle="Admin Panel">
-      <AdminRuntimePanel
-        apiBaseUrl={process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000"}
-      />
+      <AdminRuntimePanel />
     </AppShell>
   )
 }

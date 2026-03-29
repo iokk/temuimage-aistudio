@@ -1,14 +1,14 @@
 import Link from "next/link"
 
-import { getReadinessPayload, getRuntimePayload, type RuntimePayload } from "../lib/runtime"
+import { getReadinessPayload, getRuntimePayload } from "../lib/runtime"
 
 function renderBooleanLabel(value: boolean, trueText: string, falseText: string) {
   return value ? trueText : falseText
 }
 
-export async function AdminRuntimePanel({ apiBaseUrl }: { apiBaseUrl: string }) {
-  const runtime = await getRuntimePayload(apiBaseUrl)
-  const readiness = await getReadinessPayload(apiBaseUrl)
+export async function AdminRuntimePanel() {
+  const runtime = await getRuntimePayload()
+  const readiness = await getReadinessPayload()
 
   if (!runtime) {
     return (
@@ -71,6 +71,17 @@ export async function AdminRuntimePanel({ apiBaseUrl }: { apiBaseUrl: string }) 
               执行回退：{runtime.execution_fallback_reason || "无，当前执行后端运行正常。"}
             </p>
           </div>
+        </div>
+      </div>
+
+      <div className="rounded-3xl border border-slate-200 bg-white p-8 shadow-sm">
+        <h3 className="text-xl font-bold text-slate-950">默认模型</h3>
+        <div className="mt-4 space-y-3 text-sm leading-7 text-slate-600">
+          <p>标题模型：{runtime.default_title_model}</p>
+          <p>图片翻译图像模型：{runtime.default_translate_image_model}</p>
+          <p>图片翻译分析模型：{runtime.default_translate_analysis_model}</p>
+          <p>快速出图图像模型：{runtime.default_quick_image_model}</p>
+          <p>批量出图图像模型：{runtime.default_batch_image_model}</p>
         </div>
       </div>
 

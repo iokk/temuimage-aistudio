@@ -18,12 +18,13 @@ type TranslatePreviewResponse = {
 
 const providerOptions = ["relay", "gemini"]
 const imageModelOptions = [
-  "seedream-5.0",
   "gemini-3.1-flash-image-preview",
+  "gemini-2.5-flash-image",
+  "seedream-5.0",
   "seedream-4.6",
 ]
 const analysisModelOptions = [
-  "gemini-3.1-flash-lite-preview",
+  "gemini-3.1-pro",
   "gemini-3.1-flash-image-preview",
 ]
 
@@ -36,8 +37,8 @@ export function TranslateWorkspace({ apiBaseUrl }: { apiBaseUrl: string }) {
   const [sourceLang, setSourceLang] = useState("auto")
   const [targetLang, setTargetLang] = useState("English")
   const [provider, setProvider] = useState("relay")
-  const [imageModel, setImageModel] = useState("seedream-5.0")
-  const [analysisModel, setAnalysisModel] = useState("gemini-3.1-flash-lite-preview")
+  const [imageModel, setImageModel] = useState("gemini-3.1-flash-image-preview")
+  const [analysisModel, setAnalysisModel] = useState("gemini-3.1-pro")
   const [result, setResult] = useState<TranslatePreviewResponse | null>(null)
   const [jobId, setJobId] = useState("")
   const [error, setError] = useState("")

@@ -27,6 +27,9 @@ def bootstrap_database(database_url: str) -> None:
                     email=SYSTEM_USER_EMAIL,
                     name="System",
                     mode="personal",
+                    issuer="internal",
+                    subject="system",
+                    email_verified=True,
                 )
             )
             session.commit()

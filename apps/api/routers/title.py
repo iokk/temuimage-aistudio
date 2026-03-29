@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import re
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
+
+from apps.api.core.auth import Principal, get_current_principal
 
 
 router = APIRouter(prefix="/title", tags=["title"])
 
-DEFAULT_MODEL = "gemini-3.1-flash-lite-preview"
+DEFAULT_MODEL = "gemini-3.1-pro"
 
 
 class TitlePreviewRequest(BaseModel):
@@ -64,7 +66,7 @@ def build_preview_titles(
 
 
 @router.get("/meta")
-def title_meta():
+def title_meta(_principal: Principal = Depends(get_current_principal)):
     return {
         "default_model": DEFAULT_MODEL,
         "tones": ["marketplace", "premium", "clean"],
@@ -73,7 +75,10 @@ def title_meta():
 
 
 @router.post("/preview")
-def title_preview(payload: TitlePreviewRequest):
+def title_preview(
+    payload: TitlePreviewRequest,
+    _principal: Principal = Depends(get_current_principal),
+):
     titles = build_preview_titles(
         product_info=payload.product_info,
         extra_requirements=payload.extra_requirements,

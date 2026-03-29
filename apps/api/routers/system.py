@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from apps.api.async_dispatcher import get_async_backend_meta
+from apps.api.core.auth import Principal, get_current_principal, require_admin
 from apps.api.core.config import get_settings
 from apps.api.job_repository import job_repository
 from apps.api.routers.batch import DEFAULT_IMAGE_MODEL as BATCH_IMAGE_MODEL
@@ -25,16 +26,12 @@ def _build_runtime_payload() -> dict:
     storage_meta = job_repository.get_backend_meta()
     async_meta = get_async_backend_meta()
     team_admins = _parse_csv(os.getenv("TEAM_ADMIN_EMAILS"))
-    bootstrap_login_email = os.getenv("BOOTSTRAP_LOGIN_EMAIL", "").strip()
-    if bootstrap_login_email and bootstrap_login_email not in team_admins:
-        team_admins.append(bootstrap_login_email)
     team_domains = _parse_csv(os.getenv("TEAM_ALLOWED_EMAIL_DOMAINS"))
     casdoor_enabled = bool(
-        os.getenv("CASDOOR_ISSUER")
-        and os.getenv("CASDOOR_CLIENT_ID")
-        and os.getenv("CASDOOR_CLIENT_SECRET")
+        settings.casdoor_issuer
+        and settings.casdoor_client_id
+        and settings.casdoor_client_secret
     )
-    bootstrap_enabled = bool(bootstrap_login_email)
     warnings: list[str] = []
 
     if not settings.database_url:
@@ -47,17 +44,10 @@ def _build_runtime_payload() -> dict:
         warnings.append("当前执行后端与任务存储不兼容，系统会自动回退到 inline。")
     if not team_admins:
         warnings.append("未配置 TEAM_ADMIN_EMAILS，团队管理员入口仍不稳定。")
-    if not casdoor_enabled and not bootstrap_enabled:
-        warnings.append("未配置可用登录方式，至少需要 Casdoor 或内置引导账号。")
+    if not casdoor_enabled:
+        warnings.append("未配置 Casdoor，统一身份登录不可用。")
 
-    if casdoor_enabled and bootstrap_enabled:
-        auth_provider = "Casdoor + Bootstrap"
-    elif casdoor_enabled:
-        auth_provider = "Casdoor"
-    elif bootstrap_enabled:
-        auth_provider = "Bootstrap"
-    else:
-        auth_provider = "Unconfigured"
+    auth_provider = "Casdoor" if casdoor_enabled else "Unconfigured"
 
     ready_for_distributed_workers = bool(
         settings.database_url
@@ -97,12 +87,12 @@ def system_health():
 
 
 @router.get("/runtime")
-def system_runtime():
+def system_runtime(_principal: Principal = Depends(get_current_principal)):
     return _build_runtime_payload()
 
 
 @router.get("/readiness")
-def system_readiness():
+def system_readiness(_principal: Principal = Depends(require_admin)):
     runtime = _build_runtime_payload()
     return {
         "status": "ready" if runtime["ready_for_distributed_workers"] else "degraded",

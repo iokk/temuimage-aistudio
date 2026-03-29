@@ -23,6 +23,16 @@ type JobResponse = {
   execution_backend?: string
 }
 
+function buildJobApiUrl(apiBaseUrl: string, path: string) {
+  const normalizedBaseUrl = apiBaseUrl.replace(/\/$/, "")
+
+  if (normalizedBaseUrl.endsWith("/api/platform")) {
+    return `${normalizedBaseUrl}${path}`
+  }
+
+  return `${normalizedBaseUrl}/v1${path}`
+}
+
 export async function createJob(apiBaseUrl: string, input: {
   task_type: string
   summary: string
@@ -30,7 +40,7 @@ export async function createJob(apiBaseUrl: string, input: {
   payload?: Record<string, unknown>
   result?: Record<string, unknown>
 }) {
-  const response = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/v1/jobs/submit`, {
+  const response = await fetch(buildJobApiUrl(apiBaseUrl, "/jobs/submit"), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -57,7 +67,7 @@ export async function submitAsyncJob(apiBaseUrl: string, input: {
   payload?: Record<string, unknown>
   result?: Record<string, unknown>
 }) {
-  const response = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/v1/jobs/submit-async`, {
+  const response = await fetch(buildJobApiUrl(apiBaseUrl, "/jobs/submit-async"), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -83,7 +93,7 @@ export async function updateJobStatus(
   status: string,
   result?: Record<string, unknown>,
 ) {
-  const response = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/v1/jobs/${jobId}/status`, {
+  const response = await fetch(buildJobApiUrl(apiBaseUrl, `/jobs/${jobId}/status`), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -102,7 +112,7 @@ export async function updateJobStatus(
 }
 
 export async function getJob(apiBaseUrl: string, jobId: string) {
-  const response = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/v1/jobs/${jobId}`, {
+  const response = await fetch(buildJobApiUrl(apiBaseUrl, `/jobs/${jobId}`), {
     cache: "no-store",
   })
 

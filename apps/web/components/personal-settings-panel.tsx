@@ -5,13 +5,11 @@ import type { Session } from "next-auth"
 import { getRuntimePayload } from "../lib/runtime"
 
 export async function PersonalSettingsPanel({
-  apiBaseUrl,
   session,
 }: {
-  apiBaseUrl: string
   session: Session | null
 }) {
-  const runtime = await getRuntimePayload(apiBaseUrl)
+  const runtime = await getRuntimePayload()
 
   return (
     <section className="grid gap-6">
@@ -35,7 +33,7 @@ export async function PersonalSettingsPanel({
         <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
           <p className="text-sm text-slate-500">默认标题模型</p>
           <p className="mt-2 text-xl font-bold text-slate-950">
-            {runtime?.default_title_model || "gemini-3.1-flash-lite-preview"}
+            {runtime?.default_title_model || "gemini-3.1-pro"}
           </p>
           <p className="mt-2 text-sm text-slate-500">用于标题优化和出图联动标题</p>
         </div>
@@ -47,7 +45,7 @@ export async function PersonalSettingsPanel({
           <div className="mt-4 space-y-3 text-sm leading-7 text-slate-600">
             <p>个人模式面向单人使用，后续这里会接个人 Gemini Key 或个人中转站配置。</p>
             <p>当前新栈已经可以先体验标题优化、图片翻译、快速出图、批量出图和任务中心。</p>
-            <p>模型默认方向已经固定：标题优先走 `gemini-3.1-flash-lite-preview`。</p>
+            <p>模型默认方向已经固定：标题优先走 `gemini-3.1-pro`。</p>
           </div>
         </div>
 
@@ -57,8 +55,8 @@ export async function PersonalSettingsPanel({
             <p>任务存储：{runtime?.active_backend || "memory"}</p>
             <p>异步执行：{runtime?.active_execution_backend || "inline"}</p>
             <p>分布式 worker 就绪：{runtime?.ready_for_distributed_workers ? "已满足" : "未满足"}</p>
-            <p>图片翻译图像模型：{runtime?.default_translate_image_model || "seedream-5.0"}</p>
-            <p>图片翻译分析模型：{runtime?.default_translate_analysis_model || "gemini-3.1-flash-lite-preview"}</p>
+            <p>图片翻译图像模型：{runtime?.default_translate_image_model || "gemini-3.1-flash-image-preview"}</p>
+            <p>图片翻译分析模型：{runtime?.default_translate_analysis_model || "gemini-3.1-pro"}</p>
           </div>
         </div>
       </div>

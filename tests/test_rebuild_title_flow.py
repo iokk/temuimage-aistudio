@@ -7,7 +7,7 @@ import unittest
 class RebuildTitleFlowTest(unittest.TestCase):
     def test_api_router_exists_and_uses_expected_model_name(self):
         router_text = Path("apps/api/routers/title.py").read_text()
-        self.assertIn('DEFAULT_MODEL = "gemini-3.1-flash-lite-preview"', router_text)
+        self.assertIn('DEFAULT_MODEL = "gemini-3.1-pro"', router_text)
         self.assertIn('@router.post("/preview")', router_text)
         self.assertIn('@router.get("/meta")', router_text)
 

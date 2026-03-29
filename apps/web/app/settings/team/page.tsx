@@ -11,11 +11,7 @@ export default async function TeamSettingsPage() {
 
   return (
     <AppShell title="团队/管理员" subtitle="Team Settings">
-      <TeamSettingsPanel
-        apiBaseUrl={process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000"}
-        session={session}
-        isAdmin={access.isAdmin}
-      />
+      <TeamSettingsPanel session={session} isAdmin={access.isAdmin} />
     </AppShell>
   )
 }

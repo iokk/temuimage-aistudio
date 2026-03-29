@@ -10,8 +10,9 @@ class RebuildBatchFlowTest(unittest.TestCase):
         self.assertIn('@router.post("/preview")', router_text)
         self.assertIn('@router.get("/meta")', router_text)
         self.assertIn(
-            'DEFAULT_TITLE_MODEL = "gemini-3.1-flash-lite-preview"', router_text
+            'DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-image-preview"', router_text
         )
+        self.assertIn('DEFAULT_TITLE_MODEL = "gemini-3.1-pro"', router_text)
 
     def test_api_main_includes_batch_router(self):
         main_text = Path("apps/api/main.py").read_text()

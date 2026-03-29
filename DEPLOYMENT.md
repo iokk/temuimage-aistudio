@@ -1,128 +1,87 @@
-# TEMU AI Studio V1.0.0 部署清单
+# XiaoBaiTu Rebuild v1.0.0 Deployment
 
-## 1. 本地检查
+## Release path
 
-```bash
-python3 -m py_compile app.py
-bash -n scripts/deploy-zeabur.sh
-bash -n scripts/deploy-debian.sh
-```
+`rebuild-v1.0.0` ships only on the rebuild stack:
 
-## 2. Zeabur 模板化部署（推荐）
+1. `web`
+2. `api`
+3. `worker`
+4. `postgresql`
+5. `redis`
 
-仓库根目录已提供 `template.yaml`，推荐优先用模板化方式部署，而不是裸 GitHub Import。
+The old Streamlit stack remains archived and is not part of the production deploy path.
 
-### 模板化部署会自动拉起
+## Identity requirement
 
-1. `temu-app`
-2. `postgresql`
-3. `redis`
+- Casdoor is mandatory
+- Bootstrap login is no longer an official deploy path
+- `TEAM_ADMIN_EMAILS` must contain at least one Casdoor user email
 
-并自动注入：
+## Recommended deployment
 
-```bash
-DATABASE_URL=${POSTGRES_CONNECTION_STRING}
-REDIS_URL=${REDIS_CONNECTION_STRING}
-PLATFORM_AUTO_MIGRATE=true
-PLATFORM_SEED_DEFAULTS=true
-PLATFORM_DEFAULT_ORG_NAME=TEMU Team Workspace
-PLATFORM_DEFAULT_PROJECT_NAME=Default Project
-TITLE_TEXT_MODEL=gemini-3.1-pro
-```
+Use `template.yaml` on Zeabur.
 
-### 首次只需填写
+## Validation before deploy
 
 ```bash
-SYSTEM_API_KEYS_FIXED=你的 Gemini Key
-ADMIN_PASSWORD_FIXED=你的管理员密码
-PLATFORM_ENCRYPTION_KEY=高强度随机值
-PUBLIC_DOMAIN=可选域名
+pnpm build:web
+pnpm prisma:validate
+python3 -m py_compile apps/api/core/auth.py apps/api/job_repository.py apps/api/routers/jobs.py apps/api/routers/system.py apps/api/routers/title.py apps/api/routers/quick.py apps/api/routers/batch.py apps/api/routers/translate.py apps/api/task_processor.py apps/api/bootstrap_db.py apps/api/db/models.py apps/api/core/config.py
 ```
 
-### 说明
+## Required environment
 
-- `Deploy Button` 需要你先在 Zeabur 后台基于 `template.yaml` 创建一次模板条目
-- 创建后你就可以把按钮回填到 `README.md`
+### Web
 
-## 3. GitHub → Zeabur 部署（备用）
+- `NEXTAUTH_URL`
+- `NEXTAUTH_SECRET`
+- `NEXT_PUBLIC_API_BASE_URL`
+- `CASDOOR_ISSUER`
+- `CASDOOR_CLIENT_ID`
+- `CASDOOR_CLIENT_SECRET`
+- `TEAM_ADMIN_EMAILS`
+- `TEAM_ALLOWED_EMAIL_DOMAINS`
 
-推荐用于持续更新。
+### API and Worker
 
-### 团队版新增基础设施
+- `DATABASE_URL`
+- `REDIS_URL`
+- `JOB_STORE_BACKEND=database`
+- `ASYNC_JOB_BACKEND=celery`
+- `AUTO_BOOTSTRAP_DB=true` on `api`
+- `AUTO_BOOTSTRAP_DB=false` on `worker`
+- `API_APP_VERSION=1.0.0`
+- `CASDOOR_ISSUER`
+- `CASDOOR_CLIENT_ID`
+- `CASDOOR_CLIENT_SECRET`
+- `CASDOOR_API_AUDIENCE` when your Casdoor access token uses a custom audience
+- `SYSTEM_ENCRYPTION_KEY`
+- `TEAM_ADMIN_EMAILS`
+- `TEAM_ALLOWED_EMAIL_DOMAINS`
 
-长期团队版建议同时接入：
+## First startup
 
-1. Zeabur 托管 PostgreSQL
-2. Zeabur 托管 Redis
-3. S3 / OSS / COS / MinIO 对象存储
+1. Start `postgresql`
+2. Start `redis`
+3. Start `api`
+4. Start `worker`
+5. Start `web`
+6. Let `api` create SQLAlchemy tables and seed `system@xiaobaitu.local`
+7. Run `pnpm deploy:db` only for Prisma-managed upgrades
 
-核心环境变量：
+## Post-deploy checks
 
-```bash
-DATABASE_URL=postgresql+psycopg://...
-REDIS_URL=redis://...
-PLATFORM_AUTO_MIGRATE=true
-PLATFORM_SEED_DEFAULTS=true
-PLATFORM_DEFAULT_ORG_NAME=TEMU Team Workspace
-PLATFORM_DEFAULT_PROJECT_NAME=Default Project
-PLATFORM_ENCRYPTION_KEY=请设置高强度随机值
-TITLE_TEXT_MODEL=gemini-3.1-pro
-```
+1. Open `/login` and confirm Casdoor redirects correctly
+2. Open `/admin`
+3. Confirm `Readiness = ready`
+4. Confirm `active_backend = database`
+5. Confirm `active_execution_backend = celery`
+6. Confirm runtime default models show the `gemini-3.1-*` values
 
-说明：
+## Related docs
 
-- `PLATFORM_ENCRYPTION_KEY` 建议在 Zeabur 生产环境必填，用于加密保存系统 API Key
-- 团队数据库启用后，普通用户通过注册账号登录；共享密码只保留给回退场景和管理员引导
-
-### 步骤
-
-1. 将代码推送到 GitHub
-2. 在 Zeabur 中连接仓库
-3. 配置环境变量
-4. 等待构建并验证健康检查
-5. 进入管理后台，确认 `Team Wallet Foundation` 状态为 ready
-
-### 推荐环境变量
-
-```bash
-SYSTEM_API_KEYS_FIXED=AQ.xxxxx
-SYSTEM_API_KEYS_SYNC_MODE=replace
-GOOGLE_GENAI_USE_VERTEXAI=true
-ADMIN_PASSWORD_FIXED=你的管理员密码
-USER_PASSWORD_FIXED=你的用户密码
-ALLOW_PASSWORDLESS_USER_LOGIN=true
-PORT=8501
-```
-
-## 4. 原生服务器部署
-
-```bash
-./scripts/deploy-debian.sh install
-```
-
-## 5. 健康检查
-
-```bash
-curl http://localhost:8501/_stcore/health
-```
-
-## 5.1 上线后验证
-
-部署完成后，建议按这份清单快速验证：
-
-`docs/post-deploy-checklist.md`
-
-如果只想快速做 5 分钟验收：
-
-`docs/post-deploy-5min-checklist.md`
-
-如果需要直接套用推荐配置：
-
-`docs/recommended-config-templates.md`
-
-## 6. 常见问题
-
-- `FAILED_PRECONDITION`：优先改走 Vertex Express / Vertex AI 区域端点
-- 长时间出图慢：降低图片并发，优先 `minimal`
-- 服务卡在 `STARTING`：优先检查服务器容器运行层，而不是先怀疑代码
-- 登录页提示团队数据库未就绪：优先检查 `DATABASE_URL`、数据库连通性，以及是否缺表/未迁移
+- `docs/zeabur-rebuild-v1.md`
+- `docs/rebuild-v1-deploy-runbook.md`
+- `docs/rebuild-v1-release-checklist.md`
+- `docs/admin-manual.md`

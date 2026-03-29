@@ -28,27 +28,19 @@ spec:
     - key: CASDOOR_ISSUER
       type: STRING
       name: Casdoor Issuer
-      description: Optional. Casdoor OIDC issuer URL for SSO login.
+      description: Required. Casdoor OIDC issuer URL.
     - key: CASDOOR_CLIENT_ID
       type: STRING
       name: Casdoor Client ID
-      description: Optional. Casdoor OAuth client ID.
+      description: Required. Casdoor OAuth client ID.
     - key: CASDOOR_CLIENT_SECRET
       type: STRING
       name: Casdoor Client Secret
-      description: Optional. Casdoor OAuth client secret.
-    - key: BOOTSTRAP_LOGIN_EMAIL
+      description: Required. Casdoor OAuth client secret.
+    - key: CASDOOR_API_AUDIENCE
       type: STRING
-      name: Bootstrap Login Email
-      description: Recommended. Built-in bootstrap admin email for first deployment.
-    - key: BOOTSTRAP_LOGIN_PASSWORD
-      type: STRING
-      name: Bootstrap Login Password
-      description: Recommended. Built-in bootstrap admin password for first deployment.
-    - key: BOOTSTRAP_LOGIN_NAME
-      type: STRING
-      name: Bootstrap Login Name
-      description: Optional. Display name for the bootstrap login account.
+      name: Casdoor API Audience
+      description: Optional. Required only if your access tokens use a custom audience.
     - key: TEAM_ADMIN_EMAILS
       type: STRING
       name: Team Admin Emails
@@ -65,7 +57,7 @@ spec:
   readme: |
     # XiaoBaiTu Rebuild V1
 
-    This template provisions the full new stack:
+    This template provisions the official `rebuild-v1.0.0` stack:
 
     - `web` — Next.js 15
     - `api` — FastAPI
@@ -87,17 +79,12 @@ spec:
 
     - `NEXTAUTH_SECRET`
     - `SYSTEM_ENCRYPTION_KEY`
-    - at least one login path:
-      - `BOOTSTRAP_LOGIN_EMAIL` + `BOOTSTRAP_LOGIN_PASSWORD`, or
-      - `CASDOOR_ISSUER` + `CASDOOR_CLIENT_ID` + `CASDOOR_CLIENT_SECRET`
+    - `CASDOOR_ISSUER`
+    - `CASDOOR_CLIENT_ID`
+    - `CASDOOR_CLIENT_SECRET`
     - `TEAM_ADMIN_EMAILS`
     - `TEAM_ALLOWED_EMAIL_DOMAINS`
-
-    Recommended first release path:
-
-    1. Set `BOOTSTRAP_LOGIN_EMAIL` to your own admin mailbox
-    2. Put the same mailbox into `TEAM_ADMIN_EMAILS`
-    3. Set a strong `BOOTSTRAP_LOGIN_PASSWORD`
+    - `CASDOOR_API_AUDIENCE` if needed by your Casdoor token audience policy
 
     On first deployment the `api` service auto-creates the SQLAlchemy tables it needs
     and seeds `system@xiaobaitu.local` when `AUTO_BOOTSTRAP_DB=true`.
@@ -105,7 +92,7 @@ spec:
     After deployment:
 
     1. Wait for `postgresql`, `redis`, and `api` to become healthy
-    2. Sign in with your bootstrap account or Casdoor SSO
+    2. Sign in with Casdoor SSO
     3. Open `/admin` and confirm `Readiness = ready`
     4. Run `pnpm deploy:db` only when you need to apply Prisma migrations for later schema upgrades
 
@@ -217,8 +204,8 @@ spec:
             default: ${CASDOOR_CLIENT_ID}
           CASDOOR_CLIENT_SECRET:
             default: ${CASDOOR_CLIENT_SECRET}
-          BOOTSTRAP_LOGIN_EMAIL:
-            default: ${BOOTSTRAP_LOGIN_EMAIL}
+          CASDOOR_API_AUDIENCE:
+            default: ${CASDOOR_API_AUDIENCE}
 
     - name: worker
       icon: https://raw.githubusercontent.com/zeabur/service-icons/main/marketplace/python.svg
@@ -255,6 +242,8 @@ spec:
             default: ${CASDOOR_CLIENT_ID}
           CASDOOR_CLIENT_SECRET:
             default: ${CASDOOR_CLIENT_SECRET}
+          CASDOOR_API_AUDIENCE:
+            default: ${CASDOOR_API_AUDIENCE}
 
     - name: web
       icon: https://raw.githubusercontent.com/zeabur/service-icons/main/marketplace/nextjs.svg
@@ -279,12 +268,6 @@ spec:
             default: https://${WEB_DOMAIN}
           NEXTAUTH_SECRET:
             default: ${NEXTAUTH_SECRET}
-          BOOTSTRAP_LOGIN_EMAIL:
-            default: ${BOOTSTRAP_LOGIN_EMAIL}
-          BOOTSTRAP_LOGIN_PASSWORD:
-            default: ${BOOTSTRAP_LOGIN_PASSWORD}
-          BOOTSTRAP_LOGIN_NAME:
-            default: ${BOOTSTRAP_LOGIN_NAME}
           TEAM_ADMIN_EMAILS:
             default: ${TEAM_ADMIN_EMAILS}
           TEAM_ALLOWED_EMAIL_DOMAINS:

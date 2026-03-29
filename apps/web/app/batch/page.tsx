@@ -7,9 +7,7 @@ export default async function BatchPage() {
 
   return (
     <AppShell title="批量出图" subtitle="Batch Generation">
-      <BatchWorkspace
-        apiBaseUrl={process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000"}
-      />
+      <BatchWorkspace apiBaseUrl="/api/platform" />
     </AppShell>
   )
 }

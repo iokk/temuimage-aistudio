@@ -36,7 +36,8 @@ The services should remain stateless. Persistent business state must live in Pos
 3. Fill the required variables in Zeabur secrets
 4. Run `pnpm deploy:db` against the production `DATABASE_URL`
 5. Restart `api` and `worker`
-6. Verify `/admin` shows `Readiness = ready`
+6. Run `API_BASE_URL=https://api.example.com WEB_BASE_URL=https://web.example.com API_BEARER_TOKEN=<casdoor-admin-token> ./scripts/zeabur_rebuild_release.sh`
+7. Verify `/admin` shows `Readiness = ready`
 
 ### Path B: Raw GitHub import (fallback)
 
@@ -45,7 +46,8 @@ The services should remain stateless. Persistent business state must live in Pos
 3. Deploy `api`, `worker`, and `web` separately from this GitHub repo with their respective Dockerfiles
 4. Fill env vars from `.env.zeabur.production.example`
 5. Run `pnpm deploy:db`
-6. Verify the admin console shows `ready`
+6. Run `API_BASE_URL=https://api.example.com WEB_BASE_URL=https://web.example.com API_BEARER_TOKEN=<casdoor-admin-token> ./scripts/zeabur_rebuild_release.sh`
+7. Verify the admin console shows `ready`
 
 ## Backup policy
 

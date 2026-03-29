@@ -5,15 +5,13 @@ import type { Session } from "next-auth"
 import { getRuntimePayload } from "../lib/runtime"
 
 export async function TeamSettingsPanel({
-  apiBaseUrl,
   session,
   isAdmin,
 }: {
-  apiBaseUrl: string
   session: Session | null
   isAdmin: boolean
 }) {
-  const runtime = await getRuntimePayload(apiBaseUrl)
+  const runtime = await getRuntimePayload()
 
   return (
     <section className="grid gap-6">
@@ -49,7 +47,7 @@ export async function TeamSettingsPanel({
           <div className="mt-4 space-y-3 text-sm leading-7 text-slate-600">
             <p>团队模式后续会承接统一 Gemini、中转站、默认模型、成员权限和审计能力。</p>
             <p>当前管理员可以先通过管理后台查看运行诊断，并通过任务中心验证新栈主流程。</p>
-            <p>标题默认模型：{runtime?.default_title_model || "gemini-3.1-flash-lite-preview"}</p>
+            <p>标题默认模型：{runtime?.default_title_model || "gemini-3.1-pro"}</p>
           </div>
         </div>
 
@@ -59,8 +57,8 @@ export async function TeamSettingsPanel({
             <p>任务存储：{runtime?.active_backend || "memory"}</p>
             <p>异步执行：{runtime?.active_execution_backend || "inline"}</p>
             <p>分布式 worker 就绪：{runtime?.ready_for_distributed_workers ? "已满足" : "未满足"}</p>
-            <p>快速出图图像模型：{runtime?.default_quick_image_model || "seedream-5.0"}</p>
-            <p>批量出图图像模型：{runtime?.default_batch_image_model || "seedream-5.0"}</p>
+            <p>快速出图图像模型：{runtime?.default_quick_image_model || "gemini-3.1-flash-image-preview"}</p>
+            <p>批量出图图像模型：{runtime?.default_batch_image_model || "gemini-3.1-flash-image-preview"}</p>
           </div>
         </div>
       </div>

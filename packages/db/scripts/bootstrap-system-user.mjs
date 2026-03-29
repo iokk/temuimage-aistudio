@@ -8,12 +8,18 @@ async function main() {
     update: {
       name: "System",
       mode: "personal",
+      issuer: "internal",
+      subject: "system",
+      emailVerified: true,
     },
     create: {
       id: "system",
       email: "system@xiaobaitu.local",
       name: "System",
       mode: "personal",
+      issuer: "internal",
+      subject: "system",
+      emailVerified: true,
     },
   })
 }

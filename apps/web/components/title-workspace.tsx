@@ -166,7 +166,7 @@ export function TitleWorkspace({ apiBaseUrl }: { apiBaseUrl: string }) {
           <h3 className="text-xl font-bold text-slate-950">当前接通状态</h3>
           <div className="mt-4 space-y-3 text-sm leading-7 text-slate-600">
             <p>页面已接到新 FastAPI 的 `/v1/title/preview`。</p>
-            <p>标题模型目标仍保持 `gemini-3.1-flash-lite-preview`。</p>
+            <p>标题模型默认使用 `gemini-3.1-pro`。</p>
             <p>下一步会把图片输入、真实模型调用和任务中心串起来。</p>
           </div>
         </div>

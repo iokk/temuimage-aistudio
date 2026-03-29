@@ -1,15 +1,10 @@
 import type { NextAuthConfig } from "next-auth"
-import Credentials from "next-auth/providers/credentials"
 
 const casdoorEnabled = Boolean(
   process.env.CASDOOR_ISSUER &&
     process.env.CASDOOR_CLIENT_ID &&
     process.env.CASDOOR_CLIENT_SECRET,
 )
-
-const bootstrapEmail = (process.env.BOOTSTRAP_LOGIN_EMAIL || "").trim().toLowerCase()
-const bootstrapPassword = process.env.BOOTSTRAP_LOGIN_PASSWORD || ""
-const bootstrapName = (process.env.BOOTSTRAP_LOGIN_NAME || "").trim() || "Platform Admin"
 
 const providers: NonNullable<NextAuthConfig["providers"]> = []
 
@@ -38,40 +33,55 @@ if (casdoorEnabled) {
   })
 }
 
-if (bootstrapEmail && bootstrapPassword) {
-  providers.push(
-    Credentials({
-      id: "bootstrap",
-      name: "内置引导账号",
-      credentials: {
-        email: { label: "Email", type: "email" },
-        password: { label: "Password", type: "password" },
-      },
-      authorize(credentials) {
-        const email =
-          typeof credentials?.email === "string"
-            ? credentials.email.trim().toLowerCase()
-            : ""
-        const password =
-          typeof credentials?.password === "string" ? credentials.password : ""
-
-        if (email !== bootstrapEmail || password !== bootstrapPassword) {
-          return null
-        }
-
-        return {
-          id: `bootstrap:${bootstrapEmail}`,
-          name: bootstrapName,
-          email: bootstrapEmail,
-        }
-      },
-    }),
-  )
-}
-
 const authConfig: NextAuthConfig = {
   providers,
   trustHost: true,
+  callbacks: {
+    jwt({ token, account, profile }) {
+      if (account?.access_token) {
+        token.accessToken = account.access_token
+      }
+
+      if (account?.id_token) {
+        token.idToken = account.id_token
+      }
+
+      if (typeof token.sub === "string") {
+        token.subject = token.sub
+      }
+
+      if (process.env.CASDOOR_ISSUER) {
+        token.issuer = process.env.CASDOOR_ISSUER
+      }
+
+      const emailVerified = profile?.email_verified
+      if (typeof emailVerified === "boolean") {
+        token.casdoorEmailVerified = emailVerified
+      }
+
+      return token
+    },
+    session({ session, token }) {
+      if (session.user) {
+        session.user.id = typeof token.sub === "string" ? token.sub : ""
+        session.user.casdoorEmailVerified = Boolean(token.casdoorEmailVerified)
+      }
+
+      session.accessToken =
+        typeof token.accessToken === "string" ? token.accessToken : undefined
+      session.idToken = typeof token.idToken === "string" ? token.idToken : undefined
+      session.subject =
+        typeof token.subject === "string"
+          ? token.subject
+          : typeof token.sub === "string"
+            ? token.sub
+            : undefined
+      session.issuer =
+        typeof token.issuer === "string" ? token.issuer : process.env.CASDOOR_ISSUER
+
+      return session
+    },
+  },
 }
 
 export default authConfig

@@ -108,6 +108,27 @@ def _normalize_job_record(job: Job | dict[str, Any]) -> dict[str, Any]:
 class MemoryJobRepository:
     backend_name = "memory"
 
+    def upsert_user(
+        self,
+        *,
+        user_id: str,
+        email: str,
+        name: str,
+        issuer: str,
+        subject: str,
+        email_verified: bool,
+        last_login_at: datetime,
+    ) -> dict[str, Any]:
+        return {
+            "id": user_id,
+            "email": email,
+            "name": name,
+            "issuer": issuer,
+            "subject": subject,
+            "email_verified": email_verified,
+            "last_login_at": last_login_at.isoformat(),
+        }
+
     def create_job(
         self,
         *,
@@ -115,6 +136,7 @@ class MemoryJobRepository:
         summary: str,
         status: str,
         payload: dict[str, Any],
+        owner_id: str | None = None,
         result: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         meta = build_task_meta(task_type)
@@ -122,6 +144,7 @@ class MemoryJobRepository:
         history = [_build_timeline_entry(status, result)]
         job = {
             "id": f"job-{next(_memory_counter)}",
+            "owner_id": owner_id or SYSTEM_USER_ID,
             "task_type": task_type,
             "status": status,
             "summary": summary,
@@ -138,12 +161,27 @@ class MemoryJobRepository:
         del _memory_jobs[50:]
         return job
 
-    def list_jobs(self) -> list[dict[str, Any]]:
-        return list(_memory_jobs)
+    def list_jobs(
+        self,
+        *,
+        owner_id: str | None = None,
+        include_all: bool = False,
+    ) -> list[dict[str, Any]]:
+        if include_all or owner_id is None:
+            return list(_memory_jobs)
+        return [job for job in _memory_jobs if job.get("owner_id") == owner_id]
 
-    def get_job(self, job_id: str) -> dict[str, Any] | None:
+    def get_job(
+        self,
+        job_id: str,
+        *,
+        owner_id: str | None = None,
+        include_all: bool = False,
+    ) -> dict[str, Any] | None:
         for job in _memory_jobs:
             if job.get("id") == job_id:
+                if not include_all and owner_id and job.get("owner_id") != owner_id:
+                    return None
                 return dict(job)
         return None
 
@@ -152,11 +190,15 @@ class MemoryJobRepository:
         job_id: str,
         *,
         status: str,
+        owner_id: str | None = None,
+        include_all: bool = False,
         result: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         for index, job in enumerate(_memory_jobs):
             if job.get("id") != job_id:
                 continue
+            if not include_all and owner_id and job.get("owner_id") != owner_id:
+                return None
             history = list(job.get("history") or [])
             history.append(_build_timeline_entry(status, result))
             updated = {
@@ -170,9 +212,16 @@ class MemoryJobRepository:
             return dict(updated)
         return None
 
-    def count_pending_jobs(self) -> int:
+    def count_pending_jobs(
+        self,
+        *,
+        owner_id: str | None = None,
+        include_all: bool = False,
+    ) -> int:
         return sum(
-            1 for job in _memory_jobs if job.get("status") in {"queued", "running"}
+            1
+            for job in self.list_jobs(owner_id=owner_id, include_all=include_all)
+            if job.get("status") in {"queued", "running"}
         )
 
     def get_backend_meta(self) -> dict[str, Any]:
@@ -208,9 +257,62 @@ class SqlAlchemyJobRepository:
                 email=SYSTEM_USER_EMAIL,
                 name="System",
                 mode="personal",
+                issuer="internal",
+                subject="system",
+                email_verified=True,
             )
         )
         session.commit()
+
+    def upsert_user(
+        self,
+        *,
+        user_id: str,
+        email: str,
+        name: str,
+        issuer: str,
+        subject: str,
+        email_verified: bool,
+        last_login_at: datetime,
+    ) -> dict[str, Any]:
+        with self._session() as session:
+            row = session.execute(
+                select(User).where(User.issuer == issuer, User.subject == subject)
+            ).scalar_one_or_none()
+
+            if row is None and email:
+                row = session.execute(
+                    select(User).where(User.email == email)
+                ).scalar_one_or_none()
+
+            if row is None:
+                row = User(
+                    id=user_id,
+                    email=email,
+                    name=name or email,
+                    mode="personal",
+                    issuer=issuer,
+                    subject=subject,
+                    email_verified=email_verified,
+                    last_login_at=last_login_at,
+                )
+            else:
+                row.email = email
+                row.name = name or row.name or email
+                row.issuer = issuer
+                row.subject = subject
+                row.email_verified = email_verified
+                row.last_login_at = last_login_at
+
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return {
+                "id": row.id,
+                "email": row.email,
+                "issuer": row.issuer,
+                "subject": row.subject,
+            }
 
     def create_job(
         self,
@@ -219,19 +321,24 @@ class SqlAlchemyJobRepository:
         summary: str,
         status: str,
         payload: dict[str, Any],
+        owner_id: str | None = None,
         result: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         record_id = f"job_{uuid4().hex}"
         history = [_build_timeline_entry(status, result)]
         with self._session() as session:
-            owner_id = str(payload.get("ownerId") or SYSTEM_USER_ID)
-            if owner_id == SYSTEM_USER_ID:
+            resolved_owner_id = str(
+                owner_id or payload.get("ownerId") or SYSTEM_USER_ID
+            )
+            if resolved_owner_id == SYSTEM_USER_ID:
                 self._ensure_system_user(session)
+            elif not session.get(User, resolved_owner_id):
+                raise ValueError("Job owner does not exist")
             job = Job(
                 id=record_id,
                 type=task_type,
                 status=status,
-                owner_id=owner_id,
+                owner_id=resolved_owner_id,
                 payload={**payload, "summary": summary},
                 result=_pack_result_with_timeline(result, history),
             )
@@ -240,19 +347,35 @@ class SqlAlchemyJobRepository:
             session.refresh(job)
             return _normalize_job_record(job)
 
-    def list_jobs(self) -> list[dict[str, Any]]:
+    def list_jobs(
+        self,
+        *,
+        owner_id: str | None = None,
+        include_all: bool = False,
+    ) -> list[dict[str, Any]]:
         with self._session() as session:
+            statement = select(Job)
+            if not include_all and owner_id:
+                statement = statement.where(Job.owner_id == owner_id)
             rows = (
-                session.execute(select(Job).order_by(Job.created_at.desc()).limit(50))
+                session.execute(statement.order_by(Job.created_at.desc()).limit(50))
                 .scalars()
                 .all()
             )
             return [_normalize_job_record(row) for row in rows]
 
-    def get_job(self, job_id: str) -> dict[str, Any] | None:
+    def get_job(
+        self,
+        job_id: str,
+        *,
+        owner_id: str | None = None,
+        include_all: bool = False,
+    ) -> dict[str, Any] | None:
         with self._session() as session:
             row = session.get(Job, job_id)
             if not row:
+                return None
+            if not include_all and owner_id and row.owner_id != owner_id:
                 return None
             return _normalize_job_record(row)
 
@@ -261,11 +384,15 @@ class SqlAlchemyJobRepository:
         job_id: str,
         *,
         status: str,
+        owner_id: str | None = None,
+        include_all: bool = False,
         result: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         with self._session() as session:
             row = session.get(Job, job_id)
             if not row:
+                return None
+            if not include_all and owner_id and row.owner_id != owner_id:
                 return None
             current_result, history = _extract_public_result(row.result or {})
             next_result = result if result is not None else current_result
@@ -277,9 +404,16 @@ class SqlAlchemyJobRepository:
             session.refresh(row)
             return _normalize_job_record(row)
 
-    def count_pending_jobs(self) -> int:
+    def count_pending_jobs(
+        self,
+        *,
+        owner_id: str | None = None,
+        include_all: bool = False,
+    ) -> int:
         return sum(
-            1 for job in self.list_jobs() if job.get("status") in {"queued", "running"}
+            1
+            for job in self.list_jobs(owner_id=owner_id, include_all=include_all)
+            if job.get("status") in {"queued", "running"}
         )
 
     def get_backend_meta(self) -> dict[str, Any]:
@@ -322,19 +456,28 @@ class ResilientJobRepository:
             lambda: self._primary.create_job(**kwargs),
         )
 
-    def list_jobs(self):
-        return self._with_fallback("list_jobs", self._primary.list_jobs)
-
-    def count_pending_jobs(self):
+    def upsert_user(self, **kwargs):
         return self._with_fallback(
-            "count_pending_jobs",
-            self._primary.count_pending_jobs,
+            "upsert_user",
+            lambda: self._primary.upsert_user(**kwargs),
         )
 
-    def get_job(self, job_id: str):
+    def list_jobs(self, **kwargs):
+        return self._with_fallback(
+            "list_jobs",
+            lambda: self._primary.list_jobs(**kwargs),
+        )
+
+    def count_pending_jobs(self, **kwargs):
+        return self._with_fallback(
+            "count_pending_jobs",
+            lambda: self._primary.count_pending_jobs(**kwargs),
+        )
+
+    def get_job(self, job_id: str, **kwargs):
         return self._with_fallback(
             "get_job",
-            lambda: self._primary.get_job(job_id),
+            lambda: self._primary.get_job(job_id, **kwargs),
         )
 
     def update_job(self, job_id: str, **kwargs):

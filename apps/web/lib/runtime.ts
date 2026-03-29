@@ -1,3 +1,5 @@
+import { getServerReadinessPayload, getServerRuntimePayload } from "./server-api"
+
 type RuntimePayload = {
   app_name: string
   app_version: string
@@ -24,40 +26,16 @@ type RuntimePayload = {
   ready_for_distributed_workers: boolean
 }
 
-export async function getRuntimePayload(apiBaseUrl: string): Promise<RuntimePayload | null> {
-  try {
-    const response = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/v1/system/runtime`, {
-      cache: "no-store",
-    })
-    if (!response.ok) {
-      return null
-    }
-    return (await response.json()) as RuntimePayload
-  } catch {
-    return null
-  }
+export async function getRuntimePayload(): Promise<RuntimePayload | null> {
+  return getServerRuntimePayload()
 }
 
-export async function getReadinessPayload(apiBaseUrl: string): Promise<{
+export async function getReadinessPayload(): Promise<{
   status: string
   blocking_warnings: string[]
   ready_for_distributed_workers: boolean
 } | null> {
-  try {
-    const response = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/v1/system/readiness`, {
-      cache: "no-store",
-    })
-    if (!response.ok) {
-      return null
-    }
-    return (await response.json()) as {
-      status: string
-      blocking_warnings: string[]
-      ready_for_distributed_workers: boolean
-    }
-  } catch {
-    return null
-  }
+  return getServerReadinessPayload()
 }
 
 export type { RuntimePayload }

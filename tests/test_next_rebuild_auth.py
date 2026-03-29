@@ -43,7 +43,7 @@ class NextRebuildAuthTest(unittest.TestCase):
     def test_app_shell_contains_footer_branding(self):
         shell = Path("apps/web/components/app-shell.tsx").read_text()
         self.assertIn("深圳祖尔科技有限公司", shell)
-        self.assertIn("v0.1.0", shell)
+        self.assertIn("rebuild-v1.0.0", shell)
 
     def test_protected_pages_use_guards(self):
         tasks_page = Path("apps/web/app/tasks/page.tsx").read_text()

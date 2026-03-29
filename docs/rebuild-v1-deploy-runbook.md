@@ -1,10 +1,11 @@
-# Rebuild V1 Deploy Runbook
+# Rebuild v1 Deploy Runbook
 
-## 1. Prepare env
+## 1. Prepare environment
 
 - Copy `.env.rebuild.production.example`
-- Fill database, Redis, secrets, bootstrap login, and team admin values
-- Casdoor is optional for the first production release
+- Fill database, Redis, Casdoor, secret, and team access values
+- Put at least one Casdoor user email into `TEAM_ADMIN_EMAILS`
+- Set `TEAM_ALLOWED_EMAIL_DOMAINS` for the team tenant boundary
 
 ## 2. Prepare database
 
@@ -29,30 +30,39 @@
 - Confirm no blocking warnings remain
 - Confirm `active_backend=database`
 - Confirm `active_execution_backend=celery`
+- Confirm runtime shows `Casdoor` as auth provider
+- Confirm default models show the `gemini-3.1-*` release values
 
 ## 5. Smoke test
-
-- Run:
 
 ```bash
 python3 scripts/rebuild_release_smoke.py --api-base http://localhost:8000 --web-base http://localhost:3000
 ```
 
-- For production cutover, use:
+如果你要校验受保护的运行态接口，请再提供一个 Casdoor 管理员 token：
 
 ```bash
-python3 scripts/rebuild_release_smoke.py --api-base https://your-api-domain.example.com --web-base https://your-web-domain.example.com --require-ready
+python3 scripts/rebuild_release_smoke.py --api-base http://localhost:8000 --web-base http://localhost:3000 --api-bearer-token "$API_BEARER_TOKEN" --require-ready
+```
+
+For production cutover:
+
+```bash
+python3 scripts/rebuild_release_smoke.py --api-base https://your-api-domain.example.com --web-base https://your-web-domain.example.com --api-bearer-token "$API_BEARER_TOKEN" --require-ready
 ```
 
 ## 6. Functional spot checks
 
-- Login through bootstrap account or Casdoor
+- Sign in through Casdoor
 - Open `/title` and submit one task
+- Open `/translate` and verify default models
+- Open `/quick` and `/batch` and verify default image model
 - Open `/tasks` and confirm status updates
-- Open `/tasks/[jobId]` and confirm timeline + structured result
+- Open `/tasks/[jobId]` and confirm timeline and structured result
 - Open `/admin` and confirm no blocking warnings
 
 ## 7. Cutover rule
 
 - Only switch traffic after readiness is `ready`
 - If runtime falls back to `memory` or `inline`, stop cutover and fix infra first
+- Release tag for this line is `rebuild-v1.0.0`

@@ -3,6 +3,7 @@ set -euo pipefail
 
 API_BASE_URL="${API_BASE_URL:-}"
 WEB_BASE_URL="${WEB_BASE_URL:-}"
+API_BEARER_TOKEN="${API_BEARER_TOKEN:-}"
 
 usage() {
   cat <<'EOF'
@@ -12,7 +13,7 @@ usage() {
 说明:
   1. 校验 Prisma schema
   2. 执行数据库部署脚本
-  3. 运行发布 smoke checks
+  3. 使用管理员 Casdoor token 运行发布 smoke checks
 EOF
 }
 
@@ -21,8 +22,8 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 
-if [[ -z "$API_BASE_URL" || -z "$WEB_BASE_URL" ]]; then
-  echo "❌ 请设置 API_BASE_URL 和 WEB_BASE_URL"
+if [[ -z "$API_BASE_URL" || -z "$WEB_BASE_URL" || -z "$API_BEARER_TOKEN" ]]; then
+  echo "❌ 请设置 API_BASE_URL、WEB_BASE_URL 和 API_BEARER_TOKEN"
   usage
   exit 1
 fi
@@ -34,6 +35,6 @@ echo "🗃️ 部署数据库迁移与 system seed..."
 pnpm deploy:db
 
 echo "🚦 执行 Zeabur 发布 smoke checks..."
-python3 scripts/rebuild_release_smoke.py --api-base "$API_BASE_URL" --web-base "$WEB_BASE_URL" --require-ready
+python3 scripts/rebuild_release_smoke.py --api-base "$API_BASE_URL" --web-base "$WEB_BASE_URL" --api-bearer-token "$API_BEARER_TOKEN" --require-ready
 
 echo "✅ Zeabur Rebuild V1 发布检查通过"

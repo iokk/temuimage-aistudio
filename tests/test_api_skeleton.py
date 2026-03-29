@@ -35,20 +35,15 @@ class APISkeletonTest(unittest.TestCase):
 
     def test_versioned_system_runtime(self):
         response = self.client.get("/v1/system/runtime")
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("warnings", response.json())
-        self.assertIn("ready_for_distributed_workers", response.json())
+        self.assertEqual(response.status_code, 401)
 
     def test_versioned_system_readiness(self):
         response = self.client.get("/v1/system/readiness")
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("status", response.json())
-        self.assertIn("blocking_warnings", response.json())
+        self.assertEqual(response.status_code, 401)
 
     def test_versioned_jobs_meta(self):
         response = self.client.get("/v1/jobs/meta")
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("task_types", response.json())
+        self.assertEqual(response.status_code, 401)
 
 
 if __name__ == "__main__":

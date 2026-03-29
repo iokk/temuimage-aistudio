@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
+
+from apps.api.core.auth import Principal, get_current_principal
 
 
 router = APIRouter(prefix="/quick", tags=["quick"])
 
-DEFAULT_IMAGE_MODEL = "seedream-5.0"
-DEFAULT_TITLE_MODEL = "gemini-3.1-flash-lite-preview"
+DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-image-preview"
+DEFAULT_TITLE_MODEL = "gemini-3.1-pro"
 
 
 class QuickPreviewRequest(BaseModel):
@@ -50,7 +52,7 @@ def build_mock_outputs(image_type: str, count: int) -> list[dict]:
 
 
 @router.get("/meta")
-def quick_meta():
+def quick_meta(_principal: Principal = Depends(get_current_principal)):
     return {
         "image_types": ["main_visual", "detail_card", "scene_banner"],
         "default_image_model": DEFAULT_IMAGE_MODEL,
@@ -60,7 +62,10 @@ def quick_meta():
 
 
 @router.post("/preview")
-def quick_preview(payload: QuickPreviewRequest):
+def quick_preview(
+    payload: QuickPreviewRequest,
+    _principal: Principal = Depends(get_current_principal),
+):
     prompt_summary = build_prompt_summary(payload.image_type, payload.style_notes)
     titles = []
     if payload.include_titles:

@@ -7,9 +7,7 @@ export default async function TranslatePage() {
 
   return (
     <AppShell title="图片翻译" subtitle="Image Translation">
-      <TranslateWorkspace
-        apiBaseUrl={process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000"}
-      />
+      <TranslateWorkspace apiBaseUrl="/api/platform" />
     </AppShell>
   )
 }

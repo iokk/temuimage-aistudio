@@ -120,7 +120,7 @@ export async function AppShell({
           <div className="mt-6">{children}</div>
 
           <footer className="mt-8 rounded-3xl border border-slate-200 bg-white px-6 py-4 text-sm text-slate-500 shadow-sm">
-            深圳祖尔科技有限公司 · {today} · v0.1.0
+            深圳祖尔科技有限公司 · {today} · rebuild-v1.0.0
           </footer>
         </main>
       </div>

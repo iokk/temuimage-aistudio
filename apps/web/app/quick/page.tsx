@@ -7,9 +7,7 @@ export default async function QuickPage() {
 
   return (
     <AppShell title="快速出图" subtitle="Quick Generation">
-      <QuickWorkspace
-        apiBaseUrl={process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000"}
-      />
+      <QuickWorkspace apiBaseUrl="/api/platform" />
     </AppShell>
   )
 }

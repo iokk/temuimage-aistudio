@@ -8,15 +8,21 @@ datasource db {
 }
 
 model User {
-  id          String       @id @default(cuid())
-  email       String       @unique
-  name        String?
-  mode        String       @default("personal")
-  memberships Membership[]
-  credentials Credential[]
-  jobs        Job[]        @relation("UserJobs")
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
+  id            String       @id @default(cuid())
+  email         String       @unique
+  name          String?
+  mode          String       @default("personal")
+  issuer        String       @default("internal")
+  subject       String       @default("")
+  emailVerified Boolean      @default(false)
+  lastLoginAt   DateTime?
+  memberships   Membership[]
+  credentials   Credential[]
+  jobs          Job[]        @relation("UserJobs")
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@unique([issuer, subject])
 }
 
 model Organization {

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
+from apps.api.core.auth import Principal, get_current_principal
 from temu_core.provider_capabilities import get_translation_provider_message
 from temu_core.provider_precheck import describe_capability_reasons
 
@@ -10,8 +11,8 @@ from temu_core.provider_precheck import describe_capability_reasons
 router = APIRouter(prefix="/translate", tags=["translate"])
 
 DEFAULT_PROVIDER = "relay"
-DEFAULT_IMAGE_MODEL = "seedream-5.0"
-DEFAULT_ANALYSIS_MODEL = "gemini-3.1-flash-lite-preview"
+DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-image-preview"
+DEFAULT_ANALYSIS_MODEL = "gemini-3.1-pro"
 
 
 class TranslatePreviewRequest(BaseModel):
@@ -35,16 +36,17 @@ def build_preview_translation(source_text: str, target_lang: str) -> list[str]:
 
 
 @router.get("/meta")
-def translate_meta():
+def translate_meta(_principal: Principal = Depends(get_current_principal)):
     return {
         "provider_options": ["relay", "gemini"],
         "image_model_options": [
-            "seedream-5.0",
             "gemini-3.1-flash-image-preview",
+            "gemini-2.5-flash-image",
+            "seedream-5.0",
             "seedream-4.6",
         ],
         "analysis_model_options": [
-            "gemini-3.1-flash-lite-preview",
+            "gemini-3.1-pro",
             "gemini-3.1-flash-image-preview",
         ],
         "default_provider": DEFAULT_PROVIDER,
@@ -54,7 +56,10 @@ def translate_meta():
 
 
 @router.post("/preview")
-def translate_preview(payload: TranslatePreviewRequest):
+def translate_preview(
+    payload: TranslatePreviewRequest,
+    _principal: Principal = Depends(get_current_principal),
+):
     reasons = describe_capability_reasons(
         provider=payload.provider,
         image_model=payload.image_model,

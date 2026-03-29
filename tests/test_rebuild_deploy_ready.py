@@ -47,12 +47,14 @@ class RebuildDeployReadyTest(unittest.TestCase):
         package_json = json.loads(Path("package.json").read_text())
         scripts = package_json.get("scripts", {})
         self.assertIn("/v1/system/readiness", smoke_text)
+        self.assertIn("--api-bearer-token", smoke_text)
         self.assertIn("--require-ready", smoke_text)
         self.assertIn("release:smoke", scripts)
         self.assertIn("Readiness", runbook_text)
         self.assertIn("ASYNC_JOB_BACKEND=celery", env_text)
         self.assertIn("AUTO_BOOTSTRAP_DB=true", env_text)
-        self.assertIn("BOOTSTRAP_LOGIN_PASSWORD", env_text)
+        self.assertIn("CASDOOR_CLIENT_SECRET", env_text)
+        self.assertIn("CASDOOR_API_AUDIENCE", env_text)
 
     def test_zeabur_specific_release_support_exists(self):
         zeabur_env = Path(".env.zeabur.production.example").read_text()
@@ -65,13 +67,14 @@ class RebuildDeployReadyTest(unittest.TestCase):
         self.assertIn("apps/worker/Dockerfile", zeabur_doc)
         self.assertIn("pnpm deploy:db", zeabur_script)
         self.assertIn("--require-ready", zeabur_script)
+        self.assertIn("API_BEARER_TOKEN", zeabur_script)
         self.assertIn("WEB_DOMAIN", fill_template)
         self.assertIn("Zeabur 控制台逐项填写模板", fill_template)
         self.assertIn("AUTO_BOOTSTRAP_DB=true", zeabur_env)
-        self.assertIn("BOOTSTRAP_LOGIN_EMAIL", zeabur_env)
+        self.assertIn("CASDOOR_CLIENT_ID", zeabur_env)
         self.assertIn("AUTO_BOOTSTRAP_DB=true", zeabur_doc)
         self.assertIn("NEXTAUTH_SECRET", generator_script)
-        self.assertIn("BOOTSTRAP_LOGIN_PASSWORD", generator_script)
+        self.assertIn("CASDOOR_CLIENT_SECRET", generator_script)
         self.assertIn("SYSTEM_ENCRYPTION_KEY", generator_script)
 
 

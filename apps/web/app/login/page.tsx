@@ -1,11 +1,7 @@
 import Link from "next/link"
 
 import { auth } from "../../auth"
-import {
-  signInWithBootstrap,
-  signInWithCasdoor,
-  signOutCurrentUser,
-} from "../actions/auth-actions"
+import { signInWithCasdoor, signOutCurrentUser } from "../actions/auth-actions"
 import { AppShell } from "../../components/app-shell"
 
 const modeCards = [
@@ -28,14 +24,9 @@ export default async function LoginPage() {
       process.env.CASDOOR_CLIENT_ID &&
       process.env.CASDOOR_CLIENT_SECRET,
   )
-  const bootstrapEnabled = Boolean(
-    process.env.BOOTSTRAP_LOGIN_EMAIL && process.env.BOOTSTRAP_LOGIN_PASSWORD,
-  )
-  const bootstrapEmail = process.env.BOOTSTRAP_LOGIN_EMAIL || ""
-  const bootstrapName = process.env.BOOTSTRAP_LOGIN_NAME || "Platform Admin"
 
   return (
-    <AppShell title="登录" subtitle="Unified Authentication">
+    <AppShell title="登录" subtitle="Casdoor Unified Identity">
       {session ? (
         <section className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
           <div className="rounded-3xl border border-slate-200 bg-white p-8 shadow-sm">
@@ -81,60 +72,9 @@ export default async function LoginPage() {
           <div className="rounded-3xl border border-slate-200 bg-white p-8 shadow-sm">
             <h3 className="text-2xl font-bold text-slate-950">统一登录入口</h3>
             <p className="mt-3 text-sm leading-7 text-slate-600">
-              个人模式与团队模式共用统一登录。首发可直接使用内置引导账号，后续再切换到 Casdoor 单点登录。
+              个人模式与团队模式共用 Casdoor 单点登录。登录后会根据模式进入个人配置区或团队配置区。
             </p>
             <div className="mt-6 grid gap-4">
-              {bootstrapEnabled ? (
-                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-5">
-                  <h4 className="text-lg font-semibold text-slate-950">内置引导账号</h4>
-                  <p className="mt-2 text-sm leading-7 text-slate-600">
-                    首次部署完成后，可直接使用这组环境变量驱动的账号登录并进入后台完成联调。
-                  </p>
-                  <p className="mt-3 text-sm text-emerald-800">
-                    默认账号：{bootstrapName} · {bootstrapEmail}
-                  </p>
-                  <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                    {modeCards.map((item) => (
-                      <form
-                        key={`bootstrap-${item.mode}`}
-                        action={signInWithBootstrap}
-                        className="rounded-2xl border border-emerald-200 bg-white p-5"
-                      >
-                        <input type="hidden" name="mode" value={item.mode} />
-                        <h5 className="text-base font-semibold text-slate-950">{item.title}</h5>
-                        <p className="mt-2 text-sm leading-7 text-slate-600">
-                          {item.description}
-                        </p>
-                        <label className="mt-4 block text-sm font-medium text-slate-700">
-                          邮箱
-                        </label>
-                        <input
-                          type="email"
-                          name="email"
-                          defaultValue={bootstrapEmail}
-                          className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-400"
-                        />
-                        <label className="mt-4 block text-sm font-medium text-slate-700">
-                          密码
-                        </label>
-                        <input
-                          type="password"
-                          name="password"
-                          placeholder="输入 BOOTSTRAP_LOGIN_PASSWORD"
-                          className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-400"
-                        />
-                        <button
-                          type="submit"
-                          className="mt-4 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-emerald-500"
-                        >
-                          使用引导账号登录
-                        </button>
-                      </form>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-
               {casdoorEnabled ? (
                 <div className="rounded-2xl border border-slate-200 p-5">
                   <h4 className="text-lg font-semibold text-slate-950">Casdoor 单点登录</h4>
@@ -165,10 +105,10 @@ export default async function LoginPage() {
                 </div>
               ) : null}
 
-              {!bootstrapEnabled && !casdoorEnabled ? (
+              {!casdoorEnabled ? (
                 <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5 text-sm leading-7 text-amber-900">
-                  当前尚未配置可用登录方式。请至少设置一组 Casdoor 参数，或设置
-                  `BOOTSTRAP_LOGIN_EMAIL` 与 `BOOTSTRAP_LOGIN_PASSWORD`。
+                  当前尚未配置 Casdoor。请先设置 `CASDOOR_ISSUER`、`CASDOOR_CLIENT_ID`
+                  和 `CASDOOR_CLIENT_SECRET`，再启用正式登录入口。
                 </div>
               ) : null}
             </div>
@@ -177,9 +117,9 @@ export default async function LoginPage() {
           <div className="rounded-3xl border border-slate-200 bg-white p-8 shadow-sm">
             <h3 className="text-xl font-bold text-slate-950">本阶段已接通</h3>
             <div className="mt-4 space-y-3 text-sm leading-7 text-slate-600">
-              <p>Auth.js 已支持 Casdoor OIDC 与内置引导账号双入口。</p>
+              <p>Auth.js 已正式收口到 Casdoor OIDC 单入口。</p>
               <p>登录后会根据模式跳转到个人配置或团队配置页面。</p>
-              <p>首发上线可先用引导账号完成部署验证，后续再切 Casdoor。</p>
+              <p>后续 API、任务 owner 和团队权限会继续沿着 Casdoor 身份贯通。</p>
             </div>
           </div>
         </section>

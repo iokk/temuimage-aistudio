@@ -71,7 +71,7 @@ class RebuildTaskCenterTest(unittest.TestCase):
 
     def test_task_detail_page_exists_and_reads_job(self):
         detail_text = Path("apps/web/app/tasks/[jobId]/page.tsx").read_text()
-        self.assertIn("getJob", detail_text)
+        self.assertIn("getServerJob", detail_text)
         self.assertIn("requireSignedIn", detail_text)
         self.assertIn("TaskDetailView", detail_text)
 

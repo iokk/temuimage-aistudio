@@ -7,9 +7,7 @@ export default async function TasksPage() {
 
   return (
     <AppShell title="任务中心" subtitle="Task Center">
-      <TasksWorkspace
-        apiBaseUrl={process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000"}
-      />
+      <TasksWorkspace apiBaseUrl="/api/platform" />
     </AppShell>
   )
 }

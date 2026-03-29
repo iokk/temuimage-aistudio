@@ -42,7 +42,10 @@ export function TasksWorkspace({ apiBaseUrl }: { apiBaseUrl: string }) {
       setError("")
 
       try {
-        const response = await fetch(`${normalizedApiBaseUrl}/v1/jobs/list`, {
+        const jobsListUrl = normalizedApiBaseUrl.endsWith("/api/platform")
+          ? `${normalizedApiBaseUrl}/jobs/list`
+          : `${normalizedApiBaseUrl}/v1/jobs/list`
+        const response = await fetch(jobsListUrl, {
           cache: "no-store",
         })
         if (!response.ok) {
