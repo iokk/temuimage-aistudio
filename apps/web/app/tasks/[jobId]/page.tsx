@@ -16,7 +16,7 @@ export default async function TaskDetailPage({
   try {
     const payload = await getServerJob(jobId)
     return (
-      <AppShell title={payload.job.title} subtitle="Task Detail">
+      <AppShell title={payload.job.title} subtitle="任务详情">
         <TaskDetailView apiBaseUrl="/api/platform" initialJob={payload.job} />
       </AppShell>
     )

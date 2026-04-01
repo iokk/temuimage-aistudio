@@ -14,7 +14,7 @@ DEFAULT_TITLE_MODEL = "gemini-3.1-pro"
 
 class QuickPreviewRequest(BaseModel):
     product_info: str = Field(min_length=1, max_length=4000)
-    image_type: str = Field(default="main_visual", max_length=100)
+    image_type: str = Field(default="selling_point", max_length=100)
     count: int = Field(default=4, ge=1, le=6)
     include_titles: bool = Field(default=True)
     style_notes: str = Field(default="", max_length=1000)
@@ -22,9 +22,11 @@ class QuickPreviewRequest(BaseModel):
 
 def build_prompt_summary(image_type: str, style_notes: str) -> str:
     type_labels = {
-        "main_visual": "主图强化",
-        "detail_card": "卖点细节图",
-        "scene_banner": "场景横幅图",
+        "selling_point": "卖点图",
+        "scene": "场景图",
+        "detail": "细节图",
+        "comparison": "对比图",
+        "spec": "规格图",
     }
     type_label = type_labels.get(image_type, "快速出图")
     if style_notes.strip():
@@ -34,9 +36,11 @@ def build_prompt_summary(image_type: str, style_notes: str) -> str:
 
 def build_mock_outputs(image_type: str, count: int) -> list[dict]:
     labels = {
-        "main_visual": "主图版本",
-        "detail_card": "细节卡版本",
-        "scene_banner": "场景图版本",
+        "selling_point": "卖点图",
+        "scene": "场景图",
+        "detail": "细节图",
+        "comparison": "对比图",
+        "spec": "规格图",
     }
     prefix = labels.get(image_type, "出图版本")
     outputs = []
@@ -54,7 +58,13 @@ def build_mock_outputs(image_type: str, count: int) -> list[dict]:
 @router.get("/meta")
 def quick_meta(_principal: Principal = Depends(get_current_principal)):
     return {
-        "image_types": ["main_visual", "detail_card", "scene_banner"],
+        "image_types": [
+            "selling_point",
+            "scene",
+            "detail",
+            "comparison",
+            "spec",
+        ],
         "default_image_model": DEFAULT_IMAGE_MODEL,
         "default_title_model": DEFAULT_TITLE_MODEL,
         "max_count": 6,

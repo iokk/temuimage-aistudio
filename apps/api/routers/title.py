@@ -3,90 +3,56 @@ from __future__ import annotations
 import re
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
 
 from apps.api.core.auth import Principal, get_current_principal
+from apps.api.core.personal_config import get_effective_execution_config_for_user
+from apps.api.job_repository import job_repository
+from apps.api.task_execution import DEFAULT_TITLE_TEMPLATE_KEY
+from apps.api.task_execution import IMAGE_TITLE_TEMPLATE_KEY
+from apps.api.task_execution import list_title_template_options
+from apps.api.task_execution import _resolve_title_provider
 
 
 router = APIRouter(prefix="/title", tags=["title"])
 
-DEFAULT_MODEL = "gemini-3.1-pro"
+
+def _build_title_blocking_reason(config) -> str:
+    try:
+        _resolve_title_provider(config)
+        return ""
+    except ValueError as exc:
+        return str(exc)
 
 
-class TitlePreviewRequest(BaseModel):
-    product_info: str = Field(min_length=1, max_length=4000)
-    extra_requirements: str = Field(default="", max_length=1000)
-    tone: str = Field(default="marketplace")
-    count: int = Field(default=3, ge=1, le=5)
+@router.get("/context")
+def title_context(principal: Principal = Depends(get_current_principal)):
+    config = get_effective_execution_config_for_user(principal.user_id)
+    account_state = job_repository.get_account_team_state(user_id=principal.user_id)
+    blocking_reason = _build_title_blocking_reason(config)
+    provider = ""
+    if not blocking_reason:
+        provider = _resolve_title_provider(config)
 
+    warnings: list[str] = []
+    if not principal.is_team_member:
+        warnings.append("当前为个人模式，标题任务会优先使用你的个人执行配置。")
+    if str(config.source or "").startswith("personal:"):
+        warnings.append("当前标题任务将使用个人凭据执行。")
+    if provider == "relay" and not re.match(
+        r"^gemini", str(config.title_model or ""), re.I
+    ):
+        warnings.append("当前标题模型经 relay 文本能力执行，请确认模型通道稳定。")
 
-def _keywords_from_text(*parts: str) -> list[str]:
-    words: list[str] = []
-    seen: set[str] = set()
-    for part in parts:
-        for token in re.findall(r"[A-Za-z0-9]+", part.lower()):
-            if len(token) < 3 or token in seen:
-                continue
-            seen.add(token)
-            words.append(token)
-    return words
-
-
-def _title_case(value: str) -> str:
-    return " ".join(segment.capitalize() for segment in value.split())
-
-
-def build_preview_titles(
-    product_info: str,
-    extra_requirements: str,
-    tone: str,
-    count: int,
-) -> list[str]:
-    keywords = _keywords_from_text(product_info, extra_requirements)
-    primary = _title_case(" ".join(keywords[:4])) or "Product Highlight"
-    detail = _title_case(" ".join(keywords[4:8])) or "Cross Border Listing"
-    tone_prefix = {
-        "marketplace": "Marketplace Ready",
-        "premium": "Premium Detail",
-        "clean": "Clean Listing",
-    }.get(tone, "Marketplace Ready")
-
-    titles = []
-    for idx in range(count):
-        suffix = [
-            "Optimized Title",
-            "Selling Point Focus",
-            "Export Listing",
-            "Storefront Version",
-            "Catalog Version",
-        ][idx]
-        title = f"{tone_prefix} {primary} {detail} {suffix}".strip()
-        titles.append(" ".join(title.split()))
-    return titles
-
-
-@router.get("/meta")
-def title_meta(_principal: Principal = Depends(get_current_principal)):
     return {
-        "default_model": DEFAULT_MODEL,
-        "tones": ["marketplace", "premium", "clean"],
-        "max_titles": 5,
-    }
-
-
-@router.post("/preview")
-def title_preview(
-    payload: TitlePreviewRequest,
-    _principal: Principal = Depends(get_current_principal),
-):
-    titles = build_preview_titles(
-        product_info=payload.product_info,
-        extra_requirements=payload.extra_requirements,
-        tone=payload.tone,
-        count=payload.count,
-    )
-    return {
-        "titles": titles,
-        "model": DEFAULT_MODEL,
-        "source": "preview",
+        "ready": not blocking_reason,
+        "default_model": str(config.title_model or "").strip(),
+        "default_template_key": DEFAULT_TITLE_TEMPLATE_KEY,
+        "image_template_key": IMAGE_TITLE_TEMPLATE_KEY,
+        "template_options": list_title_template_options(),
+        "provider": provider,
+        "config_source": str(config.source or "").strip() or "environment",
+        "warnings": warnings,
+        "blocking_reason": blocking_reason or None,
+        "current_project": account_state.get("current_project"),
+        "current_team": account_state.get("current_team"),
     }

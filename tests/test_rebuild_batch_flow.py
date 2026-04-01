@@ -29,6 +29,21 @@ class RebuildBatchFlowTest(unittest.TestCase):
         self.assertIn("submitAsyncJob", workspace_text)
         self.assertIn("waitForJobCompletion", workspace_text)
         self.assertIn('task_type: "batch_generation"', workspace_text)
+        self.assertIn("生成批量出图", workspace_text)
+        self.assertIn("artifact_data_url", workspace_text)
+        self.assertIn("商品图片上传（1-6 张）", workspace_text)
+        self.assertIn("主图白底", workspace_text)
+        self.assertIn("功能卖点", workspace_text)
+        self.assertIn("场景应用", workspace_text)
+        self.assertIn("细节特写", workspace_text)
+        self.assertIn("尺寸规格", workspace_text)
+        self.assertIn("对比优势", workspace_text)
+        self.assertIn("清单展示", workspace_text)
+        self.assertIn("使用步骤", workspace_text)
+        self.assertIn("批次锚点摘要", workspace_text)
+        self.assertIn("buildJobArtifactsZipUrl", workspace_text)
+        self.assertIn("导出 ZIP", workspace_text)
+        self.assertIn("下载 PNG", workspace_text)
 
 
 if __name__ == "__main__":

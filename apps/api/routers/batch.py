@@ -22,10 +22,14 @@ class BatchPreviewRequest(BaseModel):
 
 def build_type_label(image_type: str) -> str:
     mapping = {
-        "main_visual": "主图强化",
-        "detail_card": "卖点细节图",
-        "scene_banner": "场景横幅图",
-        "comparison_card": "对比说明图",
+        "main": "主图白底",
+        "feature": "功能卖点",
+        "scene": "场景应用",
+        "detail": "细节特写",
+        "size": "尺寸规格",
+        "compare": "对比优势",
+        "package": "清单展示",
+        "steps": "使用步骤",
     }
     return mapping.get(image_type, image_type)
 
@@ -53,10 +57,14 @@ def build_batch_outputs(image_types: list[str], include_titles: bool) -> list[di
 def batch_meta(_principal: Principal = Depends(get_current_principal)):
     return {
         "image_types": [
-            "main_visual",
-            "detail_card",
-            "scene_banner",
-            "comparison_card",
+            "main",
+            "feature",
+            "scene",
+            "detail",
+            "size",
+            "compare",
+            "package",
+            "steps",
         ],
         "default_image_model": DEFAULT_IMAGE_MODEL,
         "default_title_model": DEFAULT_TITLE_MODEL,
