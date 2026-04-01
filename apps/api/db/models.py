@@ -54,6 +54,24 @@ class Organization(Base):
     )
 
 
+class Project(Base):
+    __tablename__ = "Project"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    organization_id: Mapped[str] = mapped_column(
+        "organizationId", ForeignKey("Organization.id"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    slug: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    created_at: Mapped[datetime] = mapped_column(
+        "createdAt", DateTime, default=datetime.utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        "updatedAt", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
 class Membership(Base):
     __tablename__ = "Membership"
 
@@ -63,6 +81,9 @@ class Membership(Base):
     )
     organization_id: Mapped[str] = mapped_column(
         "organizationId", ForeignKey("Organization.id"), nullable=False
+    )
+    active_project_id: Mapped[str | None] = mapped_column(
+        "activeProjectId", ForeignKey("Project.id"), nullable=True
     )
     role: Mapped[str] = mapped_column(String(32), nullable=False, default="member")
     created_at: Mapped[datetime] = mapped_column(
@@ -106,6 +127,9 @@ class Job(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
     owner_id: Mapped[str] = mapped_column(
         "ownerId", ForeignKey("User.id"), nullable=False
+    )
+    project_id: Mapped[str | None] = mapped_column(
+        "projectId", ForeignKey("Project.id"), nullable=True
     )
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
     result: Mapped[dict | None] = mapped_column(JSON)

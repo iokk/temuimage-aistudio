@@ -45,6 +45,14 @@ class APISkeletonTest(unittest.TestCase):
         response = self.client.get("/v1/jobs/meta")
         self.assertEqual(response.status_code, 401)
 
+    def test_versioned_projects_current(self):
+        response = self.client.get("/v1/projects/current")
+        self.assertEqual(response.status_code, 401)
+
+    def test_versioned_projects_root(self):
+        response = self.client.get("/v1/projects")
+        self.assertEqual(response.status_code, 401)
+
 
 if __name__ == "__main__":
     unittest.main()

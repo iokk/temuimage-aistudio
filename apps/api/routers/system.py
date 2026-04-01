@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
+from pydantic import Field
 
 from apps.api.async_dispatcher import get_async_backend_meta
 from apps.api.core.auth import Principal, get_current_principal, require_admin
 from apps.api.core.config import get_settings
+from apps.api.core.system_config import get_system_execution_config
+from apps.api.core.system_config import serialize_system_execution_config
+from apps.api.core.system_config import update_system_execution_config
 from apps.api.job_repository import job_repository
-from apps.api.routers.batch import DEFAULT_IMAGE_MODEL as BATCH_IMAGE_MODEL
-from apps.api.routers.quick import DEFAULT_IMAGE_MODEL as QUICK_IMAGE_MODEL
-from apps.api.routers.title import DEFAULT_MODEL as TITLE_MODEL
-from apps.api.routers.translate import DEFAULT_ANALYSIS_MODEL
-from apps.api.routers.translate import DEFAULT_IMAGE_MODEL
 import os
 
 
@@ -21,8 +21,22 @@ def _parse_csv(value: str | None) -> list[str]:
 router = APIRouter(prefix="/system", tags=["system"])
 
 
-def _build_runtime_payload() -> dict:
+class SystemExecutionConfigRequest(BaseModel):
+    title_model: str = Field(min_length=1, max_length=200)
+    translate_provider: str = Field(min_length=1, max_length=32)
+    translate_image_model: str = Field(min_length=1, max_length=200)
+    translate_analysis_model: str = Field(min_length=1, max_length=200)
+    quick_image_model: str = Field(min_length=1, max_length=200)
+    batch_image_model: str = Field(min_length=1, max_length=200)
+    relay_api_base: str = Field(default="", max_length=500)
+    relay_api_key: str = Field(default="", max_length=500)
+    relay_default_image_model: str = Field(default="", max_length=200)
+    gemini_api_key: str = Field(default="", max_length=500)
+
+
+def _build_runtime_payload(principal: Principal | None = None) -> dict:
     settings = get_settings()
+    execution_config = get_system_execution_config()
     storage_meta = job_repository.get_backend_meta()
     async_meta = get_async_backend_meta()
     team_admins = _parse_csv(os.getenv("TEAM_ADMIN_EMAILS"))
@@ -54,7 +68,17 @@ def _build_runtime_payload() -> dict:
         and settings.redis_url
         and storage_meta.get("persistence_ready")
         and async_meta.get("execution_storage_compatible")
+        and async_meta.get("execution_queue_ready")
     )
+    account_state = (
+        job_repository.get_account_team_state(user_id=principal.user_id)
+        if principal is not None
+        else {"current_user": None, "current_team": None, "current_project": None}
+    )
+    current_user = dict(account_state.get("current_user") or {})
+    if current_user and principal is not None:
+        current_user["is_admin"] = principal.is_admin
+        current_user["is_team_member"] = principal.is_team_member
 
     return {
         "app_name": settings.app_name,
@@ -64,13 +88,22 @@ def _build_runtime_payload() -> dict:
         "auth_provider": auth_provider,
         "team_admin_count": len(team_admins),
         "team_allowed_domain_count": len(team_domains),
-        "default_title_model": TITLE_MODEL,
-        "default_translate_image_model": DEFAULT_IMAGE_MODEL,
-        "default_translate_analysis_model": DEFAULT_ANALYSIS_MODEL,
-        "default_quick_image_model": QUICK_IMAGE_MODEL,
-        "default_batch_image_model": BATCH_IMAGE_MODEL,
+        "default_title_model": execution_config.title_model,
+        "default_translate_provider": execution_config.translate_provider,
+        "default_translate_image_model": execution_config.translate_image_model,
+        "default_translate_analysis_model": execution_config.translate_analysis_model,
+        "default_quick_image_model": execution_config.quick_image_model,
+        "default_batch_image_model": execution_config.batch_image_model,
+        "relay_api_base_configured": bool(execution_config.relay_api_base),
+        "relay_api_key_configured": bool(execution_config.relay_api_key),
+        "gemini_api_key_configured": bool(execution_config.gemini_api_key),
+        "system_config_source": execution_config.source,
+        "system_config_persistence_enabled": execution_config.persistence_enabled,
         "warnings": warnings,
         "ready_for_distributed_workers": ready_for_distributed_workers,
+        "current_user": current_user or None,
+        "current_team": account_state.get("current_team"),
+        "current_project": account_state.get("current_project"),
         **storage_meta,
         **async_meta,
     }
@@ -87,8 +120,22 @@ def system_health():
 
 
 @router.get("/runtime")
-def system_runtime(_principal: Principal = Depends(get_current_principal)):
-    return _build_runtime_payload()
+def system_runtime(principal: Principal = Depends(get_current_principal)):
+    return _build_runtime_payload(principal)
+
+
+@router.get("/config")
+def system_config(_principal: Principal = Depends(require_admin)):
+    return serialize_system_execution_config(get_system_execution_config())
+
+
+@router.put("/config")
+def system_config_update(
+    payload: SystemExecutionConfigRequest,
+    _principal: Principal = Depends(require_admin),
+):
+    config = update_system_execution_config(payload.model_dump())
+    return serialize_system_execution_config(config)
 
 
 @router.get("/readiness")

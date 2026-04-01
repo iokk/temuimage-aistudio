@@ -31,6 +31,7 @@ model Organization {
   slug        String       @unique
   memberships Membership[]
   credentials Credential[]
+  projects    Project[]
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
 }
@@ -40,8 +41,10 @@ model Membership {
   userId         String
   organizationId String
   role           String       @default("member")
+  activeProjectId String?
   user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  activeProject  Project?     @relation("MembershipActiveProject", fields: [activeProjectId], references: [id], onDelete: SetNull)
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
@@ -63,12 +66,27 @@ model Credential {
   updatedAt        DateTime      @updatedAt
 }
 
+model Project {
+  id             String       @id @default(cuid())
+  organizationId String
+  name           String
+  slug           String       @unique
+  status         String       @default("active")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  activeMemberships Membership[] @relation("MembershipActiveProject")
+  jobs           Job[]
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+}
+
 model Job {
   id          String   @id @default(cuid())
   type        String
   status      String   @default("queued")
   ownerId     String
+  projectId   String?
   owner       User     @relation("UserJobs", fields: [ownerId], references: [id], onDelete: Cascade)
+  project     Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
   payload     Json
   result      Json?
   createdAt   DateTime @default(now())

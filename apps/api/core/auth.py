@@ -125,7 +125,7 @@ def _build_principal(claims: dict) -> Principal:
     )
     user_id = _build_user_id(issuer, subject)
 
-    job_repository.upsert_user(
+    user_record = job_repository.upsert_user(
         user_id=user_id,
         email=email,
         name=name,
@@ -134,9 +134,16 @@ def _build_principal(claims: dict) -> Principal:
         email_verified=email_verified,
         last_login_at=datetime.now(timezone.utc),
     )
+    persisted_user_id = str((user_record or {}).get("id") or user_id)
+    if is_team_member:
+        job_repository.ensure_team_state(user_id=persisted_user_id, is_admin=is_admin)
+    else:
+        ensure_personal_state = getattr(job_repository, "ensure_personal_state", None)
+        if callable(ensure_personal_state):
+            ensure_personal_state(user_id=persisted_user_id)
 
     return Principal(
-        user_id=user_id,
+        user_id=persisted_user_id,
         issuer=issuer,
         subject=subject,
         email=email,
