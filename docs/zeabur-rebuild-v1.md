@@ -50,6 +50,8 @@ This five-service layout is the official production shape for `rebuild-v1.0.0`.
 
 ## Deploy sequence on Zeabur
 
+For the canonical template publishing / Deploy Button flow, see `docs/zeabur-auto-deploy.md`.
+
 1. Create PostgreSQL service
 2. Create Redis service
 3. Create `api` service from `apps/api/Dockerfile`
@@ -76,6 +78,8 @@ python3 scripts/generate_zeabur_env.py --web-domain studio.example.com --api-dom
 ```
 
 ## Success criteria
+
+For the final online acceptance gate, use `docs/rebuild-v1-release-checklist.md` as the canonical checklist.
 
 - `/admin` shows `Readiness = ready`
 - `active_backend = database`

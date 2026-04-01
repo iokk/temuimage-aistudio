@@ -7,6 +7,7 @@
 - 仓库：`iokk/temuimage-aistudio`
 - 分支：`main`
 - 模板文件：`template.yaml`
+- 建议先运行：`python3 scripts/generate_zeabur_env.py ...` 生成可直接填写的变量
 
 ## 二、创建模板时需要填写的变量
 

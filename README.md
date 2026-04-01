@@ -31,17 +31,30 @@ XiaoBaiTu Rebuild is the official release path for the product. The formal `rebu
 
 Use the template-first path.
 
+Do not deploy the repository root `Dockerfile` for `rebuild-v1.0.0`. That file starts the archived Streamlit stack; the official rebuild release path is `template.yaml` or the per-service Dockerfiles under `apps/`.
+
 1. Deploy `template.yaml`
 2. Fill Casdoor, team, and secret variables
 3. Wait for `postgresql`, `redis`, `api`, `worker`, and `web`
 4. Sign in through Casdoor
 5. Verify `/admin` shows the runtime as ready
 
+### Deploy Button placeholder
+
+After you publish `template.yaml` as a Zeabur Template and copy the button from `Account -> Template -> Share`, replace the placeholder below with the real template code:
+
+```md
+[![Deploy on Zeabur](https://zeabur.com/button.svg)](https://zeabur.com/templates/<template-code>)
+```
+
+`<template-code>` must come from the published Zeabur Template URL, not from the GitHub repository URL. The full publishing flow lives in `docs/zeabur-auto-deploy.md`.
+
 Primary docs:
 
 - `docs/zeabur-rebuild-v1.md`
-- `docs/rebuild-v1-deploy-runbook.md`
+- `docs/zeabur-auto-deploy.md`
 - `docs/rebuild-v1-release-checklist.md`
+- `docs/rebuild-v1-deploy-runbook.md`
 - `docs/admin-manual.md`
 
 ## Local validation

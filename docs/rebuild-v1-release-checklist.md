@@ -66,3 +66,22 @@
 - `active_backend=database`
 - `active_execution_backend=celery`
 - `auth_provider=Casdoor`
+
+## Zeabur final online acceptance
+
+- Confirm the project was created from the published `template.yaml` path, not the repository root `Dockerfile`
+- Confirm Zeabur services are exactly: `web`, `api`, `worker`, `postgresql`, `redis`
+- Confirm `api` uses `apps/api/Dockerfile`
+- Confirm `worker` uses `apps/worker/Dockerfile`
+- Confirm `web` uses `apps/web/Dockerfile`
+- Confirm `api` and `web` have public domains and those domains match `NEXT_PUBLIC_API_BASE_URL` / `NEXTAUTH_URL`
+- Confirm `api` sees `AUTO_BOOTSTRAP_DB=true`
+- Confirm `worker` sees `AUTO_BOOTSTRAP_DB=false`
+- Confirm `DATABASE_URL` and `REDIS_URL` are injected from Zeabur managed services
+- Confirm `/health` returns success on the deployed API
+- Confirm `/admin` shows `Readiness = ready`
+- Confirm `/admin` shows no blocking warnings
+- Confirm Casdoor login works from `/login`
+- Confirm one `/title` task completes and renders correctly in `/tasks/[jobId]`
+- Run `API_BASE_URL=https://api.example.com WEB_BASE_URL=https://web.example.com API_BEARER_TOKEN=<casdoor-admin-token> ./scripts/zeabur_rebuild_release.sh`
+- Do not cut traffic until all above items pass

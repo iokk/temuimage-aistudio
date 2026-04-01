@@ -57,8 +57,11 @@ class RebuildDeployReadyTest(unittest.TestCase):
         self.assertIn("CASDOOR_API_AUDIENCE", env_text)
 
     def test_zeabur_specific_release_support_exists(self):
+        readme_text = Path("README.md").read_text()
         zeabur_env = Path(".env.zeabur.production.example").read_text()
         zeabur_doc = Path("docs/zeabur-rebuild-v1.md").read_text()
+        zeabur_auto_doc = Path("docs/zeabur-auto-deploy.md").read_text()
+        release_checklist = Path("docs/rebuild-v1-release-checklist.md").read_text()
         zeabur_script = Path("scripts/zeabur_rebuild_release.sh").read_text()
         fill_template = Path("docs/zeabur-console-fill-template.md").read_text()
         generator_script = Path("scripts/generate_zeabur_env.py").read_text()
@@ -70,12 +73,24 @@ class RebuildDeployReadyTest(unittest.TestCase):
         self.assertIn("API_BEARER_TOKEN", zeabur_script)
         self.assertIn("WEB_DOMAIN", fill_template)
         self.assertIn("Zeabur 控制台逐项填写模板", fill_template)
+        self.assertIn("Deploy Button placeholder", readme_text)
+        self.assertIn("https://zeabur.com/templates/<template-code>", readme_text)
+        self.assertIn("template.yaml", zeabur_auto_doc)
+        self.assertIn("generate_zeabur_env.py", zeabur_auto_doc)
+        self.assertIn("Git 自动 redeploy", zeabur_auto_doc)
+        self.assertIn("template deploy -f template.yaml", zeabur_auto_doc)
+        self.assertIn("template create -f template.yaml", zeabur_auto_doc)
+        self.assertIn("Deploy Button", zeabur_auto_doc)
         self.assertIn("AUTO_BOOTSTRAP_DB=true", zeabur_env)
         self.assertIn("CASDOOR_CLIENT_ID", zeabur_env)
         self.assertIn("AUTO_BOOTSTRAP_DB=true", zeabur_doc)
+        self.assertIn("Zeabur final online acceptance", release_checklist)
+        self.assertIn("repository root `Dockerfile`", release_checklist)
+        self.assertIn("/health", release_checklist)
         self.assertIn("NEXTAUTH_SECRET", generator_script)
         self.assertIn("CASDOOR_CLIENT_SECRET", generator_script)
         self.assertIn("SYSTEM_ENCRYPTION_KEY", generator_script)
+        self.assertIn('choices=["template", "services", "all"]', generator_script)
 
 
 if __name__ == "__main__":

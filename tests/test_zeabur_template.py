@@ -40,6 +40,13 @@ class ZeaburTemplateTest(unittest.TestCase):
         self.assertIn("NEXTAUTH_SECRET", content)
         self.assertIn("CASDOOR_ISSUER", content)
 
+    def test_service_dockerfiles_honor_runtime_port_defaults(self):
+        api_dockerfile = Path("apps/api/Dockerfile").read_text()
+        web_dockerfile = Path("apps/web/Dockerfile").read_text()
+
+        self.assertIn("${PORT:-8000}", api_dockerfile)
+        self.assertIn("${PORT:-3000}", web_dockerfile)
+
 
 if __name__ == "__main__":
     unittest.main()

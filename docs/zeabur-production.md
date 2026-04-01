@@ -59,6 +59,8 @@ The services should remain stateless. Persistent business state must live in Pos
 
 Zeabur `Deploy Button` requires a Zeabur template entry first. After you create the template from `template.yaml`, you can generate a reusable Deploy Button in the Zeabur dashboard and paste it into `README.md`.
 
+Canonical publishing steps live in `docs/zeabur-auto-deploy.md`. Canonical online acceptance lives in `docs/rebuild-v1-release-checklist.md`.
+
 ## Rebuild V1 references
 
 - `docs/zeabur-rebuild-v1.md`

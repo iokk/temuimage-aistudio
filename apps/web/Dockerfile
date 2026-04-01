@@ -25,4 +25,4 @@ COPY --from=builder /app/node_modules ./node_modules
 
 EXPOSE 3000
 
-CMD ["node_modules/.bin/next", "start", "apps/web", "-p", "3000"]
+CMD ["sh", "-c", "node_modules/.bin/next start apps/web -H 0.0.0.0 -p ${PORT:-3000}"]

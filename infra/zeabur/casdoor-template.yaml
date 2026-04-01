@@ -1,0 +1,79 @@
+# yaml-language-server: $schema=https://schema.zeabur.app/template.json
+apiVersion: zeabur.com/v1
+kind: Template
+metadata:
+  name: XiaoBaiTu Casdoor Auth
+
+spec:
+  description: Minimal Casdoor + PostgreSQL deployment for XiaoBaiTu auth.
+  tags:
+    - Auth
+    - OIDC
+
+  variables:
+    - key: AUTH_DOMAIN
+      type: DOMAIN
+      name: Auth Domain
+      description: Public domain for the Casdoor service.
+
+  services:
+    - name: casdoor-postgresql
+      template: PREBUILT
+      spec:
+        source:
+          image: postgres:16-alpine
+        ports:
+          - id: database
+            port: 5432
+            type: TCP
+        volumes:
+          - id: data
+            dir: /var/lib/postgresql/data
+        env:
+          POSTGRES_DB:
+            default: casdoor
+          POSTGRES_USER:
+            default: postgres
+            expose: true
+            readonly: true
+          POSTGRES_PASSWORD:
+            default: ${PASSWORD}
+            expose: true
+          POSTGRES_HOST:
+            default: ${CONTAINER_HOSTNAME}
+            expose: true
+            readonly: true
+          POSTGRES_PORT:
+            default: ${DATABASE_PORT}
+            expose: true
+            readonly: true
+
+    - name: casdoor
+      template: PREBUILT
+      domainKey: AUTH_DOMAIN
+      dependencies:
+        - casdoor-postgresql
+      spec:
+        source:
+          image: casbin/casdoor:latest
+        ports:
+          - id: http
+            port: 8000
+            type: HTTP
+        env:
+          appname:
+            default: casdoor
+          httpport:
+            default: "8000"
+          runmode:
+            default: prod
+          driverName:
+            default: postgres
+          dataSourceName:
+            default: user=${POSTGRES_USER} password=${POSTGRES_PASSWORD} host=${POSTGRES_HOST} port=${POSTGRES_PORT} sslmode=disable dbname=${POSTGRES_DB}
+          dbName:
+            default: ${POSTGRES_DB}
+          origin:
+            default: https://${AUTH_DOMAIN}
+          originFrontend:
+            default: https://${AUTH_DOMAIN}

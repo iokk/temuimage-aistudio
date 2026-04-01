@@ -22,6 +22,8 @@ The old Streamlit stack remains archived and is not part of the production deplo
 
 Use `template.yaml` on Zeabur.
 
+Do not point Zeabur at the repository root `Dockerfile` for the rebuild release. The root Dockerfile still starts the archived Streamlit app; rebuild production must use `template.yaml` or the service Dockerfiles in `apps/`.
+
 ## Validation before deploy
 
 ```bash
