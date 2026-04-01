@@ -2,7 +2,12 @@ import "server-only"
 
 import { auth } from "../auth"
 import type { JobRecord } from "./job-client"
-import type { RuntimePayload } from "./runtime"
+import type {
+  PersonalExecutionConfigPayload,
+  RuntimePayload,
+  SystemExecutionConfigPayload,
+  TitleContextPayload,
+} from "./runtime"
 
 function getRemoteApiBaseUrl() {
   return (process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "")
@@ -68,5 +73,65 @@ export async function getServerReadinessPayload(): Promise<{
     }
   } catch {
     return null
+  }
+}
+
+export async function getServerSystemExecutionConfig(): Promise<SystemExecutionConfigPayload | null> {
+  try {
+    const response = await fetchServerApi("/system/config")
+    if (!response.ok) {
+      return null
+    }
+    return (await response.json()) as SystemExecutionConfigPayload
+  } catch {
+    return null
+  }
+}
+
+export async function getServerPersonalExecutionConfig(): Promise<PersonalExecutionConfigPayload | null> {
+  try {
+    const response = await fetchServerApi("/personal/config")
+    if (!response.ok) {
+      return null
+    }
+    return (await response.json()) as PersonalExecutionConfigPayload
+  } catch {
+    return null
+  }
+}
+
+export async function getServerTitleContext(): Promise<TitleContextPayload | null> {
+  try {
+    const response = await fetchServerApi("/title/context")
+    if (!response.ok) {
+      return {
+        ready: false,
+        default_model: "",
+        default_template_key: "default",
+        image_template_key: "image_analysis",
+        template_options: [],
+        provider: "",
+        config_source: "unavailable",
+        warnings: ["标题执行上下文获取失败，请刷新页面或检查服务状态。"],
+        blocking_reason: "标题执行上下文获取失败，请刷新页面或检查服务状态。",
+        current_project: null,
+        current_team: null,
+      }
+    }
+    return (await response.json()) as TitleContextPayload
+  } catch {
+    return {
+      ready: false,
+      default_model: "",
+      default_template_key: "default",
+      image_template_key: "image_analysis",
+      template_options: [],
+      provider: "",
+      config_source: "unavailable",
+      warnings: ["标题执行上下文获取失败，请刷新页面或检查服务状态。"],
+      blocking_reason: "标题执行上下文获取失败，请刷新页面或检查服务状态。",
+      current_project: null,
+      current_team: null,
+    }
   }
 }

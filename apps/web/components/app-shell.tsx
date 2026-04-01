@@ -2,6 +2,7 @@ import Link from "next/link"
 
 import { auth } from "../auth"
 import { signOutCurrentUser } from "../app/actions/auth-actions"
+import { getServerRuntimePayload } from "../lib/server-api"
 
 const navItems = [
   { href: "/batch", label: "批量出图" },
@@ -20,6 +21,11 @@ export async function AppShell({
   children: React.ReactNode
 }) {
   const session = await auth()
+  const runtime = await getServerRuntimePayload()
+  const currentProject = runtime?.current_project || null
+  const currentProjectText = currentProject
+    ? `当前项目：${currentProject.project_name} · ${currentProject.project_slug}`
+    : "当前项目：未设置"
   const today = new Intl.DateTimeFormat("zh-CN", {
     year: "numeric",
     month: "2-digit",
@@ -62,6 +68,14 @@ export async function AppShell({
               <Link href="/settings/team" className="block rounded-xl border border-slate-200 px-4 py-3 hover:border-slate-300 hover:bg-slate-50">
                 团队/管理员
               </Link>
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-700">
+                  Project context
+                </p>
+                <p className={`mt-2 text-sm ${currentProject ? "font-medium text-slate-800" : "text-slate-500"}`}>
+                  {currentProjectText}
+                </p>
+              </div>
               <Link href="/admin" className="block rounded-xl border border-slate-200 px-4 py-3 hover:border-slate-300 hover:bg-slate-50">
                 管理后台
               </Link>
@@ -115,6 +129,14 @@ export async function AppShell({
             <h2 className="mt-3 text-3xl font-black tracking-tight text-slate-950">
               {title}
             </h2>
+            <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm xl:hidden">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-700">
+                Project context
+              </p>
+              <p className={`mt-2 ${currentProject ? "font-medium text-slate-800" : "text-slate-500"}`}>
+                {currentProjectText}
+              </p>
+            </div>
           </div>
 
           <div className="mt-6">{children}</div>

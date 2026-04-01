@@ -71,3 +71,11 @@ export async function POST(
   const { path } = await context.params
   return proxyRequest(request, { path })
 }
+
+export async function PUT(
+  request: NextRequest,
+  context: { params: Promise<{ path: string[] }> },
+) {
+  const { path } = await context.params
+  return proxyRequest(request, { path })
+}

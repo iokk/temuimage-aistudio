@@ -3,6 +3,8 @@ import Link from "next/link"
 import type { Session } from "next-auth"
 
 import { getRuntimePayload } from "../lib/runtime"
+import { getServerPersonalExecutionConfig } from "../lib/server-api"
+import { PersonalConfigPanel } from "./personal-config-panel"
 
 export async function PersonalSettingsPanel({
   session,
@@ -10,6 +12,7 @@ export async function PersonalSettingsPanel({
   session: Session | null
 }) {
   const runtime = await getRuntimePayload()
+  const personalConfig = await getServerPersonalExecutionConfig()
 
   return (
     <section className="grid gap-6">
@@ -40,12 +43,33 @@ export async function PersonalSettingsPanel({
       </div>
 
       <div className="grid gap-6 xl:grid-cols-2">
+        <PersonalConfigPanel
+          apiBaseUrl="/api/platform"
+          currentProject={runtime?.current_project || null}
+          initialConfig={personalConfig}
+        />
+
         <div className="rounded-3xl border border-slate-200 bg-white p-8 shadow-sm">
-          <h3 className="text-xl font-bold text-slate-950">个人模式说明</h3>
+          <h3 className="text-xl font-bold text-slate-950">持久化账号状态</h3>
           <div className="mt-4 space-y-3 text-sm leading-7 text-slate-600">
-            <p>个人模式面向单人使用，后续这里会接个人 Gemini Key 或个人中转站配置。</p>
-            <p>当前新栈已经可以先体验标题优化、图片翻译、快速出图、批量出图和任务中心。</p>
-            <p>模型默认方向已经固定：标题优先走 `gemini-3.1-pro`。</p>
+            <p>账号 ID：{runtime?.current_user?.id || "当前未写入持久化账号"}</p>
+            <p>签发方：{runtime?.current_user?.issuer || "未记录"}</p>
+            <p>主体标识：{runtime?.current_user?.subject || "未记录"}</p>
+            <p>邮箱校验：{runtime?.current_user?.email_verified ? "已验证" : "未验证"}</p>
+            <p>
+              最近登录：
+              {runtime?.current_user?.last_login_at
+                ? new Date(runtime.current_user.last_login_at).toLocaleString("zh-CN")
+                : "尚未记录"}
+            </p>
+            <p>
+              当前权限：
+              {runtime?.current_user?.is_admin
+                ? "管理员 + 团队成员"
+                : runtime?.current_user?.is_team_member
+                  ? "团队成员"
+                  : "个人模式"}
+            </p>
           </div>
         </div>
 

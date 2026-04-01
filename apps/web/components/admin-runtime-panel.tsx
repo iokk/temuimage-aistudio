@@ -1,6 +1,8 @@
 import Link from "next/link"
 
+import { AdminConfigPanel } from "./admin-config-panel"
 import { getReadinessPayload, getRuntimePayload } from "../lib/runtime"
+import { getServerSystemExecutionConfig } from "../lib/server-api"
 
 function renderBooleanLabel(value: boolean, trueText: string, falseText: string) {
   return value ? trueText : falseText
@@ -9,6 +11,7 @@ function renderBooleanLabel(value: boolean, trueText: string, falseText: string)
 export async function AdminRuntimePanel() {
   const runtime = await getRuntimePayload()
   const readiness = await getReadinessPayload()
+  const systemConfig = await getServerSystemExecutionConfig()
 
   if (!runtime) {
     return (
@@ -77,13 +80,17 @@ export async function AdminRuntimePanel() {
       <div className="rounded-3xl border border-slate-200 bg-white p-8 shadow-sm">
         <h3 className="text-xl font-bold text-slate-950">默认模型</h3>
         <div className="mt-4 space-y-3 text-sm leading-7 text-slate-600">
+          <p>翻译 Provider：{runtime.default_translate_provider}</p>
           <p>标题模型：{runtime.default_title_model}</p>
           <p>图片翻译图像模型：{runtime.default_translate_image_model}</p>
           <p>图片翻译分析模型：{runtime.default_translate_analysis_model}</p>
           <p>快速出图图像模型：{runtime.default_quick_image_model}</p>
           <p>批量出图图像模型：{runtime.default_batch_image_model}</p>
+          <p>系统配置来源：{runtime.system_config_source}</p>
         </div>
       </div>
+
+      <AdminConfigPanel apiBaseUrl="/api/platform" initialConfig={systemConfig} />
 
       <div className="rounded-3xl border border-slate-200 bg-white p-8 shadow-sm">
         <h3 className="text-xl font-bold text-slate-950">部署就绪度</h3>

@@ -15,7 +15,23 @@ export type JobRecord = {
     at: string
     message: string
   }>
+  project: {
+    project_id: string
+    project_name: string
+    project_slug: string
+    project_status: string
+  } | null
 }
+
+export type ImageUploadItem = {
+  id: string
+  rawName: string
+  mimeType: string
+  sizeBytes: number
+  imageDataUrl: string
+}
+
+export type TranslateUploadItem = ImageUploadItem
 
 type JobResponse = {
   job: JobRecord
@@ -23,7 +39,7 @@ type JobResponse = {
   execution_backend?: string
 }
 
-function buildJobApiUrl(apiBaseUrl: string, path: string) {
+export function buildJobApiUrl(apiBaseUrl: string, path: string) {
   const normalizedBaseUrl = apiBaseUrl.replace(/\/$/, "")
 
   if (normalizedBaseUrl.endsWith("/api/platform")) {
@@ -31,6 +47,14 @@ function buildJobApiUrl(apiBaseUrl: string, path: string) {
   }
 
   return `${normalizedBaseUrl}/v1${path}`
+}
+
+export function buildTranslateOutputsZipUrl(apiBaseUrl: string, jobId: string) {
+  return buildJobApiUrl(apiBaseUrl, `/jobs/${jobId}/translate-export.zip`)
+}
+
+export function buildJobArtifactsZipUrl(apiBaseUrl: string, jobId: string) {
+  return buildJobApiUrl(apiBaseUrl, `/jobs/${jobId}/artifacts.zip`)
 }
 
 export async function createJob(apiBaseUrl: string, input: {

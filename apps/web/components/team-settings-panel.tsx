@@ -2,6 +2,7 @@ import Link from "next/link"
 
 import type { Session } from "next-auth"
 
+import { CurrentProjectPanel } from "./current-project-panel"
 import { getRuntimePayload } from "../lib/runtime"
 
 export async function TeamSettingsPanel({
@@ -43,10 +44,13 @@ export async function TeamSettingsPanel({
 
       <div className="grid gap-6 xl:grid-cols-2">
         <div className="rounded-3xl border border-slate-200 bg-white p-8 shadow-sm">
-          <h3 className="text-xl font-bold text-slate-950">团队配置方向</h3>
+          <h3 className="text-xl font-bold text-slate-950">当前团队状态</h3>
           <div className="mt-4 space-y-3 text-sm leading-7 text-slate-600">
-            <p>团队模式后续会承接统一 Gemini、中转站、默认模型、成员权限和审计能力。</p>
-            <p>当前管理员可以先通过管理后台查看运行诊断，并通过任务中心验证新栈主流程。</p>
+            <p>团队名称：{runtime?.current_team?.organization_name || "尚未创建默认团队"}</p>
+            <p>团队标识：{runtime?.current_team?.organization_slug || "未记录"}</p>
+            <p>成员角色：{runtime?.current_team?.membership_role || (isAdmin ? "admin" : "member")}</p>
+            <p>持久化状态：{runtime?.current_team ? "已写入组织与成员关系" : "当前仍是仅环境权限"}</p>
+            <p>默认项目管理：请在下方项目管理卡片中维护当前项目名称。</p>
             <p>标题默认模型：{runtime?.default_title_model || "gemini-3.1-pro"}</p>
           </div>
         </div>
@@ -62,6 +66,11 @@ export async function TeamSettingsPanel({
           </div>
         </div>
       </div>
+
+      <CurrentProjectPanel
+        initialProject={runtime?.current_project || null}
+        isAdmin={isAdmin}
+      />
 
       {runtime?.warnings?.length ? (
         <div className="rounded-3xl border border-amber-200 bg-amber-50 p-8 shadow-sm">
