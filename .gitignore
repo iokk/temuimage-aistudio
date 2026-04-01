@@ -46,8 +46,16 @@ node_modules/
 .next/
 dist/
 coverage/
+.deploy/
+.learnings/
+apps/web/tsconfig.tsbuildinfo
 
 # SSL证书
 nginx/ssl/*.pem
 nginx/ssl/*.crt
 nginx/ssl/*.key
+
+# Local deploy experiments
+Dockerfile.api
+Dockerfile.web
+Dockerfile.worker
