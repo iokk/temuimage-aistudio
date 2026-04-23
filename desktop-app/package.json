@@ -1,0 +1,30 @@
+{
+  "name": "ecommerce-workbench-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "client/electron",
+    "client/renderer"
+  ],
+  "scripts": {
+    "dev": "concurrently -k \"npm run dev:renderer\" \"npm run dev:electron\"",
+    "dev:renderer": "npm --workspace client/renderer run dev",
+    "dev:electron": "wait-on tcp:127.0.0.1:5173 && cross-env ELECTRON_RENDERER_URL=http://127.0.0.1:5173 npm --workspace client/electron run start",
+    "build:renderer": "npm --workspace client/renderer run build",
+    "prepare:python-runtime": "node scripts/prepare-python-runtime.mjs",
+    "prepare:python-bundle": "node scripts/prepare-python-bundle.mjs",
+    "prepare:assets": "npm run build:renderer && npm run prepare:python-bundle && npm run prepare:python-runtime",
+    "verify:package": "node scripts/verify-packaged-app.mjs",
+    "release:report": "node scripts/release-artifact-report.mjs",
+    "start:electron": "npm --workspace client/electron run start",
+    "package:electron": "npm run prepare:assets && npm --workspace client/electron run package && npm run verify:package",
+    "make:electron": "npm run prepare:assets && npm --workspace client/electron run make",
+    "release:sign-app": "bash scripts/sign-macos-app.sh client/electron/out/EcommerceWorkbenchDesktop-darwin-arm64/EcommerceWorkbenchDesktop.app",
+    "release:notarize-dmg": "bash scripts/notarize-macos-dmg.sh client/electron/out/make/EcommerceWorkbenchDesktop-0.1.0-arm64.dmg"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "wait-on": "^8.0.1"
+  }
+}

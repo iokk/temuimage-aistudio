@@ -8,54 +8,35 @@ env/
 venv/
 .venv/
 
+# Local runtime data
+data/
+.env
+
+# Desktop / web build artifacts
+desktop-app/node_modules/
+desktop-app/.vite/
+desktop-app/.dist/
+dist/
+build/
+
+# Tooling
+.playwright-cli/
+.sisyphus/
+.ruff_cache/
+
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
 
-# 数据和配置
-data/
-*.json
-!.env.example
-!package.json
-!apps/**/package.json
-!packages/**/package.json
-!apps/**/tsconfig.json
-.env
-output/
-tmp/
-release/
-deliverables/
-*.zip
-*.tar
-*.gz
-temu.joolhome.com
+# OS
+.DS_Store
+Thumbs.db
 
-# Docker
+# Docker overrides
 docker-compose.override.yml
 
 # Logs
 *.log
 
-# OS
-.DS_Store
-Thumbs.db
-.worktrees/
-node_modules/
-.next/
-dist/
-coverage/
-.deploy/
-.learnings/
-apps/web/tsconfig.tsbuildinfo
-
-# SSL证书
-nginx/ssl/*.pem
-nginx/ssl/*.crt
-nginx/ssl/*.key
-
-# Local deploy experiments
-Dockerfile.api
-Dockerfile.web
-Dockerfile.worker

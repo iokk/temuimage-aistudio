@@ -1,146 +1,117 @@
-"""
-TEMU AI Studio V1.0.0
-Vertex Express + Nano Banana 2 image workflow
+"""电商出图工作台.
+
+个人 self-hosted 主线，支持 desktop 与 server 两种运行模式。
 """
 
 import streamlit as st
-import streamlit.components.v1 as components
 from PIL import Image
 import io
 import json
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 import hashlib
+import base64
+import copy
 import zipfile
 import random
 import time
-import base64
+import subprocess
+import tempfile
+import shutil
+import urllib.request
+import urllib.error
 from datetime import datetime, date
 from pathlib import Path
-from typing import Optional
-import requests
 from google import genai
 from google.genai import types
-from sqlalchemy import select
-from temu_core.branding import (
-    APP_COMPANY,
-    APP_EN_NAME,
-    APP_LAST_UPDATED,
-    APP_NAME,
-    APP_TAGLINE,
-    APP_VERSION,
-    build_footer_meta,
-)
-from temu_core.auth import (
-    authenticate_local_user,
-    backup_and_delete_local_user,
-    ensure_local_user,
-    encryption_available as platform_encryption_available,
-    get_login_context_for_user,
-    is_registration_open as platform_registration_open,
-    list_registered_users,
-    list_secure_api_key_previews,
-    list_user_backups,
-    load_secure_api_keys_payload,
-    mask_api_key,
-    reset_local_user_password,
-    save_secure_api_keys_payload,
-    set_local_user_status,
-    set_registration_open,
-)
-from temu_core.bootstrap import bootstrap_platform_runtime
-from temu_core.billing import charge_usage_to_wallet, get_wallet_dashboard
-from temu_core.credential_resolver import resolve_runtime_credentials
-from temu_core.credential_resolver import select_translation_gemini_key
-from temu_core.db import get_database_status, session_scope
-from temu_core.models import EXPECTED_TABLES, User
-from temu_core.platform_status import describe_platform_database_status
-from temu_core.provider_capabilities import (
-    get_model_capabilities,
-    get_translation_provider_message,
-    model_supports,
-)
-from temu_core.provider_precheck import validate_relay_models
-from temu_core.provider_precheck import describe_capability_reasons
-from temu_core.action_reasons import (
-    combo_analysis_reasons,
-    combo_generate_reasons,
-    combo_requirements_reasons,
-    smart_generate_reasons,
-    title_generate_reasons,
-    translate_generate_reasons,
-)
-from temu_core.config_ui import build_login_tab_labels, build_settings_sections
-from temu_core.config_ui import build_recommended_provider_templates
-from temu_core.relay_config import (
-    has_system_service_access,
-    resolve_relay_runtime_config,
-)
-from temu_core.relay_first_logic import (
-    analyze_product_with_text_client,
-    build_fallback_anchor,
-    generate_en_copy_with_text_client,
-    generate_requirements_with_text_client,
-)
-from temu_core.relay_text_client import RelayTextClient
-from temu_core.runtime_mode import (
-    describe_session_mode,
-    get_runtime_mode,
-    should_force_registered_login,
-    should_show_team_features,
-)
-from temu_core.settings import (
-    database_enabled as platform_database_enabled,
-    get_platform_settings,
-)
-from temu_core.streamlit_admin import (
-    render_billing_admin_tab,
-    render_pricing_admin_tab,
-    render_redeem_code_admin_tab,
-    render_user_admin_tab,
-    render_workspace_admin_tab,
-)
-from temu_core.team import ensure_workspace_identity, list_workspace_projects
-from temu_core.title_logic import (
-    generate_compliant_titles_or_raise,
-    should_attempt_title_generation,
-)
-from temu_core.task_center import (
-    build_task_badge,
-    build_task_panel_title,
-    build_task_type_meta,
-    count_pending_tasks,
-)
-from temu_core.ui_content import (
-    build_admin_mode_notice,
-    build_feature_catalog,
-    build_page_sections,
-    build_result_summary,
-    build_workspace_actions,
-)
-from temu_core.usability_ui import (
-    build_task_indicator,
-    build_core_function_nav,
-    build_page_switch_targets,
-    get_thumbnail_sizes,
-)
 
 # ==================== 配置常量 ====================
-BRAND_MARK_PATH = Path(__file__).parent / "assets" / "brand-mark.svg"
+APP_VERSION = "V15.2.1"
+APP_AUTHOR = "企鹅 & 小明"
+APP_COMMERCIAL = "企鹅 & Jerry"
+APP_NAME = "电商出图工作台"
 
-DATA_DIR = Path("/app/data") if os.path.exists("/app/data") else Path("./data")
-DATA_DIR.mkdir(exist_ok=True)
+
+def _detect_runtime_mode() -> str:
+    runtime = (
+        os.getenv("APP_RUNTIME", "")
+        or os.getenv("ECOMMERCE_WORKBENCH_MODE", "")
+    ).strip().lower()
+    if runtime in {"desktop", "server"}:
+        return runtime
+    if os.path.exists("/app/data"):
+        return "server"
+    return "desktop"
+
+
+APP_RUNTIME = _detect_runtime_mode()
+DESKTOP_MODE = APP_RUNTIME == "desktop"
+SERVER_MODE = APP_RUNTIME == "server"
+
+
+def runtime_supports_local_file_access() -> bool:
+    return DESKTOP_MODE
+
+
+def runtime_supports_output_dir_editing() -> bool:
+    return DESKTOP_MODE
+
+
+def runtime_label() -> str:
+    return "Mac 本地版" if DESKTOP_MODE else "Self-hosted 服务器版"
+
+
+def _default_data_dir() -> Path:
+    env_dir = os.getenv("ECOMMERCE_WORKBENCH_DATA_DIR", "").strip()
+    if env_dir:
+        return Path(env_dir).expanduser()
+    return Path("/app/data") if os.path.exists("/app/data") else Path("./data")
+
+
+def _default_project_output_dir() -> str:
+    env_dir = os.getenv("ECOMMERCE_WORKBENCH_PROJECTS_DIR", "").strip()
+    if env_dir:
+        return str(Path(env_dir).expanduser())
+    if SERVER_MODE:
+        return str((DATA_DIR / "projects").resolve())
+    return str(Path.home() / "Downloads" / APP_NAME)
+
+
+def _default_file_storage_path() -> str:
+    env_dir = os.getenv("FILE_STORAGE_PATH", "").strip()
+    if env_dir:
+        return str(Path(env_dir).expanduser())
+    if os.path.exists("/app/data"):
+        return "/app/data/files"
+    return str((_default_data_dir() / "files").resolve())
+
+
+DATA_DIR = _default_data_dir()
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 SETTINGS_FILE = DATA_DIR / "settings.json"
-USERS_FILE = DATA_DIR / "users.json"
-STATS_FILE = DATA_DIR / "stats.json"
-API_KEYS_FILE = DATA_DIR / "api_keys.json"
+PROVIDERS_FILE = DATA_DIR / "providers.json"
 PROMPTS_FILE = DATA_DIR / "prompts.json"
 COMPLIANCE_FILE = DATA_DIR / "compliance.json"
 TEMPLATES_FILE = DATA_DIR / "templates.json"
 TITLE_TEMPLATES_FILE = DATA_DIR / "title_templates.json"
+TASKS_FILE = DATA_DIR / "tasks.json"
+HISTORY_FILE = DATA_DIR / "history.json"
+HISTORY_DIR = DATA_DIR / "history"
+
+KEYCHAIN_SERVICE = "ecommerce-image-workbench"
+MAX_TASK_QUEUE = 5
+MAX_ACTIVE_TASKS = 2
+TASK_STATUS_TERMINAL = {"done", "error", "cancelled", "expired"}
+HISTORY_RECORD_ACTIVE = "active"
+HISTORY_RECORD_TRASHED = "trashed"
+GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS = int(
+    os.getenv("GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS", "60")
+)
+GEMINI_IMAGE_REQUEST_TIMEOUT_SECONDS = int(
+    os.getenv("GEMINI_IMAGE_REQUEST_TIMEOUT_SECONDS", "120")
+)
 
 # ==================== 硬性限制 ====================
 MAX_IMAGES = 14
@@ -148,7 +119,7 @@ MAX_NAME_CHARS = 200
 MAX_DETAIL_CHARS = 500
 MAX_TAGS = 8
 MAX_TYPE_COUNT = 3
-MAX_TOTAL_IMAGES = 20
+MAX_TOTAL_IMAGES = 12
 MAX_HEADLINE_CHARS = 40
 MAX_SUBLINE_CHARS = 60
 MAX_BADGE_CHARS = 20
@@ -159,134 +130,119 @@ MAX_TITLE_INFO_CHARS = 1000
 MIN_TITLE_EN_CHARS = 180
 MAX_TITLE_EN_CHARS = 250
 
-# ==================== 图像模型配置 ====================
+DEFAULT_TARGET_LANGUAGE = "zh"
+TARGET_LANGUAGES = [
+    {
+        "code": "en",
+        "label": "英语",
+        "english_name": "English",
+        "native_name": "English",
+        "flag": "🇺🇸",
+        "copy_tag": "EN",
+    },
+    {
+        "code": "zh",
+        "label": "中文",
+        "english_name": "Chinese",
+        "native_name": "中文",
+        "flag": "🇨🇳",
+        "copy_tag": "ZH",
+    },
+    {
+        "code": "ja",
+        "label": "日语",
+        "english_name": "Japanese",
+        "native_name": "日本語",
+        "flag": "🇯🇵",
+        "copy_tag": "JA",
+    },
+    {
+        "code": "vi",
+        "label": "越南语",
+        "english_name": "Vietnamese",
+        "native_name": "Tiếng Việt",
+        "flag": "🇻🇳",
+        "copy_tag": "VI",
+    },
+    {
+        "code": "th",
+        "label": "泰语",
+        "english_name": "Thai",
+        "native_name": "ไทย",
+        "flag": "🇹🇭",
+        "copy_tag": "TH",
+    },
+    {
+        "code": "fr",
+        "label": "法语",
+        "english_name": "French",
+        "native_name": "Français",
+        "flag": "🇫🇷",
+        "copy_tag": "FR",
+    },
+    {
+        "code": "es",
+        "label": "西班牙语",
+        "english_name": "Spanish",
+        "native_name": "Español",
+        "flag": "🇪🇸",
+        "copy_tag": "ES",
+    },
+]
+TARGET_LANGUAGE_MAP = {item["code"]: item for item in TARGET_LANGUAGES}
+TITLE_LINE_PREFIXES = [
+    "English",
+    "Chinese",
+    "中文",
+    "Japanese",
+    "日语",
+    "Vietnamese",
+    "越南语",
+    "Thai",
+    "泰语",
+    "French",
+    "法语",
+    "Spanish",
+    "西班牙语",
+    "Target Language",
+    "Translation",
+]
+
+# ==================== Gemini 3 模型配置 ====================
 MODELS = {
-    "gemini-2.5-flash-image": {
-        "name": "Gemini 2.5 Flash Image",
+    "nano-banana": {
+        "name": "🍌 Nano Banana",
         "resolutions": ["1K"],
-        "max_refs": 5,
-        "thinking_levels": ["minimal", "high"],
-        "default_thinking": "minimal",
+        "max_refs": 3,
+        "thinking_levels": [],
+        "default_thinking": None,
         "supports_thinking": False,
-    }
-}
-PRIMARY_IMAGE_MODEL = "gemini-2.5-flash-image"
-TITLE_TEXT_MODEL = (
-    os.getenv("TITLE_TEXT_MODEL") or "gemini-3.1-flash-lite-preview"
-).strip()
-LEGACY_IMAGE_MODELS = {"gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview"}
-MODEL_NAME_NANO_BANANA_2 = MODELS[PRIMARY_IMAGE_MODEL]["name"]
-
-RELAY_API_BASE = "https://newapi.aisonnet.org/v1"
-RELAY_IMAGE_MODELS = {
-    "gemini-3.1-flash-image-preview": {"name": "gemini-3.1-flash-image-preview"},
-    "seedream-5.0": {"name": "seedream-5.0"},
-    "seedream-4.6": {"name": "seedream-4.6"},
-    "z-image-turbo": {"name": "z-image-turbo"},
-    "imagine_x_1": {"name": "imagine_x_1"},
-    "hunyuan-image-3": {"name": "hunyuan-image-3"},
-    "grok-imagine-image": {"name": "grok-imagine-image"},
-}
-RELAY_ANALYSIS_MODELS = {
-    "gemini-3.1-flash-lite-preview": {"name": "gemini-3.1-flash-lite-preview"},
-    "gemini-3.1-flash-image-preview": {"name": "gemini-3.1-flash-image-preview"},
-}
-RELAY_TEXT_MODELS = {
-    "nano-banana-pro-reverse": {"name": "nano-banana-pro-reverse"},
-}
-RELAY_MODEL_STATUS = {
+    },
     "gemini-3.1-flash-image-preview": {
-        "label": "优先推荐",
-        "color": "#10b981",
-        "note": "当前优先推荐的中转站图片模型，适合先作为默认模型测试与上线。",
+        "name": "🍌 Nano Banana 2",
+        "resolutions": ["1K"],
+        "max_refs": 10,
+        "thinking_levels": [],
+        "default_thinking": None,
+        "supports_thinking": False,
     },
-    "seedream-5.0": {
-        "label": "待测试",
-        "color": "#1677ff",
-        "note": "已加入系统中转站模型列表，建议管理员先做连通性与出图验证。",
+    "gemini-3-pro-image-preview": {
+        "name": "🍌 Nano Banana Pro",
+        "resolutions": ["1K", "2K", "4K"],
+        "max_refs": 14,
+        "thinking_levels": ["low", "high"],
+        "default_thinking": "high",
+        "supports_thinking": True,  # 支持thinking_level
     },
-    "seedream-4.6": {
-        "label": "待测试",
-        "color": "#1677ff",
-        "note": "已加入系统中转站模型列表，建议管理员先做连通性与出图验证。",
-    },
-    "z-image-turbo": {
-        "label": "待测试",
-        "color": "#1677ff",
-        "note": "已加入系统中转站模型列表，建议管理员先做连通性与出图验证。",
-    },
-    "imagine_x_1": {
-        "label": "不稳定",
-        "color": "#faad14",
-        "note": "模型存在，但实测出现 generation_error / limited",
-    },
-    "hunyuan-image-3": {
-        "label": "当前无通道",
-        "color": "#ff4d4f",
-        "note": "实测返回 model_not_found / no available channel",
-    },
-    "grok-imagine-image": {
-        "label": "不稳定",
-        "color": "#faad14",
-        "note": "模型存在，但实测多次 generation_error",
-    },
-    "nano-banana-pro-reverse": {
-        "label": "当前无通道",
-        "color": "#ff4d4f",
-        "note": "当前默认组下无可用通道",
+    "gemini-2.5-flash-image": {
+        "name": "⚡ Nano Banana Flash",
+        "resolutions": ["1K"],
+        "max_refs": 3,
+        "thinking_levels": [],  # 不支持
+        "default_thinking": None,
+        "supports_thinking": False,  # 不支持thinking_level
     },
 }
-
-try:
-    GEMINI_MAX_INFLIGHT = int(os.getenv("GEMINI_MAX_INFLIGHT", "3"))
-except Exception:
-    GEMINI_MAX_INFLIGHT = 3
-GEMINI_MAX_INFLIGHT = max(1, min(8, GEMINI_MAX_INFLIGHT))
-GEMINI_CALL_SEMAPHORE = threading.BoundedSemaphore(GEMINI_MAX_INFLIGHT)
-
-
-def _env_flag(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def is_vertex_express_key(api_key: str) -> bool:
-    key = str(api_key or "").strip()
-    return key.startswith("AQ.")
-
-
-def should_use_vertex_express(api_key: str = "") -> bool:
-    if _env_flag("GOOGLE_GENAI_USE_VERTEXAI", False):
-        return True
-    return is_vertex_express_key(api_key)
-
-
-def get_rate_limit_hint(api_key: str = ""):
-    if should_use_vertex_express(api_key):
-        return {
-            "provider": "Vertex Express",
-            "image_parallelism": 1,
-            "text_parallelism": 2,
-            "note": "图片请求建议低并发，速率限制按项目计，不按单个 Key 计。",
-        }
-    return {
-        "provider": "Gemini API",
-        "image_parallelism": 2,
-        "text_parallelism": 2,
-        "note": "建议控制中低并发，优先稳定成功率。",
-    }
-
-
-def create_genai_client(api_key: str, http_options=None):
-    kwargs = {"api_key": api_key}
-    if http_options is not None:
-        kwargs["http_options"] = http_options
-    if should_use_vertex_express(api_key):
-        kwargs["vertexai"] = True
-    return genai.Client(**kwargs)
-
 
 ASPECT_RATIOS = [
     "1:1",
@@ -308,48 +264,28 @@ THINKING_LEVEL_DESC = {
     "high": "🧠 深度 - 最大推理深度",
 }
 
-LANGUAGE_OPTIONS = {
-    "auto": "自动识别",
-    "en": "English",
-    "zh": "中文",
-    "ja": "日本語",
-    "ko": "한국어",
-    "es": "Español",
-    "fr": "Français",
-    "de": "Deutsch",
-    "it": "Italiano",
-    "pt": "Português",
-}
-
-LANGUAGE_PROMPT_NAMES = {
-    "auto": "auto-detect",
-    "en": "English",
-    "zh": "Chinese",
-    "ja": "Japanese",
-    "ko": "Korean",
-    "es": "Spanish",
-    "fr": "French",
-    "de": "German",
-    "it": "Italian",
-    "pt": "Portuguese",
-}
+MAIN_NAV_ITEMS = ["🚀 智能组图", "🎨 快速出图 / 图片翻译", "🏷️ 标题生成"]
+MANAGEMENT_NAV_ITEMS = ["🧩 模板库", "⚙️ 提供商设置", "🛠️ 系统设置"]
+PROJECT_CENTER_PAGE = "📚 项目中心"
 
 # ==================== 默认配置 ====================
 DEFAULT_SETTINGS = {
-    "daily_limit_user": 100,
-    "daily_limit_vip": 100,
-    "default_model": PRIMARY_IMAGE_MODEL,
-    "default_image_provider": "Gemini",
+    "default_model": "nano-banana",
+    "default_title_model": "gemini-3.1-flash-lite-preview",
+    "default_vision_model": "gemini-3.1-flash-lite-preview",
+    "default_title_language": "en",
+    "default_image_language": "en",
+    "project_output_dir": _default_project_output_dir(),
+    "proxy_mode": "system",
+    "proxy_url": "http://127.0.0.1:10808",
     "default_resolution": "1K",
     "default_aspect": "1:1",
-    "default_thinking_level": "minimal",
-    "user_password": "eee666",
-    "admin_password": "joolhome@2023",
+    "default_thinking_level": "high",
     "compliance_mode": "strict",
-    "allow_user_passwordless_login": False,
+    "trash_retention_days": 15,
     "file_storage_type": "local",
     "file_retention_days": 7,
-    "file_storage_path": str(DATA_DIR / "files"),
+    "file_storage_path": _default_file_storage_path(),
     "s3_endpoint": "",
     "s3_bucket": "",
     "s3_region": "",
@@ -357,35 +293,10 @@ DEFAULT_SETTINGS = {
     "s3_secret_key": "",
     "s3_prefix": "temu-files/",
     "s3_presign_expires": 86400,
-    # 图片翻译默认设置
-    "translate_max_upload": 50,
-    "translate_batch_size": 20,
-    "translate_max_input": 200,
-    "translate_max_file_mb": 7,
-    "translate_allowed_formats": "png,jpg,jpeg,webp,heic,heif",
-    "translate_default_output_mode": "生成翻译图片",
-    "translate_default_size_strategy": "保留原比例",
-    "translate_default_ratio": "1:1",
-    "translate_default_ratio_method": "补边(白色)",
-    "translate_default_resolution": "1K",
-    "translate_default_compliance_template": "default",
-    "translate_default_model": PRIMARY_IMAGE_MODEL,
-    "translate_text_model": PRIMARY_IMAGE_MODEL,
-    "translate_fast_text_mode": True,
-    "translate_text_workers": 2,
-    "translate_force_english_output": True,
-    "translate_english_max_retries": 2,
-    "translate_cleanup_chinese_overlay": True,
-    "translate_bg_max_concurrent": 2,
-    "relay_api_base": RELAY_API_BASE,
-    "relay_api_key": "",
-    "relay_default_image_model": "gemini-3.1-flash-image-preview",
-    "relay_analysis_model": "gemini-3.1-flash-lite-preview",
-    "enforce_english_text": False,
-    "english_text_max_retries": 1,
 }
 
-DEFAULT_API_KEYS = {"keys": [], "current_index": 0}
+DEFAULT_PROVIDERS_DATA = {"providers": [], "current_id": ""}
+DEFAULT_TASKS_DATA = {"tasks": []}
 
 DEFAULT_COMPLIANCE = {
     "presets": {
@@ -443,53 +354,21 @@ DEFAULT_COMPLIANCE = {
     "custom_blacklist": [],
     "whitelist": [],
     "user_custom": {},
-    "translate_templates": {
-        "default": {
-            "name": "默认合规词模板",
-            "words": [
-                "FDA",
-                "CE",
-                "ISO",
-                "certified",
-                "approved",
-                "medical",
-                "cure",
-                "treat",
-                "heal",
-                "best",
-                "perfect",
-                "100%",
-                "guarantee",
-                "forever",
-                "only",
-                "No.1",
-                "first",
-                "authentic",
-                "genuine",
-                "official",
-                "organic",
-                "natural",
-                "pure",
-                "real",
-            ],
-            "enabled": True,
-        }
-    },
 }
 
 # ==================== 标题模板 - 中英双语版 ====================
 DEFAULT_TITLE_TEMPLATES = {
     "default": {
-        "name": "🎯 TEMU标准优化 (中英双语)",
-        "desc": "完整规则，中英双语输出，英文180-250字符",
+        "name": "🎯 TEMU标准优化 (英文 + 目标语言)",
+        "desc": "完整规则，生成英文 + 目标语言标题，英文180-250字符",
         "prompt": """ROLE You are an ecommerce title optimization expert for TEMU and similar marketplace search systems. Your job is to generate high exposure high clarity English product titles based ONLY on the product information I provide. Never invent features materials sizes certifications compatibility or quantities that are not explicitly given or clearly visible.
 
 INPUT I will provide one of the following A Product text description and attributes B One image or multiple images C A mix of text and images
 
-TASK Generate exactly three product titles for the same product. Each title must have BOTH English and Chinese versions. Each title must be different in keyword focus and conversion angle while staying truthful.
+TASK Generate exactly three product titles for the same product. Each title must have BOTH English and {target_language_name} versions. Each title must be different in keyword focus and conversion angle while staying truthful.
 
 HARD OUTPUT RULES
-1 Each title must have TWO lines: first line English, second line Chinese translation
+1 Each title must have TWO lines: first line English, second line {target_language_name} translation
 2 English titles must be between 180 and 250 characters (CRITICAL - count carefully)
 3 Output must be plain text only
 4 Do not include any special symbols or punctuation at all. This means no vertical bar slash ampersand hash comma colon semicolon dash hyphen underscore parentheses brackets quotes plus sign equals sign period or emoji. Use letters numbers and spaces only
@@ -530,15 +409,15 @@ LANGUAGE QUALITY
 Use clear natural marketplace English
 Use Title Case style capitalization for major words
 No grammar errors
-Chinese translation must be accurate and natural
+{target_language_name} translation must be accurate and natural
 
 OUTPUT FORMAT (exactly 6 lines, no labels):
 [English Title 1 - 180-250 chars]
-[中文标题1]
+[{target_language_name} Title 1]
 [English Title 2 - 180-250 chars]
-[中文标题2]
+[{target_language_name} Title 2]
 [English Title 3 - 180-250 chars]
-[中文标题3]
+[{target_language_name} Title 3]
 
 Product information:
 {product_info}
@@ -547,39 +426,39 @@ NOW GENERATE the six lines.""",
         "enabled": True,
     },
     "simple": {
-        "name": "⚡ 简洁高效 (中英双语)",
-        "desc": "快速生成，中英双语",
-        "prompt": """Generate 3 product titles for TEMU marketplace. Each title needs English and Chinese versions.
+        "name": "⚡ 简洁高效 (英文 + 目标语言)",
+        "desc": "快速生成英文 + 目标语言标题",
+        "prompt": """Generate 3 product titles for TEMU marketplace. Each title needs English and {target_language_name} versions.
 
 Product: {product_info}
 
 Rules:
 - English: 180-250 characters, plain text, letters numbers spaces only
-- Chinese: accurate translation
+- {target_language_name}: accurate translation
 - No symbols, no brand names unless provided
 - No meaningless words like Best Cheap Hot
 - Title Case capitalization
 
-Output exactly 6 lines (English then Chinese for each):
+Output exactly 6 lines (English then {target_language_name} for each):
 [English Title 1]
-[中文标题1]
+[{target_language_name} Title 1]
 [English Title 2]
-[中文标题2]
+[{target_language_name} Title 2]
 [English Title 3]
-[中文标题3]""",
+[{target_language_name} Title 3]""",
         "enabled": True,
     },
     "detailed": {
-        "name": "📝 详细规格 (中英双语)",
+        "name": "📝 详细规格 (英文 + 目标语言)",
         "desc": "适合规格复杂的商品",
-        "prompt": """You are a TEMU title expert. Create 3 bilingual titles.
+        "prompt": """You are a TEMU title expert. Create 3 bilingual titles in English and {target_language_name}.
 
 Product details:
 {product_info}
 
 Requirements:
 - English: 180-250 characters, plain text
-- Chinese: natural translation
+- {target_language_name}: natural translation
 - Include specifications if provided
 - No invented features
 - Title Case capitalization
@@ -591,17 +470,17 @@ Title 3: Unique features + target user (差异化)
 
 Output exactly 6 lines:
 [English Title 1]
-[中文标题1]
+[{target_language_name} Title 1]
 [English Title 2]
-[中文标题2]
+[{target_language_name} Title 2]
 [English Title 3]
-[中文标题3]""",
+[{target_language_name} Title 3]""",
         "enabled": True,
     },
     "image_analysis": {
-        "name": "🖼️ 图片智能分析 (中英双语)",
-        "desc": "根据商品图片AI分析生成双语标题",
-        "prompt": """Analyze the product image(s) and generate 3 bilingual titles for TEMU marketplace.
+        "name": "🖼️ 图片智能分析 (英文 + 目标语言)",
+        "desc": "根据商品图片AI分析生成英文 + 目标语言标题",
+        "prompt": """Analyze the product image(s) and generate 3 bilingual titles for TEMU marketplace in English and {target_language_name}.
 
 Additional info: {product_info}
 
@@ -612,18 +491,18 @@ Based on what you see in the image:
 
 RULES:
 - English: 180-250 characters, plain text, letters numbers spaces only
-- Chinese: accurate natural translation
+- {target_language_name}: accurate natural translation
 - Do NOT invent features not visible
 - Do NOT include brand names unless clearly visible
 - Title Case capitalization
 
 Output exactly 6 lines:
 [English Title 1]
-[中文标题1]
+[{target_language_name} Title 1]
 [English Title 2]
-[中文标题2]
+[{target_language_name} Title 2]
 [English Title 3]
-[中文标题3]""",
+[{target_language_name} Title 3]""",
         "enabled": True,
     },
 }
@@ -634,80 +513,47 @@ DEFAULT_PROMPTS = {
 Product name: {product_name}
 Product detail: {product_detail}
 Return valid JSON only. ALL text in English.""",
-    "requirements_gen": """你是电商组图策划专家。基于商品信息生成中文图需。
-商品: {product_name} ({category})
-特征: {features}
-标签: {tags}
-需要类型: {types}
-为每张图生成JSON数组:
-[{{"type_key": "xxx", "type_name": "名称", "index": 1, "topic": "主题30字", "scene": "场景80字", "copy": "文案50字"}}]
-规则: 不编造未提供信息, 不提认证/医疗/绝对化, 尺寸图标注用inch和cm, 返回有效JSON""",
-    "en_copy_gen": """Generate English copy for product images.
+    "requirements_gen": """You are an ecommerce image-planning expert. Generate product image requirements in {output_language_name}.
+Product: {product_name} ({category})
+Features: {features}
+Tags: {tags}
+Requested image types: {types}
+Return a JSON array:
+[{{"type_key": "xxx", "type_name": "type name in {output_language_name}", "index": 1, "topic": "topic within 30 chars in {output_language_name}", "scene": "scene within 80 chars in {output_language_name}", "copy": "copy within 50 chars in {output_language_name}"}}]
+Rules: write type_name topic scene and copy in {output_language_name}. Do not invent missing facts. Avoid certifications medical claims and absolutes. For size diagrams, keep unit labels as inch and cm. Return valid JSON only.""",
+    "en_copy_gen": """Generate product image copy in {output_language_name}.
 Product: {product_name}
 Category: {category}
 Requirements: {requirements}
 Generate JSON array:
 [{{"type_key": "xxx", "index": 1, "headline": "max 40 chars", "subline": "max 60 chars", "badge": "max 20 chars or empty"}}]
-CRITICAL: Simple American English ONLY. Letters numbers spaces ONLY. NO Chinese/Japanese/Korean characters. Return valid JSON.""",
+CRITICAL: Use concise natural {output_language_name} only. Keep each field short and readable for ecommerce images. Return valid JSON.""",
     "image_prompt": """Professional ecommerce product image.
 Product: {product_name}
 Category: {category}
 Image type: {image_type}
 Style: {style_hint}
 Scene: {scene}
-Text overlay (ENGLISH ONLY):
+Text overlay ({output_language_name} ONLY):
 {text_content}
-CRITICAL: Product must match reference. ALL text MUST be ENGLISH only. NO Chinese/Japanese/Korean characters. Avoid any non-English glyphs. Professional ecommerce style.
+CRITICAL: Product must match reference. If the image contains text, use {output_language_name} only. Professional ecommerce style.
 Aspect ratio: {aspect_ratio}""",
     "size_image_prompt": """Professional product dimension diagram.
 Product: {product_name}
 Style: Clean technical illustration on white background
-REQUIRED: Clear bidirectional arrow lines. Dual unit measurements: XX.XX inch / XX.X cm. Use word "inch" NOT "in". Clean sans-serif font. ALL text in ENGLISH only. NO Chinese/Japanese/Korean characters.
+REQUIRED: Clear bidirectional arrow lines. Dual unit measurements: XX.XX inch / XX.X cm. Use word "inch" NOT "in". Clean sans-serif font. Use {output_language_name} for descriptive labels and notes while keeping inch and cm for units.
 Aspect ratio: {aspect_ratio}""",
-    "image_text_extract": """You are an OCR assistant for ecommerce images. Extract ALL visible text exactly as it appears.
-Return JSON only in this format:
-{{"language": "auto", "lines": ["line1", "line2"]}}
+    "translation_image_prompt": """Translate this ecommerce image into {output_language_name} while preserving the original layout as much as possible.
+Goal: compliance-first translation, not creative redesign.
 Rules:
-- Keep line order top to bottom
-- If no text, return {{"language":"auto","lines":[]}}
-Source language hint: {source_lang}""",
-    "image_text_translate": """You are a professional ecommerce translator for Amazon-style listings.
-Translate each line to {target_lang} from {source_lang}. Preserve meaning and keep the same number of lines.
-Style: {style_hint}
-Avoid these compliance terms in output (if any): {avoid_terms}
-CRITICAL:
-- If target language is English, output must be natural US ecommerce English only
-- No Chinese/Japanese/Korean characters in translated output
-- Do not keep mixed bilingual text in one line
-- Avoid prohibited absolute claims (best, no.1, guaranteed cure) unless explicitly required by policy-safe wording
-Return JSON array of translated lines only.
-Lines JSON: {lines_json}""",
-    "image_text_extract_translate": """You are an OCR + translator for ecommerce images (Amazon style).
-From the input image, first extract visible source text lines (top to bottom), then translate to {target_lang}.
-Source language hint: {source_lang}
-Style: {style_hint}
-Avoid these compliance terms in output (if any): {avoid_terms}
-Return JSON only in this exact format:
-{{"language":"auto","source_lines":["line1","line2"],"translated_lines":["line1_t","line2_t"]}}
-Rules:
-- Keep order by visual reading sequence
-- Keep source_lines and translated_lines aligned by index
-- If target language is English, translated_lines must be US English only (no Chinese/Japanese/Korean characters)
-- If no text, return empty arrays""",
-    "image_translate_prompt": """You are given a reference ecommerce product image.
-Translate all visible text from {source_lang} to {target_lang}.
-Style: {style_hint}
-Layout: {layout_hint}
-Avoid these compliance terms in output (if any): {avoid_terms}
-Rules:
-- Preserve layout typography colors and all non text elements
-- Remove non-product Chinese overlay text blocks corner labels and stamp-like decorative Chinese marks when they are not essential to product meaning
-- For removed Chinese overlays, reconstruct a natural clean background in the same style
-- Keep brand trademark certification logos and legally required product markings unchanged
-- If a text segment is already in target language keep it
-- If target language is English, all rendered text must be US English only with no Chinese/Japanese/Korean characters
-- Use concise, policy-safe ecommerce wording suitable for Amazon and TEMU platform rules
-Output image only.""",
+- Keep product, composition, visual hierarchy, icon positions and structure as close to the original as possible.
+- Replace only visible text and compliance-risk words when needed.
+- Do not add new selling claims, badges, certifications or decorations.
+- If any source text is unclear, use the safest neutral wording.
+- The final image text must use {output_language_name} only.
+- Respect these compliance constraints:
+{compliance_rules}
+Aspect ratio: {aspect_ratio}""",
 }
 
 DEFAULT_TEMPLATES = {
@@ -721,58 +567,58 @@ DEFAULT_TEMPLATES = {
             "order": 1,
         },
         "feature": {
-            "name": "功能卖点",
+            "name": "功能卖点图",
             "icon": "⭐",
-            "desc": "核心功能展示图",
+            "desc": "突出商品核心卖点与优势的说明图",
             "hint": "Feature highlights with callouts",
             "enabled": True,
             "order": 2,
         },
         "scene": {
-            "name": "场景应用",
+            "name": "场景应用图",
             "icon": "🏠",
-            "desc": "使用场景展示",
+            "desc": "展示商品在真实使用场景中的效果",
             "hint": "Lifestyle scene, product in use",
             "enabled": True,
             "order": 3,
         },
         "detail": {
-            "name": "细节特写",
+            "name": "细节特写图",
             "icon": "🔍",
-            "desc": "工艺细节放大",
+            "desc": "放大展示材质、工艺和细节做工",
             "hint": "Macro close-up shot, texture details",
             "enabled": True,
             "order": 4,
         },
         "size": {
-            "name": "尺寸规格",
+            "name": "尺寸规格图",
             "icon": "📐",
-            "desc": "尺寸标注图",
+            "desc": "展示尺寸、规格或参数信息的说明图",
             "hint": "Dimension diagram with inch/cm",
             "enabled": True,
             "order": 5,
             "special": True,
         },
         "compare": {
-            "name": "对比优势",
+            "name": "对比优势图",
             "icon": "⚖️",
-            "desc": "竞品对比图",
+            "desc": "用对比方式突出商品优势与差异点",
             "hint": "Side by side comparison",
             "enabled": True,
             "order": 6,
         },
         "package": {
-            "name": "清单展示",
+            "name": "包装清单图",
             "icon": "📦",
-            "desc": "包装内容物",
+            "desc": "展示包装内包含的商品与配件内容",
             "hint": "Flat lay of package contents",
             "enabled": True,
             "order": 7,
         },
         "steps": {
-            "name": "使用步骤",
+            "name": "操作引导图",
             "icon": "📋",
-            "desc": "操作步骤图",
+            "desc": "用于说明安装、使用流程或操作顺序的信息图",
             "hint": "Step by step visual guide",
             "enabled": True,
             "order": 8,
@@ -815,7 +661,144 @@ DEFAULT_TEMPLATES = {
             "order": 5,
         },
     },
+    "translation_types": {
+        "preserve_layout": {
+            "name": "原图保版翻译",
+            "icon": "🈯",
+            "desc": "尽量保留原图结构、排版和视觉层级，只替换目标语言文案。",
+            "enabled": True,
+            "order": 1,
+            "prompt": DEFAULT_PROMPTS["translation_image_prompt"],
+        },
+        "compliance_replace": {
+            "name": "合规替换翻译",
+            "icon": "🛡️",
+            "desc": "在翻译时同步替换高风险表达，优先满足合规要求。",
+            "enabled": True,
+            "order": 2,
+            "prompt": DEFAULT_PROMPTS["translation_image_prompt"]
+            + "\nExtra rule: When the source contains risky claims or compliance-sensitive wording, replace them with safer alternatives instead of direct literal translation.",
+        },
+        "minimal_change": {
+            "name": "文案最小变更翻译",
+            "icon": "✂️",
+            "desc": "尽量少改原图内容，只处理必要的文字替换和风险修正。",
+            "enabled": True,
+            "order": 3,
+            "prompt": DEFAULT_PROMPTS["translation_image_prompt"]
+            + "\nExtra rule: Keep all non-essential wording changes to a minimum and avoid rewriting visual structure or emphasis unless required for compliance.",
+        },
+    },
 }
+
+TEMPLATE_PAGE_META = {
+    "combo_types": {
+        "title": "智能组图模板",
+        "desc": "用于“智能组图”页面中的可选组图类型，决定系统会生成哪些图片结构。",
+        "page_label": "智能组图",
+    },
+    "smart_types": {
+        "title": "快速出图模板",
+        "desc": "用于“快速出图”页面中的快捷模板选择，适合快速生成卖点图、场景图、细节图等标准类型。",
+        "page_label": "快速出图",
+    },
+    "translation_types": {
+        "title": "翻译保版模板",
+        "desc": "用于“快速出图 > 合规翻译”模式，控制原图保留程度与文案替换策略。",
+        "page_label": "快速出图（翻译保版）",
+    },
+}
+
+TEMPLATE_ITEM_META = {
+    "combo_types": {
+        "main": {
+            "recommended_name": "主图白底",
+            "recommended_desc": "用于生成标准白底主图，突出商品主体，适合作为主展示图。",
+            "usage_note": "适合首页主图、白底展示、商品主体突出场景。",
+        },
+        "feature": {
+            "recommended_name": "功能卖点图",
+            "recommended_desc": "用于集中展示商品的核心优势、功能亮点或主打卖点。",
+            "usage_note": "适合强调功能亮点、优势对比、核心卖点说明。",
+        },
+        "scene": {
+            "recommended_name": "场景应用图",
+            "recommended_desc": "用于呈现商品在真实场景中的使用方式和氛围。",
+            "usage_note": "适合家居、户外、办公、日常使用等场景化表达。",
+        },
+        "detail": {
+            "recommended_name": "细节特写图",
+            "recommended_desc": "用于放大展示材质、纹理、结构、做工等细节信息。",
+            "usage_note": "适合近景细节、质感说明、工艺展示。",
+        },
+        "size": {
+            "recommended_name": "尺寸规格图",
+            "recommended_desc": "用于说明尺寸、规格、容量、参数等信息。",
+            "usage_note": "适合需要标注尺寸、单位和参数说明的商品。",
+        },
+        "compare": {
+            "recommended_name": "对比优势图",
+            "recommended_desc": "用于通过对比方式突出商品优点与差异。",
+            "usage_note": "适合和竞品、旧款或不同方案做对比展示。",
+        },
+        "package": {
+            "recommended_name": "包装清单图",
+            "recommended_desc": "用于展示包装内包含的主体商品、配件和清单。",
+            "usage_note": "适合套装、组合商品、带配件商品。",
+        },
+        "steps": {
+            "recommended_name": "操作引导图",
+            "recommended_desc": "用于说明安装流程、操作顺序或使用步骤。",
+            "usage_note": "适合需要分步骤教学、安装说明、使用引导的商品。",
+        },
+    },
+    "smart_types": {
+        "S1": {
+            "recommended_name": "卖点图",
+            "recommended_desc": "用于快速突出商品核心优势，适合标准卖点表达。",
+            "usage_note": "适合快速出图中的单卖点强化展示。",
+        },
+        "S2": {
+            "recommended_name": "场景图",
+            "recommended_desc": "用于快速展示商品在场景中的呈现效果。",
+            "usage_note": "适合快速生成带氛围感的场景图。",
+        },
+        "S3": {
+            "recommended_name": "细节图",
+            "recommended_desc": "用于快速突出商品局部细节和工艺表现。",
+            "usage_note": "适合强调材质、纹理、结构亮点。",
+        },
+        "S4": {
+            "recommended_name": "对比图",
+            "recommended_desc": "用于快速通过对比方式体现差异和优势。",
+            "usage_note": "适合有限篇幅下的优劣对比表达。",
+        },
+        "S5": {
+            "recommended_name": "规格图",
+            "recommended_desc": "用于快速展示尺寸、参数或规格信息。",
+            "usage_note": "适合尺寸参数明确、信息说明型图片。",
+        },
+    },
+    "translation_types": {
+        "preserve_layout": {
+            "recommended_name": "原图保版翻译",
+            "recommended_desc": "尽量保留原图结构、排版和视觉层级，只替换目标语言文案。",
+            "usage_note": "适合对原图布局要求高的标准保版翻译任务。",
+        },
+        "compliance_replace": {
+            "recommended_name": "合规替换翻译",
+            "recommended_desc": "在翻译时同步替换高风险表达，优先满足合规要求。",
+            "usage_note": "适合平台规则严格、需要主动替换风险词的场景。",
+        },
+        "minimal_change": {
+            "recommended_name": "文案最小变更翻译",
+            "recommended_desc": "尽量少改原图内容，只处理必要的文字替换和风险修正。",
+            "usage_note": "适合尽量维持原图表达，只做必要翻译修改的场景。",
+        },
+    },
+}
+
+TEMPLATE_GROUP_ORDER = ["combo_types", "smart_types", "translation_types"]
 
 
 # ==================== 数据管理 ====================
@@ -838,103 +821,11 @@ def save_json(fp, data):
         return False
 
 
-def _to_bool(value, default=False):
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return default
-    if isinstance(value, (int, float)):
-        return value != 0
-    if isinstance(value, str):
-        v = value.strip().lower()
-        if v in {"1", "true", "yes", "y", "on", "t"}:
-            return True
-        if v in {"0", "false", "no", "n", "off", "f"}:
-            return False
-    return default
-
-
 def get_settings():
     s = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
     for k, v in DEFAULT_SETTINGS.items():
         if k not in s:
             s[k] = v
-    if "translate_batch_size" not in s:
-        s["translate_batch_size"] = s.get(
-            "translate_max_upload", DEFAULT_SETTINGS.get("translate_batch_size", 20)
-        )
-    # 提升普通用户默认限额到100次（如原值更低）
-    try:
-        s["daily_limit_user"] = max(int(s.get("daily_limit_user", 100)), 100)
-    except Exception:
-        s["daily_limit_user"] = 100
-    # 当前默认 Gemini 出图模型
-    s["default_model"] = PRIMARY_IMAGE_MODEL
-    s["translate_default_model"] = PRIMARY_IMAGE_MODEL
-    s["translate_text_model"] = PRIMARY_IMAGE_MODEL
-    s["default_resolution"] = "1K"
-    s["translate_default_resolution"] = "1K"
-    if s.get("default_image_provider") not in ("Gemini", "中转站"):
-        s["default_image_provider"] = "Gemini"
-    s["relay_api_base"] = str(
-        s.get("relay_api_base", RELAY_API_BASE) or RELAY_API_BASE
-    ).rstrip("/")
-    s["relay_api_key"] = str(s.get("relay_api_key", "") or "").strip()
-    if s.get("relay_default_image_model") not in RELAY_IMAGE_MODELS:
-        s["relay_default_image_model"] = "gemini-3.1-flash-image-preview"
-    if s.get("relay_analysis_model") not in RELAY_ANALYSIS_MODELS:
-        s["relay_analysis_model"] = "gemini-3.1-flash-lite-preview"
-    try:
-        workers = int(
-            s.get(
-                "translate_text_workers",
-                DEFAULT_SETTINGS.get("translate_text_workers", 2),
-            )
-        )
-    except Exception:
-        workers = DEFAULT_SETTINGS.get("translate_text_workers", 2)
-    s["translate_text_workers"] = max(1, min(6, workers))
-    s["translate_force_english_output"] = _to_bool(
-        s.get(
-            "translate_force_english_output",
-            DEFAULT_SETTINGS.get("translate_force_english_output", True),
-        ),
-        True,
-    )
-    s["translate_cleanup_chinese_overlay"] = _to_bool(
-        s.get(
-            "translate_cleanup_chinese_overlay",
-            DEFAULT_SETTINGS.get("translate_cleanup_chinese_overlay", True),
-        ),
-        True,
-    )
-    try:
-        bg_workers = int(
-            s.get(
-                "translate_bg_max_concurrent",
-                DEFAULT_SETTINGS.get("translate_bg_max_concurrent", 2),
-            )
-        )
-    except Exception:
-        bg_workers = DEFAULT_SETTINGS.get("translate_bg_max_concurrent", 2)
-    s["translate_bg_max_concurrent"] = max(1, min(6, bg_workers))
-    s["allow_user_passwordless_login"] = _to_bool(
-        s.get(
-            "allow_user_passwordless_login",
-            DEFAULT_SETTINGS.get("allow_user_passwordless_login", False),
-        ),
-        False,
-    )
-    try:
-        en_retries = int(
-            s.get(
-                "translate_english_max_retries",
-                DEFAULT_SETTINGS.get("translate_english_max_retries", 2),
-            )
-        )
-    except Exception:
-        en_retries = DEFAULT_SETTINGS.get("translate_english_max_retries", 2)
-    s["translate_english_max_retries"] = max(1, min(5, en_retries))
     return s
 
 
@@ -942,190 +833,1494 @@ def save_settings(s):
     return save_json(SETTINGS_FILE, s)
 
 
-def _normalize_api_keys_data(data):
-    if data is None:
-        return {"keys": [], "current_index": 0}
-    if isinstance(data, list):
-        data = {"keys": data, "current_index": 0}
-    if not isinstance(data, dict):
-        return {"keys": [], "current_index": 0}
-    keys = data.get("keys", [])
-    if isinstance(keys, list) and keys and all(isinstance(k, str) for k in keys):
-        keys = [
-            {"key": k.strip(), "enabled": True}
-            for k in keys
-            if isinstance(k, str) and k.strip()
-        ]
-    if isinstance(keys, list) and keys and all(isinstance(k, dict) for k in keys):
-        cleaned = []
-        for k in keys:
-            kk = (k.get("key") or "").strip()
-            if kk:
-                cleaned.append({**k, "key": kk})
-        keys = cleaned
-    if not isinstance(keys, list):
-        keys = []
-    data["keys"] = keys
-    if "current_index" not in data or not isinstance(data["current_index"], int):
-        data["current_index"] = 0
-    return data
+def apply_proxy_settings(settings=None):
+    s = settings or get_settings()
+    mode = (s.get("proxy_mode") or "system").strip().lower()
+    proxy_url = (s.get("proxy_url") or "").strip()
+    if mode == "none":
+        for key in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ]:
+            os.environ.pop(key, None)
+        return "none", ""
+    if mode == "manual" and proxy_url:
+        for key in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ]:
+            os.environ[key] = proxy_url
+        return "manual", proxy_url
+    return "system", proxy_url
 
 
-def get_api_keys():
-    data = None
-    if platform_database_enabled():
-        try:
-            with session_scope() as session:
-                data = load_secure_api_keys_payload(session)
-        except Exception:
-            data = None
-    if data is None:
-        data = load_json(API_KEYS_FILE, DEFAULT_API_KEYS)
-    data = _normalize_api_keys_data(data)
-    if data.get("keys"):
-        save_api_keys(data)
-    return data
+def keychain_available():
+    return DESKTOP_MODE and os.name == "posix" and Path("/usr/bin/security").exists()
 
 
-def _has_valid_system_key():
-    keys_data = get_api_keys()
-    keys = keys_data.get("keys", [])
-    now = datetime.now().isoformat()
-    valid = [
-        k
-        for k in keys
-        if k.get("enabled", True) and (not k.get("expires") or k.get("expires") > now)
-    ]
-    return len(valid) > 0
+def _keychain_account(provider_id: str) -> str:
+    return f"provider-{provider_id}"
 
 
-def _has_system_service_access():
-    return has_system_service_access(_has_valid_system_key(), get_settings())
-
-
-def bootstrap_env_system_key():
+def set_keychain_secret(account: str, secret: str) -> tuple:
+    if not keychain_available() or not secret:
+        return False, "keychain_unavailable"
     try:
-        env_key = (
-            os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or ""
-        ).strip()
-        if not env_key:
-            return
-        data = get_api_keys()
-        if data.get("keys"):
-            return
-        data["keys"] = [{"key": env_key, "enabled": True}]
-        data["current_index"] = 0
-        save_api_keys(data)
+        subprocess.run(
+            [
+                "/usr/bin/security",
+                "add-generic-password",
+                "-U",
+                "-a",
+                account,
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-w",
+                secret,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return True, ""
+    except subprocess.CalledProcessError as e:
+        return False, (e.stderr or e.stdout or str(e)).strip()
+
+
+def get_keychain_secret(account: str) -> str:
+    if not keychain_available() or not account:
+        return ""
+    try:
+        proc = subprocess.run(
+            [
+                "/usr/bin/security",
+                "find-generic-password",
+                "-a",
+                account,
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-w",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return (proc.stdout or "").strip()
+    except subprocess.CalledProcessError:
+        return ""
+
+
+def delete_keychain_secret(account: str):
+    if not keychain_available() or not account:
+        return
+    try:
+        subprocess.run(
+            [
+                "/usr/bin/security",
+                "delete-generic-password",
+                "-a",
+                account,
+                "-s",
+                KEYCHAIN_SERVICE,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
     except Exception:
         return
 
 
-def save_api_keys(data):
-    clean_data = _normalize_api_keys_data(data)
-    if platform_database_enabled() and platform_encryption_available():
-        try:
-            with session_scope() as session:
-                save_secure_api_keys_payload(
-                    session, clean_data, actor_label="streamlit-admin"
-                )
-            return True
-        except Exception:
-            pass
-    return save_json(API_KEYS_FILE, clean_data)
+def _new_provider_id():
+    return hashlib.md5(
+        f"{datetime.now().timestamp()}{random.random()}".encode()
+    ).hexdigest()[:10]
 
 
-def _parse_env_bool(name):
-    return _to_bool(os.getenv(name), default=None)
+def _normalize_provider_entry(entry):
+    if not isinstance(entry, dict):
+        return None
+    pid = (entry.get("id") or "").strip() or _new_provider_id()
+    name = (entry.get("name") or "").strip() or "个人提供商"
+    provider_type = (entry.get("provider_type") or "gemini").strip().lower()
+    api_key = (entry.get("api_key") or "").strip()
+    base_url = (entry.get("base_url") or "").strip()
+    title_model = (entry.get("title_model") or "").strip()
+    vision_model = (entry.get("vision_model") or "").strip()
+    image_model = (entry.get("image_model") or "").strip()
+    enabled = bool(entry.get("enabled", True))
+    is_default = bool(entry.get("is_default", False))
+    secret_storage = (entry.get("secret_storage") or "plain").strip().lower()
+    keychain_account = (
+        entry.get("keychain_account") or ""
+    ).strip() or _keychain_account(pid)
+    return {
+        "id": pid,
+        "name": name,
+        "provider_type": provider_type,
+        "api_key": api_key,
+        "base_url": base_url,
+        "title_model": title_model,
+        "vision_model": vision_model,
+        "image_model": image_model,
+        "enabled": enabled,
+        "is_default": is_default,
+        "secret_storage": secret_storage,
+        "keychain_account": keychain_account,
+    }
 
 
-def _parse_fixed_keys(raw_text):
-    if not raw_text:
-        return []
-    keys, seen = [], set()
-    for item in re.split(r"[\n,;]+", raw_text):
-        key = (item or "").strip()
-        if not key or key in seen:
+def _normalize_providers_data(data):
+    if data is None:
+        data = DEFAULT_PROVIDERS_DATA.copy()
+    if isinstance(data, list):
+        data = {"providers": data, "current_id": ""}
+    if not isinstance(data, dict):
+        data = DEFAULT_PROVIDERS_DATA.copy()
+    providers = data.get("providers", [])
+    if not isinstance(providers, list):
+        providers = []
+    cleaned = []
+    seen_ids = set()
+    for p in providers:
+        normalized = _normalize_provider_entry(p)
+        if not normalized:
             continue
-        seen.add(key)
-        keys.append(key)
-    return keys
+        if normalized["id"] in seen_ids:
+            normalized["id"] = _new_provider_id()
+        seen_ids.add(normalized["id"])
+        cleaned.append(normalized)
+    data["providers"] = cleaned
+    current_id = (data.get("current_id") or "").strip()
+    data["current_id"] = current_id
+    return data
 
 
-def _build_fixed_key_entries(keys):
-    return [
-        {"key": k, "name": f"Fixed-{i + 1}", "enabled": True}
-        for i, k in enumerate(keys)
-    ]
+def save_providers(data):
+    return save_json(PROVIDERS_FILE, data)
 
 
-def _sync_fixed_api_keys_from_env():
-    raw = (os.getenv("SYSTEM_API_KEYS_FIXED") or "").strip()
-    fixed_keys = _parse_fixed_keys(raw)
-    if not fixed_keys:
-        return
-    mode = (os.getenv("SYSTEM_API_KEYS_SYNC_MODE") or "if_empty").strip().lower()
-    data = get_api_keys()
-    current = data.get("keys", [])
-    current_clean = [
-        k for k in current if isinstance(k, dict) and (k.get("key") or "").strip()
-    ]
-    current_keys = [k.get("key", "").strip() for k in current_clean]
+def resolve_provider_api_key(provider: dict) -> str:
+    if not provider:
+        return ""
+    if provider.get("secret_storage") == "keychain":
+        return get_keychain_secret(provider.get("keychain_account"))
+    return (provider.get("api_key") or "").strip()
+
+
+def persist_provider_secret(provider: dict, api_key: str):
+    api_key = (api_key or "").strip()
+    if not provider:
+        return provider, False
+    if keychain_available() and api_key:
+        ok, _ = set_keychain_secret(
+            provider.get("keychain_account")
+            or _keychain_account(provider.get("id", "")),
+            api_key,
+        )
+        if ok:
+            provider["secret_storage"] = "keychain"
+            provider["keychain_account"] = provider.get(
+                "keychain_account"
+            ) or _keychain_account(provider.get("id", ""))
+            provider["api_key"] = ""
+            return provider, True
+    provider["secret_storage"] = "plain"
+    provider["api_key"] = api_key
+    return provider, False
+
+
+def migrate_provider_secrets(data):
     changed = False
-
-    if mode == "replace":
-        target_entries = _build_fixed_key_entries(fixed_keys)
-        if current_keys != fixed_keys:
-            data["keys"] = target_entries
-            data["current_index"] = 0
-            changed = True
-    elif mode == "merge":
-        existing = set(current_keys)
-        merged = list(current_clean)
-        for i, key in enumerate(fixed_keys):
-            if key in existing:
-                continue
-            merged.append({"key": key, "name": f"Fixed-{i + 1}", "enabled": True})
-            changed = True
-        if changed:
-            data["keys"] = merged
-            data["current_index"] = 0
-    else:
-        if not current_clean:
-            data["keys"] = _build_fixed_key_entries(fixed_keys)
-            data["current_index"] = 0
-            changed = True
-
+    for provider in data.get("providers", []):
+        raw_key = (provider.get("api_key") or "").strip()
+        if (
+            raw_key
+            and provider.get("secret_storage") != "keychain"
+            and keychain_available()
+        ):
+            provider, moved = persist_provider_secret(provider, raw_key)
+            changed = changed or moved
     if changed:
-        save_api_keys(data)
+        save_providers(data)
+    return data
 
 
-def bootstrap_runtime_config():
+def _bootstrap_env_provider(data):
     s = get_settings()
+    env_key = (os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or "").strip()
+    if not env_key:
+        return data
+    if data.get("providers"):
+        return data
+    provider = {
+        "id": _new_provider_id(),
+        "name": "环境变量Key",
+        "provider_type": "gemini",
+        "api_key": env_key,
+        "base_url": "",
+        "title_model": s.get("default_title_model", "gemini-3.1-flash-lite-preview"),
+        "vision_model": s.get("default_vision_model", "gemini-3.1-flash-lite-preview"),
+        "image_model": s.get("default_model", "gemini-3.1-flash-image-preview"),
+        "enabled": True,
+        "is_default": True,
+    }
+    data["providers"] = [provider]
+    data["current_id"] = provider["id"]
+    return data
+
+
+def get_providers():
+    data = load_json(PROVIDERS_FILE, DEFAULT_PROVIDERS_DATA)
+    data = _normalize_providers_data(data)
+    if not data.get("providers"):
+        data = _bootstrap_env_provider(data)
+    data = migrate_provider_secrets(data)
+    save_providers(data)
+    return data
+
+
+def get_active_provider():
+    data = get_providers()
+    providers = [p for p in data.get("providers", []) if p.get("enabled", True)]
+    current_id = (data.get("current_id") or "").strip()
+    current = next((p for p in providers if p.get("id") == current_id), None)
+    if not current and providers:
+        current = next((p for p in providers if p.get("is_default")), None)
+        current = current or providers[0]
+        data["current_id"] = current.get("id")
+        for p in data.get("providers", []):
+            p["is_default"] = p.get("id") == current.get("id")
+        save_providers(data)
+    if current:
+        current = current.copy()
+        current["api_key"] = resolve_provider_api_key(current)
+    return current
+
+
+def set_current_provider(provider_id: str):
+    data = get_providers()
+    providers = data.get("providers", [])
+    for p in providers:
+        p["is_default"] = p.get("id") == provider_id
+    data["current_id"] = provider_id
+    save_providers(data)
+
+
+def get_provider_by_id(provider_id: str):
+    data = get_providers()
+    provider = next(
+        (p for p in data.get("providers", []) if p.get("id") == provider_id), None
+    )
+    if provider:
+        provider = provider.copy()
+        provider["api_key"] = resolve_provider_api_key(provider)
+    return provider
+
+
+def validate_provider_config(
+    name: str,
+    provider_type: str,
+    api_key: str,
+    base_url: str,
+):
+    errors = []
+    if not (name or "").strip():
+        errors.append("请填写提供商名称。")
+    if not (api_key or "").strip():
+        errors.append("请填写 API Key。")
+    normalized_type = (provider_type or "gemini").strip().lower()
+    normalized_base = (base_url or "").strip()
+    if normalized_type == "relay" and not normalized_base:
+        errors.append("Relay 类型必须填写 Base URL。")
+    if normalized_base and not re.match(r"^https?://", normalized_base):
+        errors.append("Base URL 必须以 http:// 或 https:// 开头。")
+    return errors
+
+
+def provider_has_active_tasks(provider_id: str):
+    if not provider_id:
+        return False
+    for task in list_tasks():
+        if task.get("status") not in {"queued", "running"}:
+            continue
+        payload = task.get("payload", {}) or {}
+        if payload.get("provider_id") == provider_id:
+            return True
+    return False
+
+
+def find_replacement_provider(excluded_provider_id: str = ""):
+    data = get_providers()
+    providers = data.get("providers", [])
+    enabled = [
+        p
+        for p in providers
+        if p.get("id") != excluded_provider_id and p.get("enabled", True)
+    ]
+    return enabled[0] if enabled else None
+
+
+TASK_LOCK = threading.Lock()
+TASK_THREADS = {}
+
+
+def _new_task_id():
+    return hashlib.md5(
+        f"task-{datetime.now().timestamp()}-{random.random()}".encode()
+    ).hexdigest()[:12]
+
+
+@st.cache_resource(show_spinner=False)
+def get_task_runtime():
+    try:
+        TASKS_FILE.unlink()
+    except (FileNotFoundError, OSError):
+        pass
+    return {"tasks": [], "threads": {}}
+
+
+def get_task_store():
+    runtime = get_task_runtime()
+    tasks = runtime.get("tasks")
+    if not isinstance(tasks, list):
+        runtime["tasks"] = []
+    return runtime
+
+
+def get_task_threads():
+    runtime = get_task_runtime()
+    threads = runtime.get("threads")
+    if not isinstance(threads, dict):
+        runtime["threads"] = {}
+    return runtime["threads"]
+
+
+def get_tasks_data():
+    data = get_task_store()
+    if not isinstance(data, dict):
+        data = {"tasks": []}
+    tasks = data.get("tasks", [])
+    if not isinstance(tasks, list):
+        tasks = []
+    data["tasks"] = tasks
+    return data
+
+
+def save_tasks_data(data):
+    store = get_task_store()
+    store["tasks"] = data.get("tasks", []) if isinstance(data, dict) else []
+    return store
+
+
+def get_history_data():
+    data = load_json(HISTORY_FILE, {"records": []})
+    if not isinstance(data, dict):
+        data = {"records": []}
+    records = data.get("records", [])
+    if not isinstance(records, list):
+        records = []
+    data["records"] = [_normalize_history_record(record) for record in records]
+    return data
+
+
+def save_history_data(data):
+    return save_json(HISTORY_FILE, data)
+
+
+def _normalize_history_record(record: dict):
+    normalized = copy.deepcopy(record or {})
+    state = (normalized.get("record_state") or "").strip().lower()
+    if state not in {HISTORY_RECORD_ACTIVE, HISTORY_RECORD_TRASHED}:
+        state = HISTORY_RECORD_ACTIVE
+    normalized["record_state"] = state
+    normalized["trashed_at"] = (normalized.get("trashed_at") or "").strip()
+    normalized["purged_at"] = (normalized.get("purged_at") or "").strip()
+    return normalized
+
+
+def _history_sort_key(record: dict):
+    return record.get("completed_at", record.get("created_at", ""))
+
+
+def list_history_records(record_states=None):
+    data = get_history_data()
+    records = [_normalize_history_record(r) for r in data.get("records", [])]
+    if record_states:
+        allowed_states = {
+            str(state or "").strip().lower() for state in record_states if state
+        }
+        records = [r for r in records if r.get("record_state") in allowed_states]
+    return sorted(records, key=_history_sort_key, reverse=True)
+
+
+def list_active_history_records():
+    return list_history_records({HISTORY_RECORD_ACTIVE})
+
+
+def list_trashed_history_records():
+    return list_history_records({HISTORY_RECORD_TRASHED})
+
+
+def get_project_output_base_dir():
+    s = get_settings()
+    base = (s.get("project_output_dir") or _default_project_output_dir()).strip()
+    path = Path(base).expanduser()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _slugify_project_name(text: str) -> str:
+    cleaned = re.sub(r"[^\w\u4e00-\u9fff-]+", "_", (text or "未命名项目").strip())
+    cleaned = cleaned.strip("_")
+    return cleaned[:60] or "未命名项目"
+
+
+def _task_datetime(task: dict) -> datetime:
+    raw = (task or {}).get("created_at") or datetime.now().isoformat()
+    try:
+        return datetime.fromisoformat(raw)
+    except Exception:
+        return datetime.now()
+
+
+def _parse_iso_datetime(raw: str):
+    try:
+        return datetime.fromisoformat((raw or "").strip())
+    except Exception:
+        return None
+
+
+def _project_folder_name(task: dict) -> str:
+    created_at = _task_datetime(task).strftime("%Y%m%d_%H%M%S")
+    label = _slugify_project_name(task.get("summary") or task.get("type") or "项目")
+    return f"{created_at}_{label}_{(task.get('id') or _new_task_id())[:6]}"
+
+
+def _history_record_dir(task: dict, existing_record: dict = None):
+    if existing_record and existing_record.get("artifact_dir"):
+        return Path(existing_record.get("artifact_dir"))
+    return get_project_output_base_dir() / _project_folder_name(task)
+
+
+def iter_project_manifest_paths():
+    base_dir = get_project_output_base_dir()
+    if not base_dir.exists():
+        return []
+    return sorted(base_dir.glob("*/manifest.json"))
+
+
+def load_manifest_record(manifest_path: Path):
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if not data.get("artifact_dir"):
+        data["artifact_dir"] = str(manifest_path.parent)
+    if not data.get("project_name"):
+        data["project_name"] = manifest_path.parent.name
+    return _normalize_history_record(data)
+
+
+def write_manifest_record(record: dict):
+    artifact_dir = Path((record or {}).get("artifact_dir", ""))
+    if not artifact_dir:
+        return False
+    try:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = artifact_dir / "manifest.json"
+        manifest_path.write_text(
+            json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return True
+    except Exception:
+        return False
+
+
+def replace_history_record(task_id: str, updated_record: dict):
+    data = get_history_data()
+    replaced = False
+    records = []
+    for record in data.get("records", []):
+        if record.get("task_id") == task_id:
+            records.append(_normalize_history_record(updated_record))
+            replaced = True
+        else:
+            records.append(record)
+    if not replaced:
+        return None
+    data["records"] = records
+    save_history_data(data)
+    write_manifest_record(_normalize_history_record(updated_record))
+    return _normalize_history_record(updated_record)
+
+
+def get_history_record(task_id: str):
+    return next(
+        (record for record in list_history_records() if record.get("task_id") == task_id),
+        None,
+    )
+
+
+def rebuild_history_index_from_manifests():
+    existing_records = {
+        record.get("task_id"): record for record in get_history_data().get("records", [])
+    }
+    rebuilt_records = []
+    for manifest_path in iter_project_manifest_paths():
+        record = load_manifest_record(manifest_path)
+        if not record or not record.get("task_id"):
+            continue
+        existing = existing_records.get(record.get("task_id"), {})
+        if existing:
+            record["record_state"] = existing.get(
+                "record_state", record.get("record_state", HISTORY_RECORD_ACTIVE)
+            )
+            if record["record_state"] == HISTORY_RECORD_TRASHED:
+                record["trashed_at"] = existing.get("trashed_at", record.get("trashed_at", ""))
+        rebuilt_records.append(record)
+    save_history_data({"records": rebuilt_records})
+    return rebuilt_records
+
+
+def find_orphan_project_dirs(records: list):
+    base_dir = get_project_output_base_dir()
+    if not base_dir.exists():
+        return []
+    tracked_dirs = {
+        str(Path(record.get("artifact_dir")).resolve())
+        for record in records
+        if record.get("artifact_dir")
+    }
+    orphan_dirs = []
+    for child in sorted(base_dir.iterdir()):
+        if not child.is_dir():
+            continue
+        child_resolved = str(child.resolve())
+        has_manifest = (child / "manifest.json").exists()
+        if child_resolved in tracked_dirs:
+            continue
+        # Keep directories with content visible to the user so they can repair or inspect them.
+        file_count = sum(1 for item in child.rglob("*") if item.is_file())
+        if has_manifest or file_count > 0:
+            orphan_dirs.append(
+                {
+                    "path": str(child),
+                    "name": child.name,
+                    "has_manifest": has_manifest,
+                    "size_bytes": get_path_size(child),
+                    "file_count": file_count,
+                }
+            )
+    return orphan_dirs
+
+
+def cleanup_expired_trashed_records():
+    settings = get_settings()
+    retention_days = int(settings.get("trash_retention_days", 15) or 0)
+    if retention_days <= 0:
+        return []
+    now = datetime.now()
+    data = get_history_data()
+    removable_task_ids = []
+    for record in data.get("records", []):
+        if record.get("record_state") != HISTORY_RECORD_TRASHED:
+            continue
+        trashed_at = _parse_iso_datetime(record.get("trashed_at"))
+        if not trashed_at:
+            continue
+        if (now - trashed_at).days >= retention_days:
+            removable_task_ids.append(record.get("task_id"))
+    purged_records = []
+    for task_id in removable_task_ids:
+        purged = purge_trashed_history_record(task_id)
+        if purged:
+            purged_records.append(purged)
+    return purged_records
+
+
+def rebuild_record_zip(task_id: str):
+    record = get_history_record(task_id)
+    if not record:
+        return None, "未找到项目记录。"
+    artifact_dir = Path(record.get("artifact_dir", ""))
+    if not artifact_dir.exists():
+        return None, "项目目录不存在，无法重建 ZIP。"
+    zip_path = _write_history_zip(
+        artifact_dir,
+        record.get("file_paths", []) or [],
+        record.get("titles", []) or [],
+        record.get("target_language", DEFAULT_TARGET_LANGUAGE),
+        errors=record.get("errors", []) or [],
+    )
+    updated_record = copy.deepcopy(record)
+    updated_record["zip_path"] = zip_path
+    updated_record["updated_at"] = datetime.now().isoformat()
+    replace_history_record(task_id, updated_record)
+    return _normalize_history_record(updated_record), ""
+
+
+def delete_orphan_project_dir(path_str: str):
+    if not path_str:
+        return False
+    target = Path(path_str)
+    if not target.exists() or not target.is_dir():
+        return False
+    try:
+        shutil.rmtree(target, ignore_errors=True)
+        return True
+    except Exception:
+        return False
+
+
+def restore_all_trashed_history_records():
+    restored = []
+    for record in list_trashed_history_records():
+        restored_record = restore_history_record(record.get("task_id"))
+        if restored_record:
+            restored.append(restored_record)
+    return restored
+
+
+def trash_history_records_by_ids(task_ids):
+    moved = []
+    for task_id in task_ids or []:
+        moved_record = trash_history_record(task_id)
+        if moved_record:
+            moved.append(moved_record)
+    return moved
+
+
+def restore_history_records_by_ids(task_ids):
+    restored = []
+    for task_id in task_ids or []:
+        restored_record = restore_history_record(task_id)
+        if restored_record:
+            restored.append(restored_record)
+    return restored
+
+
+def purge_trashed_history_records_by_ids(task_ids):
+    purged = []
+    for task_id in task_ids or []:
+        purged_record = purge_trashed_history_record(task_id)
+        if purged_record:
+            purged.append(purged_record)
+    return purged
+
+
+def _safe_copy_to_dir(src: str, dest_dir: Path, dest_name: str = ""):
+    if not src:
+        return None
+    src_path = Path(src)
+    if not src_path.exists():
+        return None
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    target = dest_dir / (dest_name or src_path.name)
+    shutil.copy2(src_path, target)
+    return str(target)
+
+
+def _write_history_zip(
+    dest_dir: Path,
+    file_paths: list,
+    titles: list,
+    target_language: str,
+    errors: list = None,
+):
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = dest_dir / "download.zip"
+    language_info = get_target_language(target_language)
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+        for path in file_paths or []:
+            if not path:
+                continue
+            src = Path(path)
+            if src.exists():
+                z.write(src, arcname=src.name)
+        if titles:
+            if target_language == "en":
+                titles_content = "\n\n".join(
+                    [f"Title {i + 1}:\nEN: {t}" for i, t in enumerate(titles)]
+                )
+            else:
+                titles_content = "\n\n".join(
+                    [
+                        f"标题 {i // 2 + 1}:\nEN: {titles[i]}\n{language_info['copy_tag']}: {titles[i + 1]}"
+                        for i in range(0, len(titles) - 1, 2)
+                    ]
+                )
+            if not titles_content and titles:
+                titles_content = "\n".join(
+                    [f"Title {i + 1}: {t}" for i, t in enumerate(titles)]
+                )
+            z.writestr("titles.txt", titles_content)
+        if errors:
+            z.writestr("errors.txt", "\n".join([str(err) for err in errors if err]))
+    return str(zip_path)
+
+
+def _write_project_text_files(
+    dest_dir: Path, titles: list, errors: list, target_language: str
+):
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    if titles:
+        language_info = get_target_language(target_language)
+        if target_language == "en":
+            content = "\n\n".join(
+                [f"Title {i + 1}:\nEN: {t}" for i, t in enumerate(titles)]
+            )
+        else:
+            content = "\n\n".join(
+                [
+                    f"标题 {i // 2 + 1}:\nEN: {titles[i]}\n{language_info['copy_tag']}: {titles[i + 1]}"
+                    for i in range(0, len(titles) - 1, 2)
+                ]
+            )
+        (dest_dir / "titles.txt").write_text(content or "", encoding="utf-8")
+    if errors:
+        (dest_dir / "errors.txt").write_text(
+            "\n".join([str(err) for err in errors if err]), encoding="utf-8"
+        )
+
+
+def _copy_input_files_for_history(task: dict, artifact_dir: Path):
+    payload = copy.deepcopy((task or {}).get("payload", {}) or {})
+    input_paths = payload.get("image_paths", []) or []
+    copied_inputs = []
+    if input_paths:
+        input_dir = artifact_dir / "inputs"
+        for idx, src in enumerate(input_paths):
+            src_path = Path(src)
+            suffix = src_path.suffix or ".png"
+            copied = _safe_copy_to_dir(src, input_dir, f"input_{idx + 1:02d}{suffix}")
+            if copied:
+                copied_inputs.append(copied)
+        payload["image_paths"] = copied_inputs
+    return payload, copied_inputs
+
+
+def _normalize_relaunch_summary(summary: str) -> str:
+    base = re.sub(r"^重发\s*·\s*", "", (summary or "未命名项目")).strip()
+    return f"重发 · {base}"
+
+
+def build_relaunch_payload(record: dict):
+    payload = copy.deepcopy((record or {}).get("payload", {}) or {})
+    if payload:
+        payload["summary"] = _normalize_relaunch_summary(
+            payload.get("summary") or record.get("summary", "")
+        )
+        if payload.get("provider_id") and not get_provider_by_id(
+            payload.get("provider_id")
+        ):
+            active = get_active_provider() or {}
+            if active.get("id"):
+                payload["provider_id"] = active.get("id")
+        return payload
+    return {}
+
+
+def relaunch_history_record(task_id: str):
+    record = next(
+        (r for r in list_history_records() if r.get("task_id") == task_id), None
+    )
+    if not record:
+        return None, "未找到项目记录"
+    payload = build_relaunch_payload(record)
+    if not payload:
+        return None, "该历史项目缺少可重发参数，请先重新生成一次新项目。"
+    task, err = create_task(record.get("task_type", "task"), payload)
+    if task:
+        schedule_task_workers()
+    return task, err
+
+
+def record_task_history(task: dict, result: dict):
+    if not task or task.get("status") not in TASK_STATUS_TERMINAL:
+        return None
+    task_id = task.get("id") or _new_task_id()
+    data = get_history_data()
+    existing_record = next(
+        (r for r in data.get("records", []) if r.get("task_id") == task_id), None
+    )
+    artifact_dir = _history_record_dir(task, existing_record)
+    if artifact_dir.exists():
+        shutil.rmtree(artifact_dir, ignore_errors=True)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    file_sources = result.get("files", []) or task.get("result_files", []) or []
+    copied_files = []
+    for idx, src in enumerate(file_sources):
+        copied = _safe_copy_to_dir(src, artifact_dir, f"{idx + 1:02d}_{Path(src).name}")
+        if copied:
+            copied_files.append(copied)
+
+    titles = result.get("titles", []) or task.get("titles", []) or []
+    errors = result.get("errors", []) or task.get("errors", []) or []
+    target_language = (
+        result.get("target_language")
+        or task.get("result_title_language")
+        or DEFAULT_TARGET_LANGUAGE
+    )
+    payload_snapshot, copied_input_paths = _copy_input_files_for_history(
+        task, artifact_dir
+    )
+    _write_project_text_files(artifact_dir, titles, errors, target_language)
+    zip_path = _write_history_zip(
+        artifact_dir, copied_files, titles, target_language, errors=errors
+    )
+
+    manifest = {
+        "task_id": task_id,
+        "task_type": task.get("type", "task"),
+        "summary": task.get("summary", ""),
+        "status": task.get("status", "done"),
+        "record_state": (
+            existing_record.get("record_state", HISTORY_RECORD_ACTIVE)
+            if existing_record
+            else HISTORY_RECORD_ACTIVE
+        ),
+        "created_at": task.get("created_at", ""),
+        "updated_at": task.get("updated_at", ""),
+        "completed_at": datetime.now().isoformat(),
+        "trashed_at": "",
+        "purged_at": "",
+        "target_language": target_language,
+        "titles": titles,
+        "errors": errors,
+        "progress": task.get("progress", {}),
+        "file_paths": copied_files,
+        "input_file_paths": copied_input_paths,
+        "zip_path": zip_path,
+        "artifact_dir": str(artifact_dir),
+        "project_name": artifact_dir.name,
+        "provider_id": (task.get("payload", {}) or {}).get("provider_id", ""),
+        "payload": payload_snapshot,
+    }
+    (artifact_dir / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    records = [r for r in data.get("records", []) if r.get("task_id") != task_id]
+    records.append(manifest)
+    data["records"] = records
+    save_history_data(data)
+    return manifest
+
+
+def trash_history_record(task_id: str):
+    data = get_history_data()
+    record = next(
+        (r for r in data.get("records", []) if r.get("task_id") == task_id), None
+    )
+    if not record:
+        return None
+    for item in data.get("records", []):
+        if item.get("task_id") != task_id:
+            continue
+        item["record_state"] = HISTORY_RECORD_TRASHED
+        item["trashed_at"] = datetime.now().isoformat()
+        item["updated_at"] = datetime.now().isoformat()
+    save_history_data(data)
+    updated_record = next(
+        (r for r in data.get("records", []) if r.get("task_id") == task_id), None
+    )
+    if updated_record:
+        write_manifest_record(_normalize_history_record(updated_record))
+    return _normalize_history_record(updated_record or record)
+
+
+def restore_history_record(task_id: str):
+    data = get_history_data()
+    record = next(
+        (r for r in data.get("records", []) if r.get("task_id") == task_id), None
+    )
+    if not record:
+        return None
+    for item in data.get("records", []):
+        if item.get("task_id") != task_id:
+            continue
+        item["record_state"] = HISTORY_RECORD_ACTIVE
+        item["trashed_at"] = ""
+        item["updated_at"] = datetime.now().isoformat()
+    save_history_data(data)
+    updated_record = next(
+        (r for r in data.get("records", []) if r.get("task_id") == task_id), None
+    )
+    if updated_record:
+        write_manifest_record(_normalize_history_record(updated_record))
+    return _normalize_history_record(updated_record or record)
+
+
+def delete_history_record(task_id: str):
+    data = get_history_data()
+    record = next(
+        (r for r in data.get("records", []) if r.get("task_id") == task_id), None
+    )
+    data["records"] = [
+        r for r in data.get("records", []) if r.get("task_id") != task_id
+    ]
+    save_history_data(data)
+    if record and record.get("artifact_dir"):
+        shutil.rmtree(record.get("artifact_dir"), ignore_errors=True)
+    return record
+
+
+def trash_history_records_by_status(statuses):
+    status_set = {str(status or "").strip() for status in (statuses or []) if status}
+    if not status_set:
+        return []
+    data = get_history_data()
+    moved_records = [
+        _normalize_history_record(r)
+        for r in data.get("records", [])
+        if r.get("status") in status_set
+        and (r.get("record_state") or HISTORY_RECORD_ACTIVE) == HISTORY_RECORD_ACTIVE
+    ]
+    if not moved_records:
+        return []
+    now = datetime.now().isoformat()
+    for record in data.get("records", []):
+        if record.get("status") not in status_set:
+            continue
+        if (record.get("record_state") or HISTORY_RECORD_ACTIVE) != HISTORY_RECORD_ACTIVE:
+            continue
+        record["record_state"] = HISTORY_RECORD_TRASHED
+        record["trashed_at"] = now
+        record["updated_at"] = now
+    save_history_data(data)
+    return moved_records
+
+
+def purge_history_records_by_status(statuses):
+    status_set = {str(status or "").strip() for status in (statuses or []) if status}
+    if not status_set:
+        return []
+    data = get_history_data()
+    removed_records = [
+        _normalize_history_record(r)
+        for r in data.get("records", [])
+        if r.get("status") in status_set
+        and (r.get("record_state") or HISTORY_RECORD_ACTIVE) == HISTORY_RECORD_TRASHED
+    ]
+    if not removed_records:
+        return []
+    data["records"] = [
+        r
+        for r in data.get("records", [])
+        if not (
+            r.get("status") in status_set
+            and (r.get("record_state") or HISTORY_RECORD_ACTIVE)
+            == HISTORY_RECORD_TRASHED
+        )
+    ]
+    save_history_data(data)
+    for record in removed_records:
+        artifact_dir = record.get("artifact_dir")
+        if artifact_dir:
+            shutil.rmtree(artifact_dir, ignore_errors=True)
+    return removed_records
+
+
+def purge_trashed_history_record(task_id: str):
+    data = get_history_data()
+    record = next(
+        (r for r in data.get("records", []) if r.get("task_id") == task_id), None
+    )
+    if not record:
+        return None
+    if (record.get("record_state") or HISTORY_RECORD_ACTIVE) != HISTORY_RECORD_TRASHED:
+        return None
+    return delete_history_record(task_id)
+
+
+def purge_all_trashed_history_records():
+    return purge_history_records_by_status(
+        {"done", "error", "cancelled", "expired"}
+    )
+
+
+def format_bytes(num_bytes: int):
+    value = float(num_bytes or 0)
+    units = ["B", "KB", "MB", "GB", "TB"]
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} {unit}"
+        value /= 1024
+    return f"{int(num_bytes)} B"
+
+
+def get_path_size(path: Path):
+    if not path.exists():
+        return 0
+    if path.is_file():
+        return path.stat().st_size
+    total = 0
+    for child in path.rglob("*"):
+        try:
+            if child.is_file():
+                total += child.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def summarize_record_files(record: dict):
+    file_paths = list(record.get("file_paths", []) or [])
+    input_paths = list(record.get("input_file_paths", []) or [])
+    zip_path = record.get("zip_path", "")
+    artifact_dir = record.get("artifact_dir", "")
+    checked_paths = file_paths + input_paths
+    if zip_path:
+        checked_paths.append(zip_path)
+    missing_paths = [path for path in checked_paths if path and not Path(path).exists()]
+    artifact_exists = bool(artifact_dir) and Path(artifact_dir).exists()
+    size_bytes = get_path_size(Path(artifact_dir)) if artifact_exists else 0
+    return {
+        "file_count": len(file_paths),
+        "input_count": len(input_paths),
+        "missing_count": len(missing_paths),
+        "missing_paths": missing_paths,
+        "artifact_exists": artifact_exists,
+        "size_bytes": size_bytes,
+    }
+
+
+def open_record_output(record: dict):
+    return open_in_file_manager(record.get("artifact_dir") or record.get("zip_path", ""))
+
+
+def activate_confirmation(confirm_key: str):
+    st.session_state[confirm_key] = True
+
+
+def clear_confirmation(confirm_key: str):
+    st.session_state.pop(confirm_key, None)
+
+
+def render_confirmation_bar(
+    confirm_key: str,
+    message: str,
+    confirm_label: str = "确认",
+    cancel_label: str = "取消",
+    confirm_type: str = "primary",
+):
+    if not st.session_state.get(confirm_key):
+        return False
+    st.warning(message)
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button(confirm_label, key=f"{confirm_key}_confirm", type=confirm_type):
+            clear_confirmation(confirm_key)
+            return True
+    with c2:
+        if st.button(cancel_label, key=f"{confirm_key}_cancel"):
+            clear_confirmation(confirm_key)
+            st.rerun()
+    return False
+
+
+def render_template_item_preview(item: dict, group_meta: dict, item_meta: dict):
+    icon = item.get("icon", "📦")
+    enabled = item.get("enabled", True)
+    hint = (item.get("hint") or "").strip()
+    usage_note = item_meta.get("usage_note", "")
+    state_class = "" if enabled else "disabled"
+    enabled_badge_class = "template-preview-badge" if enabled else "template-preview-badge off"
+    enabled_text = "已启用" if enabled else "已停用"
+    st.markdown(
+        f"""
+        <div class="template-preview-shell">
+            <div class="template-preview-title">实时预览</div>
+            <div class="template-preview-subtitle">你现在看到的是模板在后台中的展示效果，不需要保存就能先预览。</div>
+            <div class="template-preview-card {state_class}">
+                <span class="{enabled_badge_class}">{enabled_text}</span>
+                <span class="template-preview-badge">适用页面: {group_meta.get('page_label', '未定义')}</span>
+                <div class="template-preview-name">{icon} {item.get('name', '未命名模板')}</div>
+                <div class="template-preview-desc">{item.get('desc', '暂无说明')}</div>
+                <div class="template-preview-hint">用途提示: {usage_note or '暂无用途说明'}</div>
+                <div class="template-preview-hint">提示语: {hint or '无'}</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_template_group_preview(group_key: str, group_meta: dict, group: dict):
+    enabled_items = [
+        item for _, item in sorted(
+            group.items(), key=lambda pair: (pair[1].get("order", 999), pair[0])
+        )
+    ]
+    if not enabled_items:
+        return
+    cards = []
+    for item in enabled_items:
+        card_class = "template-preview-mini" if item.get("enabled", True) else "template-preview-mini disabled"
+        cards.append(
+            f"""
+            <div class="{card_class}">
+                <div>{item.get('icon', '📦')}</div>
+                <div class="template-preview-mini-name">{item.get('name', '未命名模板')}</div>
+                <div class="template-preview-mini-meta">排序: {int(item.get('order', 1))}</div>
+                <div class="template-preview-mini-meta">{'启用中' if item.get('enabled', True) else '已停用'}</div>
+            </div>
+            """
+        )
+    st.markdown(
+        f"""
+        <div class="template-preview-shell">
+            <div class="template-preview-title">{group_meta.get('title', group_key)} 工作流预览</div>
+            <div class="template-preview-subtitle">模拟该工作流里模板选择区的呈现顺序与启用状态。</div>
+            <div class="template-preview-grid">
+                {''.join(cards)}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _record_option_label(record: dict):
+    status = _record_status_label(record.get("status"))
+    title = record.get("summary") or record.get("task_type", "任务")
+    completed_at = record.get("completed_at") or record.get("created_at", "")
+    return f"{status} · {title} · {completed_at}"
+
+
+def render_batch_record_actions(records: list, mode: str):
+    if not records:
+        return
+    options = {record.get("task_id"): _record_option_label(record) for record in records}
+    selected_ids = st.multiselect(
+        "选择要批量处理的项目",
+        options=list(options.keys()),
+        format_func=lambda task_id: options.get(task_id, task_id),
+        key=f"batch_select_{mode}",
+        placeholder="可多选",
+    )
+    if not selected_ids:
+        return
+    selected_count = len(selected_ids)
+    if mode == "history":
+        confirm_key = "confirm_batch_trash_history"
+        if st.button("🗑️ 批量移入回收站", key="batch_trash_history_trigger"):
+            activate_confirmation(confirm_key)
+            st.rerun()
+        if render_confirmation_bar(
+            confirm_key,
+            f"将把所选 {selected_count} 条历史项目移入回收站，本地文件会先保留。",
+            confirm_label="确认批量移入回收站",
+        ):
+            moved_count = len(trash_history_records_by_ids(selected_ids))
+            st.success(f"已将 {moved_count} 条项目移入回收站。")
+            st.rerun()
+    elif mode == "trash":
+        restore_key = "confirm_batch_restore_trash"
+        purge_key = "confirm_batch_purge_trash"
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("♻️ 批量恢复", key="batch_restore_trash_trigger"):
+                activate_confirmation(restore_key)
+                st.rerun()
+        with c2:
+            if st.button("🧨 批量彻底删除", key="batch_purge_trash_trigger"):
+                activate_confirmation(purge_key)
+                st.rerun()
+        if render_confirmation_bar(
+            restore_key,
+            f"将把所选 {selected_count} 条回收站记录恢复到历史项目。",
+            confirm_label="确认批量恢复",
+        ):
+            restored_count = len(restore_history_records_by_ids(selected_ids))
+            st.success(f"已恢复 {restored_count} 条记录。")
+            st.rerun()
+        if render_confirmation_bar(
+            purge_key,
+            f"将彻底删除所选 {selected_count} 条回收站记录及其本地文件，执行后不可恢复。",
+            confirm_label="确认批量彻底删除",
+        ):
+            purged_count = len(purge_trashed_history_records_by_ids(selected_ids))
+            st.success(f"已彻底删除 {purged_count} 条记录。")
+            st.rerun()
+
+
+def collect_diagnostics(records: list):
+    orphan_dirs = find_orphan_project_dirs(records)
+    missing_records = [
+        record for record in records if summarize_record_files(record)["missing_count"] > 0
+    ]
+    manifest_count = len(iter_project_manifest_paths())
+    provider = get_active_provider() or {}
+    active_tasks = [task for task in list_tasks() if task.get("status") in {"queued", "running"}]
+    return {
+        "record_count": len(records),
+        "manifest_count": manifest_count,
+        "missing_record_count": len(missing_records),
+        "orphan_dir_count": len(orphan_dirs),
+        "active_task_count": len(active_tasks),
+        "provider_name": provider.get("name", "未配置"),
+        "output_dir": str(get_project_output_base_dir()),
+        "orphan_dirs": orphan_dirs,
+        "missing_records": missing_records,
+    }
+
+
+def collect_template_library_diagnostics():
+    issues = []
+    title_templates = get_title_templates()
+    enabled_title_templates = get_enabled_title_templates()
+    image_templates = get_templates()
+
+    if not enabled_title_templates:
+        issues.append("标题模板已全部停用，标题页将无法正常选择模板。")
+
+    for key, template in title_templates.items():
+        prompt = (template.get("prompt") or "").strip()
+        if not prompt:
+            issues.append(f"标题模板「{template.get('name', key)}」缺少 Prompt。")
+            continue
+        if "{product_info}" not in prompt and key != "image_analysis":
+            issues.append(
+                f"标题模板「{template.get('name', key)}」未包含 {{product_info}} 占位符，可能无法利用商品信息。"
+            )
+
+    translation_templates = image_templates.get("translation_types", {})
+    enabled_translation = [
+        template
+        for template in translation_templates.values()
+        if template.get("enabled", True)
+    ]
+    if not enabled_translation:
+        issues.append("翻译保版模板已全部停用，翻译模式将无法正常选择模板。")
+
+    for key, template in translation_templates.items():
+        prompt = (template.get("prompt") or "").strip()
+        if not prompt:
+            issues.append(f"翻译模板「{template.get('name', key)}」缺少 Prompt。")
+            continue
+        if "{output_language_name}" not in prompt:
+            issues.append(
+                f"翻译模板「{template.get('name', key)}」未包含 {{output_language_name}} 占位符。"
+            )
+        if "{aspect_ratio}" not in prompt:
+            issues.append(
+                f"翻译模板「{template.get('name', key)}」未包含 {{aspect_ratio}} 占位符。"
+            )
+
+    return {
+        "title_template_count": len(title_templates),
+        "enabled_title_template_count": len(enabled_title_templates),
+        "image_template_count": sum(len(group) for group in image_templates.values() if isinstance(group, dict)),
+        "enabled_translation_count": len(enabled_translation),
+        "issues": issues,
+    }
+
+
+def open_in_file_manager(path_str: str):
+    if not runtime_supports_local_file_access():
+        return False
+    path = Path(path_str)
+    target = path if path.is_dir() else path.parent
+    if not target.exists():
+        return False
+    try:
+        subprocess.run(["open", str(target)], check=False)
+        return True
+    except Exception:
+        return False
+
+
+def list_tasks():
+    data = get_tasks_data()
+    return sorted(
+        data.get("tasks", []), key=lambda x: x.get("created_at", ""), reverse=True
+    )
+
+
+def clear_terminal_tasks():
+    with TASK_LOCK:
+        data = get_tasks_data()
+        existing_tasks = data.get("tasks", [])
+        active_tasks = [
+            task
+            for task in existing_tasks
+            if task.get("status") not in TASK_STATUS_TERMINAL
+        ]
+        removed_count = len(existing_tasks) - len(active_tasks)
+        data["tasks"] = active_tasks
+        save_tasks_data(data)
+        return removed_count
+
+
+def update_task(task_id: str, **updates):
+    with TASK_LOCK:
+        data = get_tasks_data()
+        for task in data.get("tasks", []):
+            if task.get("id") == task_id:
+                task.update(updates)
+                task["updated_at"] = datetime.now().isoformat()
+                if updates.get("status") == "running":
+                    task.setdefault("started_at", datetime.now().isoformat())
+                if updates.get("status") in TASK_STATUS_TERMINAL:
+                    task.setdefault("ended_at", datetime.now().isoformat())
+                save_tasks_data(data)
+                return task
+    return None
+
+
+def prune_task_slots(tasks: list):
+    while len(tasks) >= MAX_TASK_QUEUE:
+        removable_index = next(
+            (i for i, t in enumerate(tasks) if t.get("status") in TASK_STATUS_TERMINAL),
+            None,
+        )
+        if removable_index is None:
+            return False, tasks
+        tasks.pop(removable_index)
+    return True, tasks
+
+
+def create_task(task_type: str, payload: dict):
+    with TASK_LOCK:
+        data = get_tasks_data()
+        tasks = data.get("tasks", [])
+        ok, tasks = prune_task_slots(tasks)
+        if not ok:
+            return (
+                None,
+                f"最多同时保留 {MAX_TASK_QUEUE} 个任务，请先清理已完成或失败任务。",
+            )
+        task = {
+            "id": _new_task_id(),
+            "type": task_type,
+            "status": "queued",
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+            "payload": payload,
+            "progress": {"done": 0, "total": payload.get("total", 0)},
+            "errors": [],
+            "titles": [],
+            "result_files": [],
+            "result_title_language": payload.get("target_language")
+            or payload.get("title_language")
+            or DEFAULT_TARGET_LANGUAGE,
+            "summary": payload.get("summary", ""),
+        }
+        tasks.append(task)
+        data["tasks"] = tasks
+        save_tasks_data(data)
+        return task, ""
+
+
+def cancel_task(task_id: str):
+    task = update_task(task_id, status="cancelled")
+    if task:
+        record_task_history(
+            task,
+            {
+                "titles": task.get("titles", []),
+                "errors": ["用户手动取消任务"],
+                "files": task.get("result_files", []),
+                "target_language": task.get(
+                    "result_title_language", DEFAULT_TARGET_LANGUAGE
+                ),
+            },
+        )
+    return bool(task)
+
+
+def is_task_cancelled(task_id: str) -> bool:
+    task = next((t for t in list_tasks() if t.get("id") == task_id), None)
+    return bool(task and task.get("status") == "cancelled")
+
+
+def ensure_task_not_cancelled(task_id: str):
+    if is_task_cancelled(task_id):
+        raise Exception("任务已取消")
+
+
+def normalize_running_tasks():
+    data = get_tasks_data()
+    task_threads = get_task_threads()
     changed = False
-
-    admin_password_fixed = (os.getenv("ADMIN_PASSWORD_FIXED") or "").strip()
-    if admin_password_fixed and s.get("admin_password") != admin_password_fixed:
-        s["admin_password"] = admin_password_fixed
+    for task in data.get("tasks", []):
+        if task.get("status") != "running":
+            continue
+        th = task_threads.get(task.get("id"))
+        if th and th.is_alive():
+            continue
+        task["status"] = "expired"
+        task.setdefault("errors", []).append(
+            "任务在后台中断或页面刷新后未恢复，请重新提交。"
+        )
+        task["updated_at"] = datetime.now().isoformat()
+        record_task_history(
+            task,
+            {
+                "titles": task.get("titles", []),
+                "errors": task.get("errors", []),
+                "files": task.get("result_files", []),
+                "target_language": task.get(
+                    "result_title_language", DEFAULT_TARGET_LANGUAGE
+                ),
+            },
+        )
         changed = True
-
-    user_password_fixed = (os.getenv("USER_PASSWORD_FIXED") or "").strip()
-    if user_password_fixed and s.get("user_password") != user_password_fixed:
-        s["user_password"] = user_password_fixed
-        changed = True
-
-    allow_passwordless = _parse_env_bool("ALLOW_PASSWORDLESS_USER_LOGIN")
-    if (
-        allow_passwordless is not None
-        and s.get("allow_user_passwordless_login") != allow_passwordless
-    ):
-        s["allow_user_passwordless_login"] = allow_passwordless
-        changed = True
-
     if changed:
-        save_settings(s)
+        save_tasks_data(data)
 
-    _sync_fixed_api_keys_from_env()
-    bootstrap_env_system_key()
+
+def persist_image_for_task(img: Image.Image, filename: str):
+    task_dir = DATA_DIR / "task_results"
+    task_dir.mkdir(parents=True, exist_ok=True)
+    path = task_dir / filename
+    img.save(path, format="PNG")
+    return str(path)
+
+
+def load_image_paths(paths: list):
+    images = []
+    for path in paths or []:
+        try:
+            images.append(Image.open(path).convert("RGB"))
+        except Exception:
+            continue
+    return images
+
+
+def _run_with_timeout(func, timeout_seconds: int):
+    result = {}
+    error = {}
+    done = threading.Event()
+
+    def _runner():
+        try:
+            result["value"] = func()
+        except Exception as exc:
+            error["value"] = exc
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    if not done.wait(max(1, int(timeout_seconds))):
+        raise TimeoutError(f"Gemini request timed out after {timeout_seconds}s")
+    if "value" in error:
+        raise error["value"]
+    return result.get("value")
 
 
 def get_compliance():
@@ -1133,17 +2328,6 @@ def get_compliance():
     for k, v in DEFAULT_COMPLIANCE.items():
         if k not in c:
             c[k] = v
-    # 确保翻译合规模板结构完整
-    if "translate_templates" not in c or not isinstance(
-        c.get("translate_templates"), dict
-    ):
-        c["translate_templates"] = DEFAULT_COMPLIANCE.get(
-            "translate_templates", {}
-        ).copy()
-    if "default" not in c["translate_templates"]:
-        c["translate_templates"]["default"] = DEFAULT_COMPLIANCE["translate_templates"][
-            "default"
-        ].copy()
     return c
 
 
@@ -1163,59 +2347,367 @@ def save_prompts(data):
     return save_json(PROMPTS_FILE, data)
 
 
+def _normalize_template_item(group_key: str, item_key: str, item: dict):
+    # Normalize every template item before UI/render/runtime use so downstream code
+    # can rely on stable keys like name/desc/enabled/order without repetitive guards.
+    default_item = copy.deepcopy(
+        (DEFAULT_TEMPLATES.get(group_key, {}) or {}).get(item_key, {})
+    )
+    merged = copy.deepcopy(default_item)
+    merged.update(copy.deepcopy(item or {}))
+    meta = TEMPLATE_ITEM_META.get(group_key, {}).get(item_key, {})
+    if not (merged.get("name") or "").strip():
+        merged["name"] = meta.get("recommended_name", item_key)
+    if not (merged.get("desc") or "").strip():
+        merged["desc"] = meta.get("recommended_desc", "")
+    merged["enabled"] = bool(merged.get("enabled", True))
+    try:
+        merged["order"] = int(merged.get("order", 999))
+    except Exception:
+        merged["order"] = 999
+    return merged
+
+
+def _normalize_template_group(group_key: str, group: dict):
+    normalized = {}
+    default_group = (DEFAULT_TEMPLATES.get(group_key, {}) or {})
+    source_group = group if isinstance(group, dict) else {}
+    item_keys = list(dict.fromkeys([*default_group.keys(), *source_group.keys()]))
+    for item_key in item_keys:
+        normalized[item_key] = _normalize_template_item(
+            group_key, item_key, source_group.get(item_key, default_group.get(item_key, {}))
+        )
+    return normalized
+
+
 def get_templates():
+    # Product-facing template management is allowed to evolve independently from
+    # persisted JSON shape, so all template reads go through this normalization layer.
     t = load_json(TEMPLATES_FILE, DEFAULT_TEMPLATES)
-    for k, v in DEFAULT_TEMPLATES.items():
-        if k not in t:
-            t[k] = v
-    return t
+    normalized = {}
+    for group_key in TEMPLATE_GROUP_ORDER:
+        normalized[group_key] = _normalize_template_group(
+            group_key, (t or {}).get(group_key, {})
+        )
+    for group_key, group_value in (t or {}).items():
+        if group_key in normalized:
+            continue
+        normalized[group_key] = copy.deepcopy(group_value)
+    changed = False
+    # Safe display migration: only rewrite exact old default names/descriptions.
+    legacy_updates = {
+        ("combo_types", "feature"): ("功能卖点", "核心功能展示图"),
+        ("combo_types", "scene"): ("场景应用", "使用场景展示"),
+        ("combo_types", "detail"): ("细节特写", "工艺细节放大"),
+        ("combo_types", "size"): ("尺寸规格", "尺寸标注图"),
+        ("combo_types", "compare"): ("对比优势", "竞品对比图"),
+        ("combo_types", "package"): ("清单展示", "包装内容物"),
+        ("combo_types", "steps"): ("使用步骤", "操作步骤图"),
+    }
+    for (group_key, item_key), (legacy_name, legacy_desc) in legacy_updates.items():
+        item = ((normalized or {}).get(group_key, {}) or {}).get(item_key, {})
+        meta = TEMPLATE_ITEM_META.get(group_key, {}).get(item_key, {})
+        if not item or not meta:
+            continue
+        if (item.get("name") or "").strip() == legacy_name:
+            item["name"] = meta.get("recommended_name", legacy_name)
+            changed = True
+        if (item.get("desc") or "").strip() == legacy_desc:
+            item["desc"] = meta.get("recommended_desc", legacy_desc)
+            changed = True
+    if changed:
+        save_templates(normalized)
+    return normalized
 
 
 def save_templates(data):
-    return save_json(TEMPLATES_FILE, data)
+    # Save through the same normalization path to avoid writing partial/dirty state
+    # back to disk from the settings UI.
+    normalized = {}
+    source = data if isinstance(data, dict) else {}
+    for group_key in TEMPLATE_GROUP_ORDER:
+        normalized[group_key] = _normalize_template_group(
+            group_key, source.get(group_key, {})
+        )
+    for group_key, group_value in source.items():
+        if group_key in normalized:
+            continue
+        normalized[group_key] = copy.deepcopy(group_value)
+    return save_json(TEMPLATES_FILE, normalized)
+
+
+def get_template_group(group_key: str):
+    return get_templates().get(group_key, {})
+
+
+def get_sorted_templates(group_key: str, enabled_only: bool = False):
+    group = get_template_group(group_key)
+    items = group.items()
+    if enabled_only:
+        items = [(key, value) for key, value in items if value.get("enabled", True)]
+    return sorted(items, key=lambda item: (item[1].get("order", 999), item[0]))
+
+
+def get_enabled_template_group(group_key: str):
+    return {key: value for key, value in get_sorted_templates(group_key, enabled_only=True)}
+
+
+def _normalize_title_template_item(template_key: str, item: dict):
+    default_item = copy.deepcopy(DEFAULT_TITLE_TEMPLATES.get(template_key, {}))
+    merged = copy.deepcopy(default_item)
+    merged.update(copy.deepcopy(item or {}))
+    if not (merged.get("name") or "").strip():
+        merged["name"] = default_item.get("name", template_key)
+    if not (merged.get("desc") or "").strip():
+        merged["desc"] = default_item.get("desc", "")
+    if not (merged.get("prompt") or "").strip():
+        merged["prompt"] = default_item.get("prompt", "")
+    merged["enabled"] = bool(merged.get("enabled", True))
+    return merged
 
 
 def get_title_templates():
     t = load_json(TITLE_TEMPLATES_FILE, DEFAULT_TITLE_TEMPLATES)
-    for k, v in DEFAULT_TITLE_TEMPLATES.items():
-        if k not in t:
-            t[k] = v
-    return t
+    normalized = {}
+    for template_key in DEFAULT_TITLE_TEMPLATES.keys():
+        normalized[template_key] = _normalize_title_template_item(
+            template_key, (t or {}).get(template_key, {})
+        )
+    for template_key, template_value in (t or {}).items():
+        if template_key in normalized:
+            continue
+        normalized[template_key] = _normalize_title_template_item(
+            template_key, template_value
+        )
+    return normalized
 
 
 def save_title_templates(data):
-    return save_json(TITLE_TEMPLATES_FILE, data)
+    source = data if isinstance(data, dict) else {}
+    normalized = {}
+    for template_key in DEFAULT_TITLE_TEMPLATES.keys():
+        normalized[template_key] = _normalize_title_template_item(
+            template_key, source.get(template_key, {})
+        )
+    for template_key, template_value in source.items():
+        if template_key in normalized:
+            continue
+        normalized[template_key] = _normalize_title_template_item(
+            template_key, template_value
+        )
+    return save_json(TITLE_TEMPLATES_FILE, normalized)
 
 
-def get_next_api_key():
-    keys_data = get_api_keys()
-    keys = keys_data.get("keys", [])
-    now = datetime.now().isoformat()
-    valid = [
-        k
-        for k in keys
-        if k.get("enabled", True) and (not k.get("expires") or k.get("expires") > now)
-    ]
-    if not valid:
-        return None
-    idx = keys_data.get("current_index", 0) % len(valid)
-    keys_data["current_index"] = (idx + 1) % len(valid)
-    save_api_keys(keys_data)
-    return valid[idx].get("key")
+def get_enabled_title_templates():
+    return {
+        key: value
+        for key, value in get_title_templates().items()
+        if value.get("enabled", True)
+    }
 
 
-def peek_system_api_key():
-    keys_data = get_api_keys()
-    keys = keys_data.get("keys", [])
-    now = datetime.now().isoformat()
-    valid = [
-        k
-        for k in keys
-        if k.get("enabled", True) and (not k.get("expires") or k.get("expires") > now)
-    ]
-    if not valid:
-        return ""
-    return valid[0].get("key", "")
+def get_title_template_by_key(template_key: str):
+    templates = get_title_templates()
+    return templates.get(template_key, templates.get("default", {}))
+
+
+def get_title_template_prompt(template_key: str):
+    template = get_title_template_by_key(template_key)
+    return template.get("prompt", DEFAULT_TITLE_TEMPLATES["default"]["prompt"])
+
+
+def build_template_selector_options(
+    templates: dict,
+    include_custom: bool = False,
+    custom_label: str = "✏️ 自定义提示词",
+    priority_keys: list = None,
+):
+    priority_keys = list(priority_keys or [])
+    options = []
+    for key in priority_keys:
+        if key in templates and key not in options:
+            options.append(key)
+    for key in templates.keys():
+        if key not in options:
+            options.append(key)
+    if include_custom:
+        options = ["custom"] + options
+    labels = {"custom": custom_label}
+    labels.update({key: value.get("name", key) for key, value in templates.items()})
+    return options, labels
+
+
+def build_title_template_selector_options(
+    input_mode: str = "",
+    include_custom: bool = False,
+):
+    enabled_templates = get_enabled_title_templates()
+    priority_keys = ["image_analysis"] if input_mode == "🖼️ 图片分析" else []
+    template_options, template_names = build_template_selector_options(
+        enabled_templates,
+        include_custom=include_custom,
+        custom_label="✏️ 自定义提示词",
+        priority_keys=priority_keys,
+    )
+    return enabled_templates, template_options, template_names
+
+
+def build_translation_template_selector_options():
+    enabled_templates = get_enabled_template_group("translation_types")
+    template_options, template_names = build_template_selector_options(
+        enabled_templates,
+        include_custom=False,
+        priority_keys=["preserve_layout"],
+    )
+    return enabled_templates, template_options, template_names
+
+
+def get_target_language(code: str) -> dict:
+    return TARGET_LANGUAGE_MAP.get(code, TARGET_LANGUAGE_MAP[DEFAULT_TARGET_LANGUAGE])
+
+
+def format_target_language_option(code: str) -> str:
+    info = get_target_language(code)
+    return f"{info['flag']} {info['label']} / {info['native_name']}"
+
+
+def get_title_language_caption(code: str) -> str:
+    info = get_target_language(code)
+    return f"{info['flag']} {info['label']} ({info['english_name']})"
+
+
+def render_target_language_selector(
+    prefix: str,
+    key_suffix: str,
+    label: str,
+    help_text: str,
+):
+    s = get_settings()
+    options = [item["code"] for item in TARGET_LANGUAGES]
+    default_code = (
+        s.get("default_image_language", DEFAULT_TARGET_LANGUAGE)
+        if "image" in key_suffix
+        else s.get("default_title_language", DEFAULT_TARGET_LANGUAGE)
+    )
+    if default_code not in options:
+        default_code = DEFAULT_TARGET_LANGUAGE
+    default_index = options.index(default_code)
+    return st.selectbox(
+        label,
+        options=options,
+        index=default_index,
+        format_func=format_target_language_option,
+        key=f"{prefix}_{key_suffix}",
+        help=help_text,
+    )
+
+
+def fill_prompt_template(template: str, **values) -> str:
+    text = template or ""
+    for key, value in values.items():
+        text = text.replace(f"{{{key}}}", str(value))
+    return text
+
+
+def clean_generated_copy(text: str, max_chars: int) -> str:
+    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    return cleaned[:max_chars]
+
+
+def build_title_prompt(
+    template_prompt: str, product_info: str, target_language: str
+) -> str:
+    lang = get_target_language(target_language)
+    prompt = fill_prompt_template(
+        template_prompt,
+        product_info=product_info,
+        target_language_name=lang["english_name"],
+        target_language_native=lang["native_name"],
+        target_language_label=lang["label"],
+    )
+    if target_language == "en":
+        return (
+            f"{prompt}\n\n"
+            "TARGET LANGUAGE RULES\n"
+            "- Output English only.\n"
+            "- Generate exactly 3 English titles with no translation lines.\n"
+            f"- Every English title must be {MIN_TITLE_EN_CHARS}-{MAX_TITLE_EN_CHARS} characters.\n"
+            "- Output exactly 3 lines total with no labels or commentary."
+        )
+
+    extra_rule = (
+        "Use Simplified Chinese for every translation line."
+        if target_language == "zh"
+        else f"Do not output Chinese. Use {lang['english_name']} only for every translation line."
+    )
+    return (
+        f"{prompt}\n\n"
+        "TARGET LANGUAGE RULES\n"
+        "- Keep English as the fixed source language for every first line.\n"
+        f"- The second line of each title must be in {lang['english_name']} ({lang['native_name']}).\n"
+        f"- {extra_rule}\n"
+        "- Output exactly 6 lines total with no labels or commentary.\n"
+        f"- Line order must be English line then {lang['english_name']} line, repeated 3 times."
+    )
+
+
+def get_image_language_instruction(target_language: str) -> str:
+    lang = get_target_language(target_language)
+    return (
+        f"If the image contains any text, ALL text MUST be in {lang['english_name']} "
+        f"({lang['native_name']}) only. Do not mix multiple languages."
+    )
+
+
+def get_compliance_prompt(mode=None) -> str:
+    if mode is None:
+        mode = st.session_state.get("user_compliance_mode", "strict")
+    comp = get_compliance()
+    preset = comp.get("presets", {}).get(
+        mode, comp.get("presets", {}).get("strict", {})
+    )
+    blacklist = sorted(
+        set(preset.get("blacklist", [])) | set(comp.get("custom_blacklist", []))
+    )
+    whitelist = sorted(set(comp.get("whitelist", [])))
+    lines = []
+    if blacklist:
+        lines.append("Avoid these words or claims: " + ", ".join(blacklist[:30]))
+    if whitelist:
+        lines.append(
+            "These whitelist terms are allowed when needed: "
+            + ", ".join(whitelist[:20])
+        )
+    lines.append(
+        "Prefer neutral, platform-safe wording and keep the translation faithful."
+    )
+    return "\n".join(lines)
+
+
+def build_translation_prompt(
+    target_language: str,
+    aspect: str,
+    compliance_mode: str,
+    template_key: str = "preserve_layout",
+) -> str:
+    language_info = get_target_language(target_language)
+    # Translation templates are now real runtime assets. Prompt selection must
+    # come from the enabled template group instead of a hard-coded default.
+    translation_templates = get_enabled_template_group("translation_types")
+    template = translation_templates.get(
+        template_key,
+        get_template_group("translation_types").get("preserve_layout", {}),
+    )
+    prompt_template = (
+        template.get("prompt")
+        or DEFAULT_PROMPTS["translation_image_prompt"]
+    )
+    return fill_prompt_template(
+        prompt_template,
+        output_language_name=language_info["english_name"],
+        aspect_ratio=aspect,
+        compliance_rules=get_compliance_prompt(compliance_mode),
+    )
 
 
 # ==================== 文件存储 ====================
@@ -1234,12 +2726,6 @@ def _get_storage_settings():
         or s.get("file_storage_path")
         or "/app/data/files"
     )
-    # 本地开发环境兼容：/app 不存在时回退到 ./data/files
-    try:
-        if str(base_path).startswith("/app/") and not Path(base_path).exists():
-            base_path = str(DATA_DIR / "files")
-    except Exception:
-        pass
     return stype, retention, base_path, s
 
 
@@ -1353,440 +2839,11 @@ def maybe_persist_and_upload(content: bytes, filename: str):
 
 
 def get_user_id():
-    auth_user_id = st.session_state.get("auth_user_id")
-    if auth_user_id:
-        return str(auth_user_id)
     if "user_id" not in st.session_state:
         st.session_state.user_id = hashlib.md5(
             f"{datetime.now().timestamp()}{random.random()}".encode()
         ).hexdigest()[:12]
     return st.session_state.user_id
-
-
-def get_platform_actor_identity() -> dict:
-    uid = get_user_id()
-    auth_username = (st.session_state.get("auth_username") or "").strip()
-    auth_display_name = (
-        st.session_state.get("auth_display_name") or auth_username
-    ).strip()
-    auth_role = (st.session_state.get("auth_role") or "member").strip() or "member"
-    if auth_username:
-        return {
-            "username": auth_username,
-            "display_name": auth_display_name or auth_username,
-            "role": auth_role,
-            "source": "own_key"
-            if st.session_state.get("use_own_key")
-            else "system_pool",
-        }
-    if st.session_state.get("is_admin"):
-        return {
-            "username": "system-admin",
-            "display_name": "System Admin",
-            "role": "admin",
-            "source": "system_pool",
-        }
-    if st.session_state.get("use_own_key"):
-        return {
-            "username": f"byok-{uid}",
-            "display_name": f"BYOK User {uid[:6]}",
-            "role": "member",
-            "source": "own_key",
-        }
-    return {
-        "username": f"system-user-{uid}",
-        "display_name": f"Workspace User {uid[:6]}",
-        "role": "member",
-        "source": "system_pool",
-    }
-
-
-def sync_platform_session_context():
-    if not platform_database_enabled() or not st.session_state.get("authenticated"):
-        return None
-    try:
-        actor = get_platform_actor_identity()
-        with session_scope() as session:
-            if (
-                st.session_state.get("auth_user_id")
-                and st.session_state.get("auth_provider") == "local"
-            ):
-                user = session.scalar(
-                    select(User).where(User.id == st.session_state.get("auth_user_id"))
-                )
-                if user is None:
-                    raise ValueError("当前注册用户不存在")
-                ctx = get_login_context_for_user(
-                    session,
-                    user,
-                    project_id=st.session_state.get("platform_project_id") or "",
-                )
-            else:
-                ctx = ensure_workspace_identity(
-                    session,
-                    username=actor["username"],
-                    display_name=actor["display_name"],
-                    role=actor["role"],
-                )
-            projects = list_workspace_projects(session, ctx.organization_id)
-            wallet_dashboard = get_wallet_dashboard(session)
-        project_options = [{"id": p.id, "name": p.name} for p in projects]
-        selected_project_id = (
-            st.session_state.get("platform_project_id") or ctx.project_id
-        )
-        if not any(item["id"] == selected_project_id for item in project_options):
-            selected_project_id = ctx.project_id
-        selected_project_name = next(
-            (
-                item["name"]
-                for item in project_options
-                if item["id"] == selected_project_id
-            ),
-            ctx.project_name,
-        )
-        st.session_state.platform_org_id = ctx.organization_id
-        st.session_state.platform_org_name = ctx.organization_name
-        st.session_state.platform_user_id = ctx.user_id
-        st.session_state.platform_username = ctx.username
-        st.session_state.platform_role = ctx.role
-        st.session_state.platform_project_id = selected_project_id
-        st.session_state.platform_project_name = selected_project_name
-        st.session_state.platform_wallet_balance = int(
-            wallet_dashboard["wallet"].cached_balance
-        )
-        st.session_state.platform_context_error = ""
-        st.session_state.platform_project_options = project_options
-        return {
-            "organization_id": ctx.organization_id,
-            "organization_name": ctx.organization_name,
-            "user_id": ctx.user_id,
-            "username": ctx.username,
-            "role": ctx.role,
-            "project_id": selected_project_id,
-            "project_name": selected_project_name,
-            "wallet_balance": int(wallet_dashboard["wallet"].cached_balance),
-            "projects": project_options,
-            "charge_source": actor["source"],
-        }
-    except Exception as exc:
-        st.session_state.platform_context_error = str(exc)
-        return None
-
-
-def set_registered_auth_session(
-    user_id: str, username: str, display_name: str, role: str
-):
-    st.session_state.authenticated = True
-    st.session_state.is_admin = str(role or "") == "admin"
-    st.session_state.use_own_key = False
-    st.session_state.own_api_key = ""
-    st.session_state.auth_user_id = str(user_id or "")
-    st.session_state.auth_username = str(username or "")
-    st.session_state.auth_display_name = str(display_name or username or "")
-    st.session_state.auth_role = str(role or "member")
-    st.session_state.auth_provider = "local"
-
-
-def clear_registered_auth_session():
-    st.session_state.auth_user_id = ""
-    st.session_state.auth_username = ""
-    st.session_state.auth_display_name = ""
-    st.session_state.auth_role = ""
-    st.session_state.auth_provider = ""
-
-
-def set_own_credential_session(
-    provider: str,
-    gemini_key: str = "",
-    relay_key: str = "",
-    relay_base: str = "",
-    relay_model: str = "",
-):
-    st.session_state.authenticated = True
-    st.session_state.is_admin = False
-    st.session_state.use_own_key = True
-    st.session_state.own_provider = provider
-    st.session_state.own_api_key = str(gemini_key or "").strip()
-    st.session_state.own_relay_key = str(relay_key or "").strip()
-    st.session_state.own_relay_base = (
-        str(relay_base or RELAY_API_BASE).strip().rstrip("/")
-    )
-    st.session_state.own_relay_model = str(
-        relay_model
-        or st.session_state.get("own_relay_model")
-        or "gemini-3.1-flash-image-preview"
-    ).strip()
-    clear_registered_auth_session()
-
-
-def clear_own_credential_session():
-    st.session_state.use_own_key = False
-    st.session_state.own_provider = "gemini"
-    st.session_state.own_api_key = ""
-    st.session_state.own_relay_key = ""
-    st.session_state.own_relay_base = RELAY_API_BASE
-    st.session_state.own_relay_model = "gemini-3.1-flash-image-preview"
-
-
-def platform_auth_status() -> dict:
-    return get_database_status(EXPECTED_TABLES)
-
-
-def platform_auth_ready() -> bool:
-    status = platform_auth_status()
-    return bool(
-        status.get("configured")
-        and status.get("reachable")
-        and not status.get("missing_tables")
-    )
-
-
-def current_runtime_mode() -> str:
-    return get_runtime_mode(platform_database_enabled(), platform_auth_ready())
-
-
-def get_runtime_credentials(preferred_provider: str = ""):
-    settings = get_settings()
-    provider = preferred_provider or settings.get("default_image_provider", "Gemini")
-    provider = "relay" if provider == "中转站" else provider.lower()
-    return resolve_runtime_credentials(
-        preferred_provider=provider,
-        use_own_credentials=bool(st.session_state.get("use_own_key")),
-        own_provider=st.session_state.get("own_provider", "gemini"),
-        own_gemini_key=st.session_state.get("own_api_key", ""),
-        own_relay_key=st.session_state.get("own_relay_key", ""),
-        own_relay_base=st.session_state.get("own_relay_base", RELAY_API_BASE),
-        own_relay_model=st.session_state.get(
-            "own_relay_model", "gemini-3.1-flash-image-preview"
-        ),
-        system_gemini_key=peek_system_api_key(),
-        system_relay_key=settings.get("relay_api_key", ""),
-        system_relay_base=settings.get("relay_api_base", RELAY_API_BASE),
-        system_relay_model=settings.get(
-            "relay_default_image_model", "gemini-3.1-flash-image-preview"
-        ),
-    )
-
-
-def validate_active_registered_session() -> bool:
-    if not st.session_state.get("auth_user_id"):
-        return True
-    if not platform_auth_ready():
-        return False
-    try:
-        with session_scope() as session:
-            users = list_registered_users(session)
-        current_user = next(
-            (
-                item
-                for item in users
-                if item["user_id"] == st.session_state.get("auth_user_id")
-            ),
-            None,
-        )
-        return bool(
-            current_user
-            and current_user.get("status") == "active"
-            and current_user.get("membership_status") == "active"
-        )
-    except Exception:
-        return False
-
-
-def render_platform_workspace_sidebar():
-    ctx = sync_platform_session_context()
-    if not ctx:
-        platform_error = st.session_state.get("platform_context_error", "")
-        if platform_database_enabled() and platform_error:
-            st.caption(f"团队工作区暂不可用: {platform_error[:80]}")
-        return
-
-    st.markdown("---")
-    st.markdown("#### 🏢 团队工作区")
-    st.caption(ctx["organization_name"])
-    if ctx["projects"]:
-        selected_project_id = st.selectbox(
-            "当前项目",
-            options=[item["id"] for item in ctx["projects"]],
-            index=next(
-                (
-                    i
-                    for i, item in enumerate(ctx["projects"])
-                    if item["id"] == ctx["project_id"]
-                ),
-                0,
-            ),
-            format_func=lambda value: next(
-                (item["name"] for item in ctx["projects"] if item["id"] == value), value
-            ),
-            key="platform_project_selector",
-        )
-        if selected_project_id != st.session_state.get("platform_project_id"):
-            st.session_state.platform_project_id = selected_project_id
-            st.session_state.platform_project_name = next(
-                (
-                    item["name"]
-                    for item in ctx["projects"]
-                    if item["id"] == selected_project_id
-                ),
-                ctx["project_name"],
-            )
-    st.caption(f"当前成员: {ctx['username']} · 角色: {ctx['role']}")
-    if st.session_state.get("use_own_key"):
-        st.caption("当前请求使用自己的 Gemini Key，不扣共享钱包。")
-    else:
-        st.caption(f"共享钱包余额: {ctx['wallet_balance']:,} credits")
-
-
-USAGE_STATS_LOCK = threading.RLock()
-
-
-def get_users():
-    return load_json(USERS_FILE, {})
-
-
-def save_users(data):
-    return save_json(USERS_FILE, data)
-
-
-def get_user(uid):
-    with USAGE_STATS_LOCK:
-        users = get_users()
-        if uid not in users:
-            users[uid] = {"daily": {}, "total": 0, "vip": False, "tokens_used": 0}
-            save_users(users)
-        return users[uid]
-
-
-def update_user_usage(uid, count=1, tokens=0):
-    with USAGE_STATS_LOCK:
-        users = get_users()
-        user = users.get(uid, {"daily": {}, "total": 0, "tokens_used": 0})
-        today = date.today().isoformat()
-        user["daily"][today] = user["daily"].get(today, 0) + count
-        user["total"] = user.get("total", 0) + count
-        user["tokens_used"] = user.get("tokens_used", 0) + tokens
-        users[uid] = user
-        save_users(users)
-
-
-def check_user_limit(uid):
-    with USAGE_STATS_LOCK:
-        s = get_settings()
-        user = get_user(uid)
-        today = date.today().isoformat()
-        used = user["daily"].get(today, 0)
-        limit = s["daily_limit_vip"] if user.get("vip") else s["daily_limit_user"]
-        return used < limit, used, limit
-
-
-def get_stats():
-    stats = load_json(
-        STATS_FILE,
-        {
-            "daily": {},
-            "total": 0,
-            "tokens_total": 0,
-            "daily_images": {},
-            "images_total": 0,
-        },
-    )
-    if "daily" not in stats or not isinstance(stats.get("daily"), dict):
-        stats["daily"] = {}
-    if "daily_images" not in stats or not isinstance(stats.get("daily_images"), dict):
-        stats["daily_images"] = {}
-    if "total" not in stats:
-        stats["total"] = 0
-    if "tokens_total" not in stats:
-        stats["tokens_total"] = 0
-    if "images_total" not in stats:
-        stats["images_total"] = 0
-    return stats
-
-
-def update_stats(count=1, tokens=0, image_count=0):
-    with USAGE_STATS_LOCK:
-        stats = get_stats()
-        today = date.today().isoformat()
-        stats["daily"][today] = stats["daily"].get(today, 0) + count
-        stats["total"] = stats.get("total", 0) + count
-        stats["tokens_total"] = stats.get("tokens_total", 0) + tokens
-        image_inc = max(0, int(image_count or 0))
-        stats["daily_images"][today] = stats["daily_images"].get(today, 0) + image_inc
-        stats["images_total"] = stats.get("images_total", 0) + image_inc
-        save_json(STATS_FILE, stats)
-
-
-def record_platform_usage_event_safe(
-    feature: str,
-    provider: str,
-    model: str,
-    request_count: int,
-    output_images: int,
-    tokens_used: int,
-    charge_source: str,
-    actor_label: str,
-    operation_key: str = "",
-    metadata_json=None,
-):
-    if not platform_database_enabled():
-        return
-    try:
-        context = sync_platform_session_context() or {}
-        effective_actor_label = context.get("username") or actor_label
-        payload = {
-            "feature": feature,
-            "provider": provider,
-            "model": model,
-            "request_count": int(request_count or 0),
-            "output_images": int(output_images or 0),
-            "tokens_used": int(tokens_used or 0),
-            "charge_source": charge_source,
-            "actor_label": effective_actor_label,
-            "operation_key": operation_key or "manual",
-            "metadata": metadata_json or {},
-            "organization_id": context.get("organization_id", ""),
-            "project_id": context.get("project_id", ""),
-            "user_id": context.get("user_id", ""),
-        }
-        digest = hashlib.sha256(
-            json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-        ).hexdigest()
-        with session_scope() as session:
-            charge_usage_to_wallet(
-                session,
-                feature=feature,
-                provider=provider,
-                model=model,
-                request_count=request_count,
-                output_images=output_images,
-                tokens_used=tokens_used,
-                charge_source=charge_source,
-                actor_label=effective_actor_label,
-                idempotency_key=operation_key or f"usage:{digest}",
-                organization_id=context.get("organization_id", ""),
-                project_id=context.get("project_id", ""),
-                user_id=context.get("user_id", ""),
-                metadata_json=metadata_json,
-            )
-        sync_platform_session_context()
-    except Exception:
-        pass
-
-
-def count_generated_images(results):
-    if not results:
-        return 0
-    return sum(
-        1
-        for item in results
-        if item.get("translated") is not None or item.get("image") is not None
-    )
-
-
-def get_today_generated_images_count() -> int:
-    stats = get_stats()
-    return int(stats.get("daily_images", {}).get(date.today().isoformat(), 0) or 0)
 
 
 # ==================== 合规检测 ====================
@@ -1824,67 +2881,218 @@ def save_user_compliance(uid, blacklist=None, whitelist=None):
     save_compliance(comp)
 
 
-def get_translate_compliance_templates():
-    comp = get_compliance()
-    templates = comp.get("translate_templates", {})
-    enabled = {k: v for k, v in templates.items() if v.get("enabled", True)}
-    return templates, enabled
+def _strip_code_fence(text: str) -> str:
+    if not text:
+        return ""
+    text = text.strip()
+    if text.startswith("```"):
+        lines = text.split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    return text
 
 
-def parse_compliance_words(text):
+def _parse_title_lines(text: str) -> list:
     if not text:
         return []
-    parts = re.split(r"[,\n]+", text)
-    return [p.strip() for p in parts if p.strip()]
+    cleaned_text = _strip_code_fence(text)
+    lines = [l.strip() for l in cleaned_text.split("\n") if l.strip()]
+    clean_lines = []
+    line_prefix_pattern = "|".join(re.escape(prefix) for prefix in TITLE_LINE_PREFIXES)
+    for line in lines:
+        cleaned = re.sub(
+            rf"^(Title\s*\d*[:.]?\s*|Option\s*\d*[:.]?\s*|\d+[:.]\s*|(?:{line_prefix_pattern})[:：]\s*)",
+            "",
+            line,
+            flags=re.IGNORECASE,
+        ).strip()
+        if cleaned:
+            clean_lines.append(cleaned)
+    return clean_lines
 
 
-def find_compliance_hits(text, terms):
-    if not text or not terms:
-        return []
-    text_lower = text.lower()
-    hits = [t for t in terms if t.lower() in text_lower]
-    return list(dict.fromkeys(hits))
+def _validate_bilingual_titles(lines: list) -> tuple:
+    details = {"line_count": len(lines), "invalid_en_lengths": []}
+    if len(lines) != 6:
+        return False, f"输出行数为{len(lines)}，需为6行", details
+    for idx, line in enumerate(lines):
+        if not line:
+            return False, f"第{idx + 1}行为空", details
+        if idx % 2 == 0:
+            en_len = len(line)
+            if en_len < MIN_TITLE_EN_CHARS or en_len > MAX_TITLE_EN_CHARS:
+                details["invalid_en_lengths"].append({"index": idx, "length": en_len})
+    if details["invalid_en_lengths"]:
+        return (
+            False,
+            f"英文行长度不符合{MIN_TITLE_EN_CHARS}-{MAX_TITLE_EN_CHARS}字符要求",
+            details,
+        )
+    return True, "", details
 
 
-def format_runtime_error_message(error, max_len=220):
-    raw = str(error).strip() if error is not None else ""
-    lower = raw.lower()
-    if "model_not_found" in lower or "no available channel for model" in lower:
-        return "⚠️ 当前中转站该模型没有可用通道，请切换其他模型或稍后再试。"
-    if "generation failed" in lower:
-        return "⚠️ 中转站图片生成失败，请换一个模型或稍后再试。"
-    if "wss connection timeout" in lower or '"limited"' in lower:
-        return "⚠️ 中转站上游超时或限流，请降低并发并稍后重试。"
-    if "api key invalid" in lower or "invalid api key" in lower:
-        return "⚠️ API Key 无效，请检查后重试。"
-    if "user location is not supported for the api use" in lower or (
-        "failed_precondition" in lower and "location is not supported" in lower
+def _validate_title_output(lines: list, target_language: str) -> tuple:
+    if target_language == "en":
+        details = {"line_count": len(lines), "invalid_en_lengths": []}
+        if len(lines) != 3:
+            return False, f"输出行数为{len(lines)}，需为3行英文标题", details
+        for idx, line in enumerate(lines):
+            if not line:
+                return False, f"第{idx + 1}行为空", details
+            en_len = len(line)
+            if en_len < MIN_TITLE_EN_CHARS or en_len > MAX_TITLE_EN_CHARS:
+                details["invalid_en_lengths"].append({"index": idx, "length": en_len})
+        if details["invalid_en_lengths"]:
+            return (
+                False,
+                f"英文行长度不符合{MIN_TITLE_EN_CHARS}-{MAX_TITLE_EN_CHARS}字符要求",
+                details,
+            )
+        return True, "", details
+    return _validate_bilingual_titles(lines)
+
+
+def _build_title_result(
+    success: bool,
+    titles: list = None,
+    raw_text: str = "",
+    error_type: str = "",
+    error_message: str = "",
+    retryable: bool = False,
+    attempt_count: int = 1,
+    input_mode: str = "text",
+    details: dict = None,
+):
+    return {
+        "success": success,
+        "titles": titles or [],
+        "raw_text": raw_text or "",
+        "error_type": error_type or "",
+        "error_message": error_message or "",
+        "retryable": retryable,
+        "attempt_count": attempt_count,
+        "input_mode": input_mode,
+        "details": details or {},
+        "target_language": details.get("target_language") if details else "",
+    }
+
+
+def _classify_title_error(error_message: str) -> tuple:
+    msg = (error_message or "").lower()
+    if "api key" in msg or "apikey" in msg or "unauthorized" in msg:
+        return "missing_api_key", False
+    if "failed_precondition" in msg or "user location is not supported" in msg:
+        return "location_restricted", False
+    if "model" in msg and (
+        "not found" in msg
+        or "unsupported" in msg
+        or "invalid" in msg
+        or "not available" in msg
     ):
-        return "⚠️ 当前服务器出口IP不在 Gemini API 可用地区（FAILED_PRECONDITION）。请切换到受支持地区节点（如 US/JP/SG），或改用 Vertex AI 区域端点。"
+        return "model_not_supported", False
     if (
-        "deadline_exceeded" in lower
-        or "deadline expired before operation could complete" in lower
-        or ("504" in lower and "deadline" in lower)
+        "base_url" in msg
+        or "base url" in msg
+        or "404" in msg
+        or "connection" in msg
+        or "connect" in msg
+        or "timeout" in msg
+        or "timed out" in msg
+        or "dns" in msg
+        or "name or service not known" in msg
+        or "refused" in msg
+        or "unreachable" in msg
+        or "failed to establish" in msg
     ):
-        return "⚠️ 请求超时（DEADLINE_EXCEEDED）。当前任务复杂度较高：请减少参考图数量、保持 1K 分辨率，或稍后重试。"
-    return raw[:max_len] if max_len and len(raw) > max_len else raw
+        return "provider_error", False
+    return "upstream_error", False
 
 
-# ==================== AI 客户端 ====================
+def format_title_error(result: dict) -> str:
+    error_type = result.get("error_type") or ""
+    base = "标题生成失败"
+    if error_type == "missing_api_key":
+        return f"{base}：未配置有效API Key。请在「提供商设置」中填写。"
+    if error_type == "model_not_supported":
+        return (
+            f"{base}：标题/视觉模型不可用或不支持当前提供商。请检查模型名称或Base URL。"
+        )
+    if error_type == "provider_error":
+        return f"{base}：提供商连接失败。请检查Base URL 或网络。"
+    if error_type == "location_restricted":
+        return f"{base}：已连通 Google，但当前账号或地区不支持该 API 调用。"
+    if error_type == "invalid_format":
+        return f"{base}：输出格式不符合预期（英文单语或英文+目标语言）或英文长度要求，已自动重试。"
+    if error_type == "retry_exhausted":
+        return f"{base}：输出格式仍不符合预期（英文单语或英文+目标语言）（已重试1次）。建议调整商品信息或模板提示词。"
+    if error_type == "input_missing":
+        return f"{base}：缺少必要的商品信息或图片。"
+    return f"{base}：上游请求失败，请稍后重试。"
+
+
+def sanitize_task_error(message: str, fallback: str = "任务执行失败") -> str:
+    msg = str(message or "").strip()
+    if not msg:
+        return fallback
+    low = msg.lower()
+    if "failed_precondition" in low or "user location is not supported" in low:
+        return "Google API 当前账号或地区不支持该调用。"
+    if "resource has been exhausted" in low or "proxy_config_error" in low:
+        return "中转站上游配额已用尽，请稍后重试或切换其他模型/提供商。"
+    if "timeout" in low or "timed out" in low:
+        return "请求超时，请检查网络、代理或模型响应速度。"
+    if "api key" in low or "unauthorized" in low:
+        return "API Key 无效或未配置。"
+    if "failed to decode base64 data" in low or "illegal base64" in low:
+        return "中转站图片输入格式不兼容，已切换为兼容模式后请重试。"
+    if (
+        "base_url" in low
+        or "base url" in low
+        or "connect" in low
+        or "connection" in low
+        or "dns" in low
+        or "refused" in low
+        or "unreachable" in low
+    ):
+        return "提供商连接失败，请检查 Base URL、代理或网络。"
+    msg = re.sub(r"(https?://)([^:/@\s]+):([^/@\s]+)@", r"\1***:***@", msg)
+    msg = re.sub(r"\s+", " ", msg)
+    return msg[:180] or fallback
+
+
+# ==================== AI客户端 (V15.2修复版) ====================
 class GeminiClient:
-    """Gemini image client for the default official image workflow."""
+    """Gemini 3 Pro Image 客户端 - V15.2修复版"""
 
-    def __init__(self, api_key, model=PRIMARY_IMAGE_MODEL, timeout_ms: int = 180000):
+    def __init__(
+        self,
+        api_key,
+        model="gemini-3.1-flash-image-preview",
+        base_url="",
+        title_model="",
+        vision_model="",
+    ):
+        s = get_settings()
         self.api_key = api_key
-        self.model = model or PRIMARY_IMAGE_MODEL
-        self.timeout_ms = timeout_ms
-        self.use_vertex_express = should_use_vertex_express(api_key)
-        http_opts = None
-        try:
-            http_opts = types.HttpOptions(timeout=timeout_ms)
-        except Exception:
-            http_opts = None
-        self.client = create_genai_client(api_key, http_options=http_opts)
+        self.model = model or s.get("default_model", "gemini-3.1-flash-image-preview")
+        self.base_url = (base_url or "").strip()
+        self.title_model = title_model or s.get(
+            "default_title_model", "gemini-3.1-flash-lite-preview"
+        )
+        self.vision_model = vision_model or s.get(
+            "default_vision_model", "gemini-3.1-flash-lite-preview"
+        )
+        client_kwargs = {
+            "api_key": api_key,
+            "http_options": types.HttpOptions(
+                base_url=base_url or None,
+                timeout=GEMINI_IMAGE_REQUEST_TIMEOUT_SECONDS * 1000,
+            ),
+        }
+        self.client = genai.Client(**client_kwargs)
         self.prompts = self._load_prompts_safe()
         self.total_tokens = 0
         self.last_error = None
@@ -1896,78 +3104,34 @@ class GeminiClient:
                 prompts[key] = default_value
         return prompts
 
-    def _call(self, func, retries=3):
-        def _backoff(attempt_idx: int, base_sec: float = 1.2, max_sec: float = 12.0):
-            wait_sec = min(max_sec, (2**attempt_idx) * base_sec) + random.uniform(
-                0.2, 0.9
-            )
-            time.sleep(wait_sec)
-
+    def _call(
+        self, func, retries=3, timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS
+    ):
+        timeout_seconds = max(
+            1, int(timeout_seconds or GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS)
+        )
         for i in range(retries):
             try:
-                with GEMINI_CALL_SEMAPHORE:
-                    return func()
+                return _run_with_timeout(func, timeout_seconds)
             except Exception as e:
                 self.last_error = str(e)
                 err = str(e).lower()
-                if (
-                    "api key expired" in err
-                    or "api_key_invalid" in err
-                    or "invalid api key" in err
-                ):
-                    raise Exception(
-                        "⚠️ API Key 无效或已过期，请更新系统 Key 或自有 Key。"
-                    )
-                if "user location is not supported for the api use" in err or (
-                    "failed_precondition" in err and "location is not supported" in err
-                ):
-                    if self.use_vertex_express:
-                        raise Exception(
-                            "⚠️ Vertex AI Express 当前请求被地区/策略限制，请检查 Key 权限或稍后重试。"
-                        )
-                    raise Exception(
-                        "⚠️ 当前服务器出口IP不在 Gemini API 可用地区（FAILED_PRECONDITION）。请切换到受支持地区节点（如 US/JP/SG），或改用 Vertex AI 区域端点。"
-                    )
-                if (
-                    "deadline_exceeded" in err
-                    or "deadline expired before operation could complete" in err
-                    or ("504" in err and "deadline" in err)
-                ):
-                    if i < retries - 1:
-                        _backoff(i, base_sec=1.8, max_sec=14.0)
-                        continue
-                    raise Exception(
-                        "⚠️ 请求超时（DEADLINE_EXCEEDED）。请减少参考图数量、保持 1K 分辨率，或稍后重试。"
-                    )
                 if "quota" in err:
                     raise Exception("⚠️ API配额已用尽")
-                if (
-                    "network" in err
-                    or "connection" in err
-                    or "timed out" in err
-                    or "connection reset" in err
-                ):
+                if "timeout" in err or "timed out" in err:
+                    raise Exception(f"⚠️ 请求超时（{timeout_seconds}s）")
+                if "network" in err or "connection" in err:
                     if i < retries - 1:
-                        _backoff(i, base_sec=1.0, max_sec=8.0)
+                        time.sleep(2**i)
                         continue
                     raise Exception("⚠️ 网络连接失败")
-                if (
-                    "overloaded" in err
-                    or "503" in err
-                    or "unavailable" in err
-                    or "internal" in err
-                ):
+                if "rate" in err or "429" in err:
                     if i < retries - 1:
-                        _backoff(i, base_sec=1.5, max_sec=10.0)
-                        continue
-                    raise Exception("⚠️ 模型繁忙，请稍后重试，或减少参考图/降低分辨率。")
-                if "rate" in err or "429" in err or "resource_exhausted" in err:
-                    if i < retries - 1:
-                        _backoff(i, base_sec=1.3, max_sec=9.0)
+                        time.sleep(3)
                         continue
                     raise Exception("⚠️ 请求过于频繁")
                 if i < retries - 1:
-                    _backoff(i, base_sec=0.8, max_sec=6.0)
+                    time.sleep(1)
                     continue
                 raise e
         raise Exception(f"⚠️ 请求失败: {self.last_error}")
@@ -1984,6 +3148,109 @@ class GeminiClient:
                 types.Part.from_bytes(data=buf.getvalue(), mime_type="image/png")
             )
         return parts
+
+    def _prep_inline_image_parts(self, images, max_count=3):
+        parts = []
+        for img in images[:max_count]:
+            buf = io.BytesIO()
+            ic = img.copy()
+            if max(ic.size) > 1024:
+                ic.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+            ic.save(buf, format="PNG", optimize=True)
+            parts.append(
+                {
+                    "inline_data": {
+                        "mime_type": "image/png",
+                        "data": base64.b64encode(buf.getvalue()).decode(),
+                    }
+                }
+            )
+        return parts
+
+    def _manual_generate_content(
+        self,
+        model: str,
+        parts: list,
+        response_modalities: list,
+        aspect: str = "1:1",
+        size: str = "1K",
+        thinking_level: str = "high",
+        timeout_seconds: int = GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS,
+    ):
+        payload = {"contents": [{"parts": parts}]}
+        generation_config = {"responseModalities": response_modalities}
+        if "IMAGE" in response_modalities:
+            generation_config["imageConfig"] = {"aspectRatio": aspect}
+            if self.model == "gemini-3-pro-image-preview" and size in ["2K", "4K"]:
+                generation_config["imageConfig"]["imageSize"] = size
+            if self.model == "gemini-3-pro-image-preview":
+                generation_config["thinkingConfig"] = {"thinkingLevel": thinking_level}
+        payload["generationConfig"] = generation_config
+        endpoint = f"{self.base_url.rstrip('/')}/v1beta/models/{model}:generateContent?key={self.api_key}"
+        req = urllib.request.Request(
+            endpoint,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+                return json.loads(resp.read().decode("utf-8", "ignore"))
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", "ignore")
+            raise Exception(sanitize_task_error(body or str(e)))
+        except Exception as e:
+            raise Exception(sanitize_task_error(str(e)))
+
+    def _count_manual_tokens(self, response_data: dict):
+        try:
+            tokens = (
+                ((response_data or {}).get("usageMetadata") or {}).get(
+                    "totalTokenCount"
+                )
+            ) or 0
+            self.total_tokens += tokens
+            return tokens
+        except Exception:
+            return 0
+
+    def _extract_text_from_manual_response(self, response_data: dict) -> str:
+        try:
+            parts = (
+                ((response_data or {}).get("candidates") or [])[0].get("content") or {}
+            ).get("parts") or []
+            texts = [part.get("text", "") for part in parts if part.get("text")]
+            return "\n".join(texts).strip()
+        except Exception:
+            return ""
+
+    def _extract_image_from_manual_response(self, response_data: dict):
+        try:
+            parts = (
+                ((response_data or {}).get("candidates") or [])[0].get("content") or {}
+            ).get("parts") or []
+        except Exception:
+            parts = []
+        for part in parts:
+            inline = part.get("inlineData") or part.get("inline_data") or {}
+            img_data = inline.get("data")
+            if img_data:
+                try:
+                    return Image.open(io.BytesIO(base64.b64decode(img_data)))
+                except Exception:
+                    continue
+            text = (part.get("text") or "").strip()
+            if not text:
+                continue
+            match = re.search(r"https?://[^)\s]+", text)
+            if not match:
+                continue
+            url = match.group(0)
+            try:
+                with urllib.request.urlopen(url, timeout=30) as resp:
+                    return Image.open(io.BytesIO(resp.read()))
+            except Exception:
+                continue
+        return None
 
     def _count_tokens(self, response):
         try:
@@ -2034,20 +3301,7 @@ class GeminiClient:
         return self.total_tokens
 
     def get_last_error(self):
-        return self.last_error
-
-    def _target_is_english(self, target_lang) -> bool:
-        normalized = str(target_lang or "").strip().lower()
-        if not normalized:
-            return False
-        if normalized in {"en", "english", "us english", "american english"}:
-            return True
-        return "english" in normalized
-
-    def _lines_have_cjk(self, lines) -> bool:
-        if not lines:
-            return False
-        return any(contains_cjk(str(line)) for line in lines if str(line).strip())
+        return sanitize_task_error(self.last_error)
 
     def analyze_product(self, images, name="", detail=""):
         default_result = {
@@ -2080,17 +3334,31 @@ Return valid JSON only."""
         parts.append(prompt)
 
         try:
-            resp = self._call(
-                lambda: self.client.models.generate_content(
-                    model=PRIMARY_IMAGE_MODEL,
-                    contents=parts,
-                    config=types.GenerateContentConfig(response_modalities=["TEXT"]),
+            if self.base_url:
+                response_data = self._manual_generate_content(
+                    self.vision_model,
+                    self._prep_inline_image_parts(images, 5) + [{"text": prompt}],
+                    ["TEXT"],
+                    timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS,
                 )
-            )
-            self._count_tokens(resp)
+                self._count_manual_tokens(response_data)
+                text = self._extract_text_from_manual_response(response_data)
+            else:
+                resp = self._call(
+                    lambda: self.client.models.generate_content(
+                        model=self.vision_model,
+                        contents=parts,
+                        config=types.GenerateContentConfig(
+                            response_modalities=["TEXT"]
+                        ),
+                    ),
+                    timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS,
+                )
+                self._count_tokens(resp)
+                text = resp.text if resp.text else ""
 
-            if resp.text:
-                result = self._parse_json_response(resp.text, default_result)
+            if text:
+                result = self._parse_json_response(text, default_result)
                 for key, value in default_result.items():
                     if key not in result or not result[key]:
                         result[key] = value
@@ -2100,33 +3368,41 @@ Return valid JSON only."""
             self.last_error = str(e)
             return default_result
 
-    def generate_requirements(self, anchor, types_counts, tags=None):
-        templates = get_templates()["combo_types"]
+    def generate_requirements(
+        self, anchor, types_counts, tags=None, target_language="zh"
+    ):
+        templates = get_template_group("combo_types")
         types_str = ", ".join(
             [f"{templates[k]['name']}x{v}" for k, v in types_counts.items()]
         )
+        language_info = get_target_language(target_language)
 
         prompt_template = self.prompts.get(
             "requirements_gen", DEFAULT_PROMPTS["requirements_gen"]
         )
         try:
-            prompt = prompt_template.format(
+            prompt = fill_prompt_template(
+                prompt_template,
                 product_name=anchor.get("product_name_zh", "商品"),
                 category=anchor.get("primary_category", "General"),
                 features=", ".join(anchor.get("visual_attrs", [])[:3]),
                 tags=", ".join(tags) if tags else "无",
                 types=types_str,
+                output_language_name=language_info["english_name"],
+                output_language_native=language_info["native_name"],
+                output_language_label=language_info["label"],
             )
-        except KeyError:
+        except Exception:
             return []
 
         try:
             resp = self._call(
                 lambda: self.client.models.generate_content(
-                    model=PRIMARY_IMAGE_MODEL,
+                    model=self.title_model,
                     contents=[prompt],
                     config=types.GenerateContentConfig(response_modalities=["TEXT"]),
-                )
+                ),
+                timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS,
             )
             self._count_tokens(resp)
             result = self._parse_json_response(resp.text if resp.text else "[]", [])
@@ -2135,33 +3411,39 @@ Return valid JSON only."""
             self.last_error = str(e)
             return []
 
-    def generate_en_copy(self, anchor, requirements):
+    def generate_en_copy(self, anchor, requirements, target_language="zh"):
         if not requirements:
             return requirements
 
         req_str = "\n".join(
             [f"- {r.get('type_name', '')}: {r.get('topic', '')}" for r in requirements]
         )
+        language_info = get_target_language(target_language)
         prompt_template = self.prompts.get(
             "en_copy_gen", DEFAULT_PROMPTS["en_copy_gen"]
         )
 
         try:
-            prompt = prompt_template.format(
+            prompt = fill_prompt_template(
+                prompt_template,
                 product_name=anchor.get("product_name_en", "Product"),
                 category=anchor.get("primary_category", "General"),
                 requirements=req_str,
+                output_language_name=language_info["english_name"],
+                output_language_native=language_info["native_name"],
+                output_language_label=language_info["label"],
             )
-        except KeyError:
+        except Exception:
             return requirements
 
         try:
             resp = self._call(
                 lambda: self.client.models.generate_content(
-                    model=PRIMARY_IMAGE_MODEL,
+                    model=self.title_model,
                     contents=[prompt],
                     config=types.GenerateContentConfig(response_modalities=["TEXT"]),
-                )
+                ),
+                timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS,
             )
             self._count_tokens(resp)
 
@@ -2174,34 +3456,39 @@ Return valid JSON only."""
                 key = (r.get("type_key"), r.get("index"))
                 if key in copy_map:
                     c = copy_map[key]
-                    r["headline"] = re.sub(
-                        r"[^a-zA-Z0-9\s]", "", c.get("headline", "")
-                    )[:MAX_HEADLINE_CHARS]
-                    r["subline"] = re.sub(r"[^a-zA-Z0-9\s]", "", c.get("subline", ""))[
-                        :MAX_SUBLINE_CHARS
-                    ]
-                    r["badge"] = re.sub(r"[^a-zA-Z0-9\s]", "", c.get("badge", ""))[
-                        :MAX_BADGE_CHARS
-                    ]
+                    r["headline"] = clean_generated_copy(
+                        c.get("headline", ""), MAX_HEADLINE_CHARS
+                    )
+                    r["subline"] = clean_generated_copy(
+                        c.get("subline", ""), MAX_SUBLINE_CHARS
+                    )
+                    r["badge"] = clean_generated_copy(
+                        c.get("badge", ""), MAX_BADGE_CHARS
+                    )
             return requirements
         except Exception as e:
             self.last_error = str(e)
             return requirements
 
-    def compose_image_prompt(self, anchor, req, aspect="1:1"):
-        templates = get_templates()["combo_types"]
+    def compose_image_prompt(self, anchor, req, aspect="1:1", target_language="zh"):
+        templates = get_template_group("combo_types")
         type_info = templates.get(req.get("type_key", ""), {})
+        language_info = get_target_language(target_language)
 
         if req.get("type_key") == "size":
             prompt_template = self.prompts.get(
                 "size_image_prompt", DEFAULT_PROMPTS["size_image_prompt"]
             )
             try:
-                return prompt_template.format(
+                return fill_prompt_template(
+                    prompt_template,
                     product_name=anchor.get("product_name_en", "Product"),
                     aspect_ratio=aspect,
+                    output_language_name=language_info["english_name"],
+                    output_language_native=language_info["native_name"],
+                    output_language_label=language_info["label"],
                 )
-            except KeyError:
+            except Exception:
                 return f"Professional product dimension diagram. Product: {anchor.get('product_name_en', 'Product')}. Aspect: {aspect}"
 
         text_content = ""
@@ -2216,7 +3503,8 @@ Return valid JSON only."""
             "image_prompt", DEFAULT_PROMPTS["image_prompt"]
         )
         try:
-            return prompt_template.format(
+            return fill_prompt_template(
+                prompt_template,
                 product_name=anchor.get("product_name_en", "Product"),
                 category=anchor.get("primary_category", "General"),
                 image_type=req.get("type_name", ""),
@@ -2224,8 +3512,11 @@ Return valid JSON only."""
                 scene=req.get("scene", ""),
                 text_content=text_content,
                 aspect_ratio=aspect,
+                output_language_name=language_info["english_name"],
+                output_language_native=language_info["native_name"],
+                output_language_label=language_info["label"],
             )
-        except KeyError:
+        except Exception:
             return f"Professional ecommerce product image. Product: {anchor.get('product_name_en', 'Product')}. Aspect: {aspect}"
 
     def generate_image(
@@ -2234,122 +3525,195 @@ Return valid JSON only."""
         prompt,
         aspect="1:1",
         size="1K",
-        thinking_level="minimal",
-        enforce_english=False,
-        max_attempts=1,
+        thinking_level="high",
+        text_language="zh",
     ):
-        """生成图片 - 支持英文文本校验与自动重试"""
+        """生成图片 - V15.2修复版，增加详细错误信息"""
         max_refs = MODELS.get(self.model, {}).get("max_refs", 3)
+        parts = self._prep_images(refs, min(len(refs), max_refs))
 
-        def _generate_once(extra_guard=""):
-            parts = self._prep_images(refs, min(len(refs), max_refs))
-            guard = "CRITICAL: ALL text in the image MUST be ENGLISH only. NO Chinese/Japanese/Korean characters."
-            if extra_guard:
-                guard = f"{guard}\n{extra_guard}"
-            full_prompt = f"""{guard}
+        full_prompt = f"""CRITICAL: {get_image_language_instruction(text_language)}
 
 {prompt}"""
-            parts.append(full_prompt)
+        parts.append(full_prompt)
 
-            model_info = MODELS.get(self.model, MODELS[PRIMARY_IMAGE_MODEL])
-            available_res = model_info.get("resolutions", ["1K"])
-            target_size = size if size in available_res else "1K"
-            image_config = types.ImageConfig(aspect_ratio=aspect)
-            if target_size in ["2K", "4K"]:
-                image_config = types.ImageConfig(
-                    aspect_ratio=aspect, image_size=target_size
-                )
+        # 构建配置 - 根据模型类型决定是否使用thinking_config
+        image_config = types.ImageConfig(aspect_ratio=aspect)
 
-            cfg_kwargs = {
-                "response_modalities": ["IMAGE"],
-                "image_config": image_config,
-            }
-            if model_info.get("supports_thinking", False):
-                thinking_cfg = thinking_config_from_level(thinking_level)
-                if thinking_cfg:
-                    cfg_kwargs["thinking_config"] = thinking_cfg
-            config = types.GenerateContentConfig(**cfg_kwargs)
+        # 只有 Gemini 3 Pro 支持 image_size 和 thinking_level
+        is_gemini3_pro = self.model == "gemini-3-pro-image-preview"
 
-            resp = self._call(
-                lambda: self.client.models.generate_content(
-                    model=self.model, contents=parts, config=config
-                )
+        if is_gemini3_pro and size in ["2K", "4K"]:
+            image_config = types.ImageConfig(aspect_ratio=aspect, image_size=size)
+
+        # 构建GenerateContentConfig - thinking_config只用于Gemini 3 Pro
+        if is_gemini3_pro:
+            config = types.GenerateContentConfig(
+                response_modalities=["IMAGE", "TEXT"],
+                image_config=image_config,
+                thinking_config=types.ThinkingConfig(thinking_level=thinking_level),
             )
-            self._count_tokens(resp)
-
-            if resp.candidates:
-                for part in resp.candidates[0].content.parts:
-                    if hasattr(part, "inline_data") and part.inline_data:
-                        img_data = part.inline_data.data
-                        if img_data:
-                            return Image.open(io.BytesIO(img_data))
-            return None
-
-        attempts = max(1, int(max_attempts or 1))
-        for i in range(attempts):
-            extra_guard = (
-                "STRICT: Remove any non-English text. Use English only."
-                if i > 0
-                else ""
+        else:
+            # gemini-2.5-flash-image 不支持 thinking_config
+            config = types.GenerateContentConfig(
+                response_modalities=["IMAGE", "TEXT"], image_config=image_config
             )
-            try:
-                img = _generate_once(extra_guard=extra_guard)
-            except Exception as e:
-                self.last_error = str(e)
-                raise e
-            if not img:
-                self.last_error = "API返回无图片数据"
-                if i == attempts - 1:
-                    return None
-                continue
-            if not enforce_english:
-                return img
-            # OCR 检测是否出现中日韩字符
-            ocr = self.extract_text_from_image(img, source_lang="auto")
-            text = " ".join(ocr.get("lines", []))
-            if contains_cjk(text):
-                self.last_error = "检测到非英文文本，自动重试"
-                continue
-            return img
-        return None
 
-    def generate_titles(self, product_info, template_prompt):
-        """生成商品标题 - 支持中英双语"""
-        prompt = template_prompt.replace("{product_info}", product_info)
         try:
-            resp = self._call(
-                lambda: self.client.models.generate_content(
-                    model=self.model or TITLE_TEXT_MODEL,
-                    contents=[prompt],
-                    config=types.GenerateContentConfig(response_modalities=["TEXT"]),
+            if self.base_url:
+                response_data = self._manual_generate_content(
+                    self.model,
+                    self._prep_inline_image_parts(refs, min(len(refs), max_refs))
+                    + [{"text": full_prompt}],
+                    ["IMAGE", "TEXT"],
+                    aspect=aspect,
+                    size=size,
+                    thinking_level=thinking_level,
+                    timeout_seconds=GEMINI_IMAGE_REQUEST_TIMEOUT_SECONDS,
                 )
-            )
-            self._count_tokens(resp)
-            text = resp.text.strip() if resp.text else ""
+                self._count_manual_tokens(response_data)
+                image = self._extract_image_from_manual_response(response_data)
+                if image:
+                    return image
+            else:
+                resp = self._call(
+                    lambda: self.client.models.generate_content(
+                        model=self.model, contents=parts, config=config
+                    ),
+                    timeout_seconds=GEMINI_IMAGE_REQUEST_TIMEOUT_SECONDS,
+                )
+                self._count_tokens(resp)
 
-            # 解析中英双语标题
-            lines = [l.strip() for l in text.split("\n") if l.strip()]
-            # 过滤掉标签行
-            clean_lines = []
-            for line in lines:
-                cleaned = re.sub(
-                    r"^(Title\s*\d*[:.]?\s*|Option\s*\d*[:.]?\s*|\d+[:.]\s*|English[:]\s*|Chinese[:]\s*|中文[:]\s*)",
-                    "",
-                    line,
-                    flags=re.IGNORECASE,
-                ).strip()
-                if cleaned:
-                    clean_lines.append(cleaned)
+                if resp.candidates:
+                    for part in resp.candidates[0].content.parts:
+                        if hasattr(part, "inline_data") and part.inline_data:
+                            img_data = part.inline_data.data
+                            if img_data:
+                                return Image.open(io.BytesIO(img_data))
 
-            return clean_lines[:6] if len(clean_lines) >= 6 else clean_lines
+            self.last_error = "API返回无图片数据"
+            return None
         except Exception as e:
             self.last_error = str(e)
-            return []
+            raise e
 
-    def generate_titles_from_image(self, images, product_info="", template_prompt=None):
+    def generate_titles(self, product_info, template_prompt, target_language="zh"):
+        if not self.api_key:
+            return _build_title_result(
+                False,
+                error_type="missing_api_key",
+                error_message="API Key未配置",
+                retryable=False,
+                attempt_count=0,
+                input_mode="text",
+            )
+
+        language_info = get_target_language(target_language)
+        prompt = build_title_prompt(template_prompt, product_info, target_language)
+        last_raw = ""
+        last_lines = []
+        for attempt in range(1, 3):
+            try:
+                prompt_text = prompt
+                if attempt == 2:
+                    prompt_text = (
+                        f"{prompt}\n\nSTRICT OUTPUT: Return exactly 6 lines, "
+                        f"English then {language_info['english_name']} for each title, no extra lines."
+                    )
+                resp = self._call(
+                    lambda: self.client.models.generate_content(
+                        model=self.title_model,
+                        contents=[prompt_text],
+                        config=types.GenerateContentConfig(
+                            response_modalities=["TEXT"]
+                        ),
+                    ),
+                    timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS,
+                )
+                self._count_tokens(resp)
+                text = resp.text.strip() if resp.text else ""
+                lines = _parse_title_lines(text)
+                valid, reason, details = _validate_title_output(lines, target_language)
+                details["target_language"] = target_language
+                if valid:
+                    return _build_title_result(
+                        True,
+                        titles=lines[:6],
+                        raw_text=text,
+                        attempt_count=attempt,
+                        input_mode="text",
+                        details=details,
+                    )
+
+                last_raw = text
+                last_lines = lines
+                if attempt == 1:
+                    continue
+                return _build_title_result(
+                    False,
+                    titles=lines[:6],
+                    raw_text=text,
+                    error_type="retry_exhausted",
+                    error_message=reason or "输出格式不符合要求",
+                    retryable=False,
+                    attempt_count=attempt,
+                    input_mode="text",
+                    details=details,
+                )
+            except Exception as e:
+                self.last_error = str(e)
+                error_type, retryable = _classify_title_error(str(e))
+                if error_type == "upstream_error" and self.base_url:
+                    error_type = "provider_error"
+                return _build_title_result(
+                    False,
+                    titles=last_lines[:6],
+                    raw_text=last_raw,
+                    error_type=error_type,
+                    error_message=str(e),
+                    retryable=retryable,
+                    attempt_count=attempt,
+                    input_mode="text",
+                )
+
+        return _build_title_result(
+            False,
+            titles=last_lines[:6],
+            raw_text=last_raw,
+            error_type="invalid_format",
+            error_message="输出格式不符合要求",
+            retryable=False,
+            attempt_count=2,
+            input_mode="text",
+            details={"line_count": len(last_lines)},
+        )
+
+    def generate_titles_from_image(
+        self,
+        images,
+        product_info="",
+        template_prompt=None,
+        target_language="zh",
+    ):
         """从图片分析生成商品标题"""
+        if not self.api_key:
+            return _build_title_result(
+                False,
+                error_type="missing_api_key",
+                error_message="API Key未配置",
+                retryable=False,
+                attempt_count=0,
+                input_mode="image",
+            )
         if not images:
-            return []
+            return _build_title_result(
+                False,
+                error_type="input_missing",
+                error_message="未提供图片",
+                retryable=False,
+                attempt_count=0,
+                input_mode="image",
+            )
 
         parts = self._prep_images(images, 5)
 
@@ -2358,852 +3722,102 @@ Return valid JSON only."""
                 "prompt", ""
             )
 
-        prompt = template_prompt.replace(
-            "{product_info}", product_info or "No additional info provided"
+        language_info = get_target_language(target_language)
+        prompt = build_title_prompt(
+            template_prompt,
+            product_info or "No additional info provided",
+            target_language,
         )
-        parts.append(prompt)
 
-        try:
-            model_name = self.model or TITLE_TEXT_MODEL
-            resp = self._call(
-                lambda: self.client.models.generate_content(
-                    model=model_name,
-                    contents=parts,
-                    config=types.GenerateContentConfig(response_modalities=["TEXT"]),
-                )
-            )
-            self._count_tokens(resp)
-            text = resp.text.strip() if resp.text else ""
-            lines = [l.strip() for l in text.split("\n") if l.strip()]
-
-            clean_lines = []
-            for line in lines:
-                cleaned = re.sub(
-                    r"^(Title\s*\d*[:.]?\s*|Option\s*\d*[:.]?\s*|\d+[:.]\s*|English[:]\s*|Chinese[:]\s*|中文[:]\s*)",
-                    "",
-                    line,
-                    flags=re.IGNORECASE,
-                ).strip()
-                if cleaned:
-                    clean_lines.append(cleaned)
-            return clean_lines[:6] if len(clean_lines) >= 6 else clean_lines
-        except Exception as e:
-            self.last_error = str(e)
-            return []
-
-    def extract_text_from_image(self, image, source_lang="auto"):
-        """提取图片中文字"""
-        if image is None:
-            return {"language": source_lang, "lines": []}
-        parts = self._prep_images([image], 1)
-        prompt_template = self.prompts.get(
-            "image_text_extract", DEFAULT_PROMPTS["image_text_extract"]
-        )
-        try:
-            prompt = prompt_template.format(source_lang=source_lang or "auto")
-        except KeyError:
-            prompt = f"""Extract all visible text and return JSON only:
-{{"language":"auto","lines":["line1","line2"]}}
-Source language hint: {source_lang or "auto"}"""
-        parts.append(prompt)
-        try:
-            model_name = self.model or PRIMARY_IMAGE_MODEL
-            resp = self._call(
-                lambda: self.client.models.generate_content(
-                    model=model_name,
-                    contents=parts,
-                    config=types.GenerateContentConfig(response_modalities=["TEXT"]),
-                )
-            )
-            self._count_tokens(resp)
-            parsed = self._parse_json_response(resp.text if resp.text else "", {})
-            if isinstance(parsed, list):
-                lines = parsed
-                language = source_lang
-            elif isinstance(parsed, dict):
-                lines = parsed.get("lines") or parsed.get("text") or []
-                language = parsed.get("language") or source_lang
-            else:
-                lines = []
-                language = source_lang
-            cleaned = [str(l).strip() for l in lines if str(l).strip()]
-            return {"language": language or source_lang, "lines": cleaned}
-        except Exception as e:
-            self.last_error = str(e)
-            return {"language": source_lang, "lines": []}
-
-    def translate_lines(
-        self,
-        lines,
-        source_lang="auto",
-        target_lang="English",
-        style_hint="Literal",
-        avoid_terms=None,
-        enforce_english=False,
-        max_attempts=1,
-    ):
-        """翻译文本行"""
-        if not lines:
-            return []
-        lines_json = json.dumps(lines, ensure_ascii=False)
-        prompt_template = self.prompts.get(
-            "image_text_translate", DEFAULT_PROMPTS["image_text_translate"]
-        )
-        avoid_terms_text = ", ".join(avoid_terms) if avoid_terms else "None"
-        try:
-            base_prompt = prompt_template.format(
-                source_lang=source_lang or "auto",
-                target_lang=target_lang,
-                style_hint=style_hint,
-                lines_json=lines_json,
-                avoid_terms=avoid_terms_text,
-            )
-        except KeyError:
-            base_prompt = f"""Translate each line to {target_lang} from {source_lang or "auto"}.
-Style: {style_hint}
-Avoid these compliance terms in output (if any): {avoid_terms_text}
-Return JSON array only.
-Lines JSON: {lines_json}"""
-        attempts = max(1, int(max_attempts or 1))
-        must_enforce_english = bool(enforce_english) or self._target_is_english(
-            target_lang
-        )
-        model_name = self.model or PRIMARY_IMAGE_MODEL
-        for i in range(attempts):
-            prompt = base_prompt
-            if avoid_terms and "avoid" not in prompt.lower():
-                prompt = f"{prompt}\nAvoid these compliance terms in output (if any): {avoid_terms_text}"
-            if must_enforce_english:
-                strict_guard = "CRITICAL: Output must be US English only. Do not output any Chinese/Japanese/Korean characters. Keep line count aligned."
-                if i > 0:
-                    strict_guard += " This is a retry because non-English characters were detected previously."
-                prompt = f"{prompt}\n{strict_guard}"
+        last_raw = ""
+        last_lines = []
+        for attempt in range(1, 3):
             try:
-                resp = self._call(
-                    lambda: self.client.models.generate_content(
-                        model=model_name,
-                        contents=[prompt],
-                        config=types.GenerateContentConfig(
-                            response_modalities=["TEXT"]
-                        ),
+                prompt_text = prompt
+                if attempt == 2:
+                    prompt_text = (
+                        f"{prompt}\n\nSTRICT OUTPUT: Return exactly 6 lines, "
+                        f"English then {language_info['english_name']} for each title, no extra lines."
                     )
-                )
-                self._count_tokens(resp)
-                parsed = self._parse_json_response(resp.text if resp.text else "", [])
-                if isinstance(parsed, dict) and parsed.get("lines"):
-                    translated = parsed.get("lines") or []
-                elif isinstance(parsed, list):
-                    translated = parsed
+                if self.base_url:
+                    response_data = self._manual_generate_content(
+                        self.vision_model,
+                        self._prep_inline_image_parts(images, 5)
+                        + [{"text": prompt_text}],
+                        ["TEXT"],
+                        timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS,
+                    )
+                    self._count_manual_tokens(response_data)
+                    text = self._extract_text_from_manual_response(response_data)
                 else:
-                    translated = [
-                        l.strip() for l in (resp.text or "").split("\n") if l.strip()
-                    ]
-                cleaned = [str(l).strip() for l in translated if str(l).strip()]
-                if must_enforce_english and self._lines_have_cjk(cleaned):
-                    self.last_error = "检测到中文残留，正在自动重试英文重写"
-                    if i < attempts - 1:
-                        continue
-                    return []
-                return cleaned
-            except Exception as e:
-                self.last_error = str(e)
-                if i < attempts - 1:
-                    continue
-                return []
-        return []
-
-    def extract_and_translate_image_text(
-        self,
-        image,
-        source_lang="auto",
-        target_lang="English",
-        style_hint="Literal",
-        avoid_terms=None,
-        enforce_english=False,
-        max_attempts=1,
-    ):
-        """一次请求完成 OCR + 文本翻译，减少往返延迟"""
-        if image is None:
-            return {"language": source_lang, "source_lines": [], "translated_lines": []}
-        prompt_template = self.prompts.get(
-            "image_text_extract_translate",
-            DEFAULT_PROMPTS["image_text_extract_translate"],
-        )
-        avoid_terms_text = ", ".join(avoid_terms) if avoid_terms else "None"
-        try:
-            base_prompt = prompt_template.format(
-                source_lang=source_lang or "auto",
-                target_lang=target_lang,
-                style_hint=style_hint,
-                avoid_terms=avoid_terms_text,
-            )
-        except KeyError:
-            base_prompt = f"""Extract visible text from image then translate to {target_lang}.
-Source language hint: {source_lang or "auto"}
-Style: {style_hint}
-Avoid terms: {avoid_terms_text}
-Return JSON only:
-{{"language":"auto","source_lines":[],"translated_lines":[]}}"""
-        attempts = max(1, int(max_attempts or 1))
-        must_enforce_english = bool(enforce_english) or self._target_is_english(
-            target_lang
-        )
-        model_name = self.model or PRIMARY_IMAGE_MODEL
-        for i in range(attempts):
-            parts = self._prep_images([image], 1)
-            prompt = base_prompt
-            if must_enforce_english:
-                strict_guard = "CRITICAL: translated_lines must be US English only. No Chinese/Japanese/Korean characters."
-                if i > 0:
-                    strict_guard += " This is a retry because non-English characters were detected previously."
-                prompt = f"{prompt}\n{strict_guard}"
-            parts.append(prompt)
-            try:
-                resp = self._call(
-                    lambda: self.client.models.generate_content(
-                        model=model_name,
-                        contents=parts,
-                        config=types.GenerateContentConfig(
-                            response_modalities=["TEXT"]
+                    parts_with_prompt = parts + [prompt_text]
+                    resp = self._call(
+                        lambda: self.client.models.generate_content(
+                            model=self.vision_model,
+                            contents=parts_with_prompt,
+                            config=types.GenerateContentConfig(
+                                response_modalities=["TEXT"]
+                            ),
                         ),
+                        timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS,
                     )
+                    self._count_tokens(resp)
+                    text = resp.text.strip() if resp.text else ""
+                lines = _parse_title_lines(text)
+                valid, reason, details = _validate_title_output(lines, target_language)
+                details["target_language"] = target_language
+                if valid:
+                    return _build_title_result(
+                        True,
+                        titles=lines[:6],
+                        raw_text=text,
+                        attempt_count=attempt,
+                        input_mode="image",
+                        details=details,
+                    )
+
+                last_raw = text
+                last_lines = lines
+                if attempt == 1:
+                    continue
+                return _build_title_result(
+                    False,
+                    titles=lines[:6],
+                    raw_text=text,
+                    error_type="retry_exhausted",
+                    error_message=reason or "输出格式不符合要求",
+                    retryable=False,
+                    attempt_count=attempt,
+                    input_mode="image",
+                    details=details,
                 )
-                self._count_tokens(resp)
-                parsed = self._parse_json_response(resp.text if resp.text else "", {})
-                if not isinstance(parsed, dict):
-                    if i < attempts - 1:
-                        continue
-                    return {
-                        "language": source_lang,
-                        "source_lines": [],
-                        "translated_lines": [],
-                    }
-                src_lines = parsed.get("source_lines") or parsed.get("lines") or []
-                tgt_lines = parsed.get("translated_lines") or []
-                src_clean = [
-                    str(line).strip() for line in src_lines if str(line).strip()
-                ]
-                tgt_clean = [
-                    str(line).strip() for line in tgt_lines if str(line).strip()
-                ]
-                if src_clean and tgt_clean and len(tgt_clean) < len(src_clean):
-                    tgt_clean = tgt_clean + src_clean[len(tgt_clean) :]
-                if must_enforce_english and self._lines_have_cjk(tgt_clean):
-                    self.last_error = "检测到中文残留，正在自动重试英文重写"
-                    if i < attempts - 1:
-                        continue
-                    return {
-                        "language": parsed.get("language") or source_lang,
-                        "source_lines": src_clean,
-                        "translated_lines": [],
-                    }
-                return {
-                    "language": parsed.get("language") or source_lang,
-                    "source_lines": src_clean,
-                    "translated_lines": tgt_clean,
-                }
             except Exception as e:
                 self.last_error = str(e)
-                if i < attempts - 1:
-                    continue
-                return {
-                    "language": source_lang,
-                    "source_lines": [],
-                    "translated_lines": [],
-                }
-        return {"language": source_lang, "source_lines": [], "translated_lines": []}
-
-    def translate_image(
-        self,
-        image,
-        target_lang="English",
-        source_lang="auto",
-        style_hint="Literal",
-        layout_hint="Preserve layout",
-        aspect="1:1",
-        size="1K",
-        thinking_level="minimal",
-        avoid_terms=None,
-        enforce_english=False,
-        max_attempts=1,
-        cleanup_cn_overlay=True,
-    ):
-        """翻译图片内文字并生成新图"""
-        if image is None:
-            return None
-        prompt_template = self.prompts.get(
-            "image_translate_prompt", DEFAULT_PROMPTS["image_translate_prompt"]
-        )
-        avoid_terms_text = ", ".join(avoid_terms) if avoid_terms else "None"
-        try:
-            base_prompt = prompt_template.format(
-                source_lang=source_lang or "auto",
-                target_lang=target_lang,
-                style_hint=style_hint,
-                layout_hint=layout_hint,
-                avoid_terms=avoid_terms_text,
-            )
-        except KeyError:
-            base_prompt = f"""Translate all visible text from {source_lang or "auto"} to {target_lang}.
-Style: {style_hint}
-Layout: {layout_hint}
-Avoid these compliance terms in output (if any): {avoid_terms_text}
-Output image only."""
-        if avoid_terms and "avoid" not in base_prompt.lower():
-            base_prompt = f"{base_prompt}\nAvoid these compliance terms in output (if any): {avoid_terms_text}"
-        if cleanup_cn_overlay:
-            base_prompt = (
-                f"{base_prompt}\n"
-                "Cleanup policy: Remove non-product Chinese overlay text corner labels and stamp-style Chinese marks when they are decorative overlays. "
-                "For removed overlays, rebuild natural clean background with consistent texture. "
-                "Do not remove brand logos trademark logos certification logos or required product labels."
-            )
-
-        model_info = MODELS.get(self.model, MODELS[PRIMARY_IMAGE_MODEL])
-        available_res = model_info.get("resolutions", ["1K"])
-        target_size = size if size in available_res else "1K"
-        image_config = types.ImageConfig(aspect_ratio=aspect)
-        if target_size in ["2K", "4K"]:
-            image_config = types.ImageConfig(
-                aspect_ratio=aspect, image_size=target_size
-            )
-
-        cfg_kwargs = {"response_modalities": ["IMAGE"], "image_config": image_config}
-        if model_info.get("supports_thinking", False):
-            thinking_cfg = thinking_config_from_level(thinking_level)
-            if thinking_cfg:
-                cfg_kwargs["thinking_config"] = thinking_cfg
-        config = types.GenerateContentConfig(**cfg_kwargs)
-        attempts = max(1, int(max_attempts or 1))
-        must_enforce_english = bool(enforce_english) or self._target_is_english(
-            target_lang
-        )
-        for i in range(attempts):
-            extra_guard = ""
-            if must_enforce_english:
-                extra_guard = "CRITICAL: ALL rendered text in output image must be US English only. No Chinese/Japanese/Korean characters."
-                if i > 0:
-                    extra_guard += " This is a retry because non-English characters were detected previously."
-            prompt = f"{base_prompt}\n{extra_guard}" if extra_guard else base_prompt
-            parts = self._prep_images([image], 1)
-            parts.append(prompt)
-            try:
-                resp = self._call(
-                    lambda: self.client.models.generate_content(
-                        model=self.model, contents=parts, config=config
-                    )
+                error_type, retryable = _classify_title_error(str(e))
+                if error_type == "upstream_error" and self.base_url:
+                    error_type = "provider_error"
+                return _build_title_result(
+                    False,
+                    titles=last_lines[:6],
+                    raw_text=last_raw,
+                    error_type=error_type,
+                    error_message=str(e),
+                    retryable=retryable,
+                    attempt_count=attempt,
+                    input_mode="image",
                 )
-                self._count_tokens(resp)
-                translated_img = None
-                if resp.candidates:
-                    for part in resp.candidates[0].content.parts:
-                        if hasattr(part, "inline_data") and part.inline_data:
-                            img_data = part.inline_data.data
-                            if img_data:
-                                translated_img = Image.open(io.BytesIO(img_data))
-                                break
-                if translated_img is None:
-                    self.last_error = "API返回无图片数据"
-                    if i < attempts - 1:
-                        continue
-                    return None
-                if must_enforce_english:
-                    ocr = self.extract_text_from_image(
-                        translated_img, source_lang="auto"
-                    )
-                    text = " ".join(ocr.get("lines", []))
-                    if contains_cjk(text):
-                        self.last_error = "检测到非英文文本，正在自动重试出图"
-                        if i < attempts - 1:
-                            continue
-                        return None
-                return translated_img
-            except Exception as e:
-                self.last_error = str(e)
-                if i < attempts - 1:
-                    continue
-                raise e
-        return None
 
-
-# ==================== 中转站图片客户端 ====================
-class RelayImageClient:
-    def __init__(
-        self,
-        api_key: str,
-        model: str,
-        base_url: str = RELAY_API_BASE,
-        timeout_sec: int = 180,
-    ):
-        self.api_key = str(api_key or "").strip()
-        self.model = model
-        self.base_url = str(base_url or RELAY_API_BASE).rstrip("/")
-        self.timeout_sec = timeout_sec
-        self.last_error = None
-        self.total_tokens = 0
-
-    def get_last_error(self):
-        return self.last_error
-
-    def get_tokens_used(self):
-        return self.total_tokens
-
-    def _build_messages(self, refs, prompt: str):
-        content = [{"type": "text", "text": prompt}]
-        for ref in (refs or [])[:3]:
-            try:
-                img = resize_max_side(ref.copy(), 1024)
-                buf = io.BytesIO()
-                img.save(buf, format="PNG", optimize=True)
-                b64 = base64.b64encode(buf.getvalue()).decode()
-                content.append(
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{b64}"},
-                    }
-                )
-            except Exception:
-                continue
-        return [{"role": "user", "content": content}]
-
-    def _extract_image_from_response(self, payload: dict):
-        if not isinstance(payload, dict):
-            return None
-        for item in payload.get("data", []) or []:
-            if item.get("b64_json"):
-                return Image.open(io.BytesIO(base64.b64decode(item["b64_json"])))
-            if item.get("url"):
-                response = requests.get(item["url"], timeout=60)
-                response.raise_for_status()
-                return Image.open(io.BytesIO(response.content))
-        choices = payload.get("choices", []) or []
-        for choice in choices:
-            message = choice.get("message", {}) or {}
-            content = message.get("content")
-            if isinstance(content, str):
-                markdown_match = re.search(r"\((https?://[^)\s]+)\)", content)
-                match = markdown_match or re.search(r"(https?://\\S+)", content)
-                if match:
-                    url = match.group(1).rstrip(")],}'\"")
-                    response = requests.get(url, timeout=60)
-                    response.raise_for_status()
-                    return Image.open(io.BytesIO(response.content))
-            if isinstance(content, list):
-                for part in content:
-                    if not isinstance(part, dict):
-                        continue
-                    image_url = part.get("image_url")
-                    if isinstance(image_url, dict) and image_url.get("url"):
-                        url = image_url["url"]
-                        if url.startswith("data:image/") and "," in url:
-                            _, b64 = url.split(",", 1)
-                            return Image.open(io.BytesIO(base64.b64decode(b64)))
-                        response = requests.get(url, timeout=60)
-                        response.raise_for_status()
-                        return Image.open(io.BytesIO(response.content))
-                    if part.get("b64_json"):
-                        return Image.open(
-                            io.BytesIO(base64.b64decode(part["b64_json"]))
-                        )
-        return None
-
-    def generate_image(
-        self,
-        refs,
-        prompt,
-        aspect="1:1",
-        size="1K",
-        thinking_level="minimal",
-        enforce_english=False,
-        max_attempts=1,
-    ):
-        attempts = max(1, int(max_attempts or 1))
-        url = f"{self.base_url}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        final_prompt = (
-            f"{prompt}\n"
-            f"Output requirement: generate one ecommerce image in aspect ratio {aspect}. "
-            f"Use English only. Keep product style consistent with references if references are provided."
+        return _build_title_result(
+            False,
+            titles=last_lines[:6],
+            raw_text=last_raw,
+            error_type="invalid_format",
+            error_message="输出格式不符合要求",
+            retryable=False,
+            attempt_count=2,
+            input_mode="image",
+            details={"line_count": len(last_lines)},
         )
-        for _ in range(attempts):
-            try:
-                payload = {
-                    "model": self.model,
-                    "messages": self._build_messages(refs, final_prompt),
-                    "temperature": 0.2,
-                    "max_tokens": 400,
-                }
-                response = requests.post(
-                    url, headers=headers, json=payload, timeout=self.timeout_sec
-                )
-                text = response.text
-                if response.status_code >= 400:
-                    self.last_error = text
-                    continue
-                data = response.json()
-                usage = data.get("usage", {}) or {}
-                self.total_tokens += int(usage.get("total_tokens") or 0)
-                image = self._extract_image_from_response(data)
-                if image is not None:
-                    return image
-                self.last_error = text[:300]
-            except Exception as e:
-                self.last_error = str(e)
-        return None
-
-    def translate_image(
-        self,
-        image,
-        target_lang="English",
-        source_lang="auto",
-        style_hint="Literal",
-        layout_hint="Preserve layout",
-        aspect="1:1",
-        size="1K",
-        thinking_level="minimal",
-        avoid_terms=None,
-        enforce_english=False,
-        max_attempts=1,
-        cleanup_cn_overlay=True,
-    ):
-        if image is None:
-            return None
-        avoid_terms_text = ", ".join(avoid_terms) if avoid_terms else "None"
-        prompt = (
-            f"Translate all visible text from {source_lang or 'auto'} to {target_lang}.\n"
-            f"Style: {style_hint}\n"
-            f"Layout: {layout_hint}\n"
-            f"Avoid these compliance terms in output (if any): {avoid_terms_text}\n"
-            "Output requirement: return one translated ecommerce image, preserve layout and design, remove decorative Chinese overlay text when requested."
-        )
-        if cleanup_cn_overlay:
-            prompt += "\nCleanup policy: Remove non-product Chinese overlay text, corner labels, and decorative stamp marks when they are not part of the real product."
-        if enforce_english or str(target_lang).lower().startswith("english"):
-            prompt += "\nCRITICAL: final rendered text must be English only."
-        return self.generate_image(
-            refs=[image],
-            prompt=prompt,
-            aspect=aspect,
-            size=size,
-            thinking_level=thinking_level,
-            enforce_english=enforce_english,
-            max_attempts=max_attempts,
-        )
-
-
-def probe_relay_api(base_url: str, api_key: str, model: str = ""):
-    base_url = str(base_url or RELAY_API_BASE).rstrip("/")
-    api_key = str(api_key or "").strip()
-    if not base_url or not api_key:
-        return False, "请先填写中转站 API 地址和 API Key。"
-    headers = {"Authorization": f"Bearer {api_key}"}
-    try:
-        response = requests.get(f"{base_url}/models", headers=headers, timeout=20)
-        if response.status_code >= 400:
-            return False, format_runtime_error_message(response.text)
-        payload = response.json()
-        model_ids = {
-            item.get("id") for item in payload.get("data", []) if isinstance(item, dict)
-        }
-        if model and model not in model_ids:
-            return False, f"模型 `{model}` 不在该中转站的模型列表中。"
-        if model:
-            return True, f"中转站连接正常，已找到模型 `{model}`。"
-        return True, "中转站连接正常。"
-    except Exception as e:
-        return False, format_runtime_error_message(e)
-
-
-RELAY_PROBE_CACHE = {}
-
-
-def probe_relay_api_cached(base_url: str, api_key: str, model: str = ""):
-    cache_key = (
-        str(base_url or RELAY_API_BASE).rstrip("/"),
-        hashlib.md5(str(api_key or "").encode()).hexdigest()[:12],
-        str(model or ""),
-    )
-    if cache_key in RELAY_PROBE_CACHE:
-        return RELAY_PROBE_CACHE[cache_key]
-    result = probe_relay_api(base_url, api_key, model)
-    RELAY_PROBE_CACHE[cache_key] = result
-    return result
-
-
-def probe_relay_route_cached(
-    base_url: str, api_key: str, model: str = "", capability: str = "text_generation"
-):
-    cache_key = (
-        "route",
-        str(base_url or RELAY_API_BASE).rstrip("/"),
-        hashlib.md5(str(api_key or "").encode()).hexdigest()[:12],
-        str(model or ""),
-        str(capability or ""),
-    )
-    if cache_key in RELAY_PROBE_CACHE:
-        return RELAY_PROBE_CACHE[cache_key]
-
-    ok, msg = probe_relay_api(base_url, api_key, model)
-    if not ok:
-        RELAY_PROBE_CACHE[cache_key] = (ok, msg)
-        return ok, msg
-
-    if capability in {"image_generate", "image_translate"}:
-        result = (True, "ok")
-        RELAY_PROBE_CACHE[cache_key] = result
-        return result
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    prompt = "Health check. Reply with OK."
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
-        "temperature": 0.0,
-        "max_tokens": 8,
-    }
-    try:
-        response = requests.post(
-            f"{str(base_url or RELAY_API_BASE).rstrip('/')}/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=25,
-        )
-        if response.status_code >= 400:
-            result = (False, format_runtime_error_message(response.text, 200))
-        else:
-            result = (True, "ok")
-    except Exception as e:
-        result = (False, format_runtime_error_message(e, 200))
-    RELAY_PROBE_CACHE[cache_key] = result
-    return result
-
-
-def ensure_provider_route_ready(
-    provider: str,
-    relay_base: str,
-    relay_key: str,
-    image_model: str,
-    analysis_model: str,
-    required_capabilities: list,
-):
-    reasons = validate_relay_models(
-        provider=provider,
-        relay_base=relay_base,
-        relay_key=relay_key,
-        image_model=image_model,
-        analysis_model=analysis_model,
-        required_capabilities=required_capabilities,
-        probe_func=probe_relay_route_cached,
-    )
-    if reasons:
-        raise Exception("；".join(reasons))
-
-
-def build_relay_text_client(
-    relay_key: str,
-    relay_model: str,
-    relay_base: str,
-    capability: str = "text_generation",
-):
-    if not relay_key:
-        raise Exception("请先配置系统中转站 Key 或前台中转站 Key")
-    selected_model = relay_model or get_settings().get(
-        "relay_default_image_model", "gemini-3.1-flash-image-preview"
-    )
-    if not model_supports("relay", selected_model, capability):
-        raise Exception(f"当前模型 `{selected_model}` 不支持任务 `{capability}`")
-    return RelayTextClient(
-        relay_key, selected_model, base_url=relay_base or RELAY_API_BASE
-    )
-
-
-def get_relay_analysis_model() -> str:
-    settings = get_settings()
-    model = settings.get("relay_analysis_model", "gemini-3.1-flash-lite-preview")
-    if model not in RELAY_ANALYSIS_MODELS:
-        return "gemini-3.1-flash-lite-preview"
-    return model
-
-
-def build_text_generation_client(
-    image_provider: str,
-    gemini_api_key: str,
-    relay_key: str,
-    relay_base: str,
-    relay_model: str,
-    model: str = TITLE_TEXT_MODEL,
-):
-    if image_provider == "中转站":
-        return build_relay_text_client(
-            relay_key,
-            get_relay_analysis_model(),
-            relay_base,
-            capability="title_from_image",
-        )
-    if not gemini_api_key:
-        raise Exception("当前未配置 Gemini API Key")
-    return GeminiClient(gemini_api_key, model=model)
-
-
-def build_combo_anchor(
-    image_provider: str,
-    gemini_api_key: str,
-    relay_key: str,
-    relay_base: str,
-    relay_model: str,
-    images,
-    name: str,
-    detail: str,
-):
-    if image_provider == "中转站":
-        prompt_template = get_prompts().get(
-            "anchor_analysis", DEFAULT_PROMPTS["anchor_analysis"]
-        )
-        text_client = build_relay_text_client(
-            relay_key,
-            get_relay_analysis_model(),
-            relay_base,
-            capability="image_analysis",
-        )
-        anchor = analyze_product_with_text_client(
-            text_client,
-            images,
-            name,
-            detail,
-            prompt_template,
-        )
-        return anchor, text_client.get_tokens_used()
-    client = GeminiClient(gemini_api_key, PRIMARY_IMAGE_MODEL)
-    anchor = client.analyze_product(images, name, detail)
-    return anchor, client.get_tokens_used()
-
-
-def build_combo_requirements(
-    image_provider: str,
-    gemini_api_key: str,
-    relay_key: str,
-    relay_base: str,
-    relay_model: str,
-    anchor: dict,
-    selected_types: dict,
-    tags: list,
-):
-    if image_provider == "中转站":
-        prompt_template = get_prompts().get(
-            "requirements_gen", DEFAULT_PROMPTS["requirements_gen"]
-        )
-        en_copy_template = get_prompts().get(
-            "en_copy_gen", DEFAULT_PROMPTS["en_copy_gen"]
-        )
-        templates = get_templates()["combo_types"]
-        text_client = build_relay_text_client(
-            relay_key,
-            get_relay_analysis_model(),
-            relay_base,
-            capability="text_generation",
-        )
-        reqs = generate_requirements_with_text_client(
-            text_client,
-            anchor,
-            selected_types,
-            templates,
-            prompt_template,
-            tags=tags,
-        )
-        reqs = normalize_requirements(reqs, selected_types, templates)
-        reqs = generate_en_copy_with_text_client(
-            text_client,
-            anchor,
-            reqs,
-            en_copy_template,
-            max_headline_chars=MAX_HEADLINE_CHARS,
-            max_subline_chars=MAX_SUBLINE_CHARS,
-            max_badge_chars=MAX_BADGE_CHARS,
-        )
-        return reqs, text_client.get_tokens_used()
-    client = GeminiClient(gemini_api_key, PRIMARY_IMAGE_MODEL)
-    reqs = client.generate_requirements(anchor, selected_types, tags)
-    reqs = normalize_requirements(reqs, selected_types, get_templates()["combo_types"])
-    reqs = client.generate_en_copy(anchor, reqs)
-    return reqs, client.get_tokens_used()
-
-
-def build_smart_anchor(
-    image_provider: str,
-    gemini_api_key: str,
-    relay_key: str,
-    relay_base: str,
-    relay_model: str,
-    images,
-    name: str,
-    material: str,
-):
-    if image_provider == "中转站":
-        prompt_template = get_prompts().get(
-            "anchor_analysis", DEFAULT_PROMPTS["anchor_analysis"]
-        )
-        text_client = build_relay_text_client(
-            relay_key,
-            get_relay_analysis_model(),
-            relay_base,
-            capability="image_analysis",
-        )
-        anchor = analyze_product_with_text_client(
-            text_client,
-            images,
-            name,
-            material,
-            prompt_template,
-        )
-        return anchor, text_client.get_tokens_used()
-    client = GeminiClient(gemini_api_key, PRIMARY_IMAGE_MODEL)
-    anchor = client.analyze_product(images, name, material or "")
-    return anchor, client.get_tokens_used()
-
-
-def compose_combo_image_prompt(anchor, req, aspect="1:1"):
-    templates = get_templates()["combo_types"]
-    type_info = templates.get(req.get("type_key", ""), {})
-
-    if req.get("type_key") == "size":
-        prompt_template = get_prompts().get(
-            "size_image_prompt", DEFAULT_PROMPTS["size_image_prompt"]
-        )
-        try:
-            return prompt_template.format(
-                product_name=anchor.get("product_name_en", "Product"),
-                aspect_ratio=aspect,
-            )
-        except KeyError:
-            return f"Professional product dimension diagram. Product: {anchor.get('product_name_en', 'Product')}. Aspect: {aspect}"
-
-    text_content = ""
-    if req.get("headline"):
-        text_content = f"Headline: {req['headline']}"
-        if req.get("subline"):
-            text_content += f"\nSubline: {req['subline']}"
-        if req.get("badge"):
-            text_content += f"\nBadge: {req['badge']}"
-
-    prompt_template = get_prompts().get("image_prompt", DEFAULT_PROMPTS["image_prompt"])
-    try:
-        return prompt_template.format(
-            product_name=anchor.get("product_name_en", "Product"),
-            category=anchor.get("primary_category", "General"),
-            image_type=req.get("type_name", ""),
-            style_hint=type_info.get("hint", ""),
-            scene=req.get("scene", ""),
-            text_content=text_content,
-            aspect_ratio=aspect,
-        )
-    except KeyError:
-        return f"Professional ecommerce product image. Product: {anchor.get('product_name_en', 'Product')}. Aspect: {aspect}"
 
 
 # ==================== 图片转Base64工具 ====================
@@ -3216,1283 +3830,12 @@ def image_to_base64(img: Image.Image) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def closest_aspect_ratio(size):
-    """根据图片尺寸匹配最接近的宽高比"""
-    try:
-        w, h = size
-        if not w or not h:
-            return "1:1"
-        ratio = w / h
-
-        def parse_ratio(r):
-            a, b = r.split(":")
-            return float(a) / float(b)
-
-        return min(ASPECT_RATIOS, key=lambda r: abs(ratio - parse_ratio(r)))
-    except Exception:
-        return "1:1"
-
-
-def parse_allowed_formats(val):
-    if isinstance(val, list):
-        return [str(x).strip().lower() for x in val if str(x).strip()]
-    if not val:
-        return []
-    return [
-        x.strip().lower() for x in str(val).replace(";", ",").split(",") if x.strip()
-    ]
-
-
-def sanitize_filename(name, max_len=40):
-    base = re.sub(r"[^a-zA-Z0-9_\-]+", "_", name).strip("_")
-    if not base:
-        base = "image"
-    return base[:max_len]
-
-
-def _ratio_to_float(ratio_str):
-    try:
-        a, b = ratio_str.split(":")
-        return float(a) / float(b)
-    except Exception:
-        return 1.0
-
-
-def _average_color(img: Image.Image):
-    try:
-        thumb = img.copy()
-        thumb.thumbnail((64, 64))
-        return tuple([int(x) for x in thumb.resize((1, 1)).getpixel((0, 0))])
-    except Exception:
-        return (255, 255, 255)
-
-
-def apply_ratio_strategy(
-    img: Image.Image, target_ratio: str, method: str = "补边(白色)"
-):
-    """按目标比例裁切/补边"""
-    if not img or not target_ratio:
-        return img
-    w, h = img.size
-    if not w or not h:
-        return img
-    target = _ratio_to_float(target_ratio)
-    current = w / h
-    if abs(current - target) < 1e-3:
-        return img
-    if method.startswith("居中裁切"):
-        if current > target:
-            new_w = int(h * target)
-            left = (w - new_w) // 2
-            return img.crop((left, 0, left + new_w, h))
-        new_h = int(w / target)
-        top = (h - new_h) // 2
-        return img.crop((0, top, w, top + new_h))
-    # 补边
-    bg = (255, 255, 255) if "白色" in method else _average_color(img)
-    if current > target:
-        new_h = int(w / target)
-        new_img = Image.new("RGB", (w, new_h), bg)
-        top = (new_h - h) // 2
-        new_img.paste(img, (0, top))
-        return new_img
-    new_w = int(h * target)
-    new_img = Image.new("RGB", (new_w, h), bg)
-    left = (new_w - w) // 2
-    new_img.paste(img, (left, 0))
-    return new_img
-
-
-def thinking_config_from_level(level):
-    """兼容新版SDK的thinking_config：用budget近似表示深度"""
-    if not level:
-        return None
-    lv = str(level).lower()
-    if lv in ("minimal", "low"):
-        budget = 0  # 关闭/最低思考
-    elif lv in ("medium", "high"):
-        budget = -1  # 自动
-    else:
-        return None
-    try:
-        return types.ThinkingConfig(thinking_budget=budget)
-    except Exception:
-        return None
-
-
-def resize_max_side(img: Image.Image, max_side: int):
-    if not img or not max_side:
-        return img
-    w, h = img.size
-    if max(w, h) <= max_side:
-        return img
-    scale = max_side / max(w, h)
-    new_w = int(w * scale)
-    new_h = int(h * scale)
-    return img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-
-
-def image_to_bytes(
-    img: Image.Image, fmt: str = "PNG", quality: int = 85, max_side: int = 0
-):
-    if img is None:
-        return b""
-    if max_side and max_side > 0:
-        img = resize_max_side(img, max_side)
-    buf = io.BytesIO()
-    if fmt.upper() in ("JPG", "JPEG"):
-        img = img.convert("RGB")
-        img.save(buf, format="JPEG", quality=int(quality), optimize=True)
-    else:
-        img.save(buf, format="PNG", optimize=True)
-    return buf.getvalue()
-
-
-def get_translated_png_bytes(item: dict) -> bytes:
-    data = item.get("translated_png_bytes")
-    if data:
-        return data
-    translated = item.get("translated")
-    if translated is None:
-        return b""
-    data = image_to_bytes(translated, fmt="PNG")
-    item["translated_png_bytes"] = data
-    return data
-
-
-def create_translate_zip(results: list) -> bytes:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for item in results:
-            translated = item.get("translated")
-            if translated is None:
-                continue
-            idx = item.get("index", 0)
-            base = item.get("base_name", f"image_{idx:02d}")
-            ratio = item.get("ratio_label", "orig")
-            size_lbl = item.get("size_label", "1K")
-            filename = item.get(
-                "filename", f"{idx:02d}_{base}_translated_{ratio}_{size_lbl}.png"
-            )
-            if not filename.lower().endswith(".png"):
-                filename = f"{Path(filename).stem}.png"
-            z.writestr(filename, get_translated_png_bytes(item))
-    return buf.getvalue()
-
-
-def format_translate_status(current: int, total: int, mode_text: str = "处理中") -> str:
-    current = max(0, int(current))
-    total = max(1, int(total))
-    ratio = min(100, int((current / total) * 100))
-    return f"⏳ {mode_text}: {current}/{total} ({ratio}%)"
-
-
-def clear_translate_runtime_cache(results: list):
-    for item in results:
-        if isinstance(item, dict):
-            item.pop("original", None)
-
-
-def get_translate_style_hint(style_choice: str):
-    if style_choice == "北美电商英文（偏营销）":
-        return "North American ecommerce listing English (Amazon-compliant, TEMU style), persuasive but professional, no slang or colloquial expressions, consistent terminology, US punctuation and units, avoid unsupported absolute claims"
-    return "North American ecommerce listing English (Amazon-compliant, TEMU style), formal and professional, no slang or colloquial expressions, consistent terminology, US punctuation and units, avoid unsupported absolute claims"
-
-
-def execute_image_translate_workload(
-    api_key: str, upload_items: list, opts: dict, progress_cb=None, log_cb=None
-):
-    upload_items = upload_items or []
-    total = len(upload_items)
-    if total <= 0:
-        return [], [], 0
-
-    need_text = bool(opts.get("need_text", True))
-    need_image = bool(opts.get("need_image", True))
-    fast_text_mode = bool(opts.get("fast_text_mode", True))
-    text_workers = max(1, min(6, int(opts.get("text_workers", 2) or 2)))
-    source_lang = opts.get("source_lang", "auto")
-    target_lang = opts.get("target_lang", "en")
-    style_choice = opts.get("style_choice", "北美电商英文（标准）")
-    keep_layout = bool(opts.get("keep_layout", True))
-    avoid_terms = opts.get("avoid_terms", []) or []
-    enable_comp = bool(opts.get("enable_comp", True))
-    size_strategy = opts.get("size_strategy", "保留原比例")
-    ratio_method = opts.get("ratio_method", "补边(白色)")
-    target_ratio = opts.get("target_ratio", "1:1")
-    force_1k = bool(opts.get("force_1k", False))
-    size = opts.get("size", "1K")
-    thinking_level = opts.get("thinking_level", "minimal")
-    enforce_english_output = (
-        bool(opts.get("force_english_output", False)) and target_lang == "en"
-    )
-    english_retry_max = max(1, min(5, int(opts.get("english_retry_max", 2) or 2)))
-    cleanup_cn_overlay = bool(opts.get("cleanup_cn_overlay", True))
-    provider = str(opts.get("provider") or "gemini").strip().lower()
-    relay_base = str(opts.get("relay_base") or RELAY_API_BASE).rstrip("/")
-    model_key = opts.get("model_key") or PRIMARY_IMAGE_MODEL
-    text_model_key = opts.get("text_model_key") or PRIMARY_IMAGE_MODEL
-    batch_size = int(opts.get("batch_size", total) or total)
-    batch_size = total if batch_size <= 0 else batch_size
-
-    source_prompt = LANGUAGE_PROMPT_NAMES.get(source_lang, "auto")
-    target_prompt = LANGUAGE_PROMPT_NAMES.get(target_lang, "English")
-    style_hint = get_translate_style_hint(style_choice)
-    layout_hint = (
-        "Strictly preserve layout typography and colors"
-        if keep_layout
-        else "Minor layout adjustments allowed to improve readability"
-    )
-
-    mode_label = (
-        "text"
-        if (need_text and not need_image)
-        else ("image" if need_image and not need_text else "text_image")
-    )
-    ratio_label = (
-        "orig" if size_strategy == "保留原比例" else target_ratio.replace(":", "x")
-    )
-    size_label = size
-    if need_image and size_strategy == "强制1:1" and force_1k:
-        size_label = "1K"
-
-    if provider == "relay":
-        image_client = (
-            RelayImageClient(api_key, model_key, base_url=relay_base)
-            if need_image
-            else None
-        )
-        text_client = (
-            RelayTextClient(api_key, text_model_key, base_url=relay_base)
-            if need_text
-            else None
-        )
-    else:
-        image_client = GeminiClient(api_key, model_key)
-        text_client = GeminiClient(api_key, text_model_key)
-    results = []
-    errors = []
-
-    def push_progress(current: int, phase: str):
-        if callable(progress_cb):
-            progress_cb(current, total, phase)
-
-    def push_log(message: str):
-        if callable(log_cb):
-            log_cb(message)
-
-    def process_text_single(entry: dict, image_obj: Image.Image):
-        if text_client is None:
-            return entry
-        if fast_text_mode:
-            merged = text_client.extract_and_translate_image_text(
-                image_obj,
-                source_lang=source_prompt,
-                target_lang=target_prompt,
-                style_hint=style_hint,
-                avoid_terms=avoid_terms,
-                enforce_english=enforce_english_output,
-                max_attempts=english_retry_max,
-            )
-            entry["extracted_lines"] = merged.get("source_lines", [])
-            entry["translated_lines"] = merged.get("translated_lines", [])
-        else:
-            extracted = text_client.extract_text_from_image(image_obj, source_prompt)
-            entry["extracted_lines"] = extracted.get("lines", [])
-            entry["translated_lines"] = text_client.translate_lines(
-                entry["extracted_lines"],
-                source_lang=source_prompt,
-                target_lang=target_prompt,
-                style_hint=style_hint,
-                avoid_terms=avoid_terms,
-                enforce_english=enforce_english_output,
-                max_attempts=english_retry_max,
-            )
-        if (
-            enforce_english_output
-            and entry["extracted_lines"]
-            and not entry["translated_lines"]
-        ):
-            raise Exception(
-                text_client.get_last_error() or "英文校验未通过，请重试或提高重试次数"
-            )
-        if enable_comp and entry["translated_lines"]:
-            hits = []
-            for line in entry["translated_lines"]:
-                hits.extend(find_compliance_hits(line, avoid_terms))
-            entry["compliance_hits"] = list(dict.fromkeys(hits))
-        return entry
-
-    if need_text and not need_image and total > 1:
-        push_progress(0, "文本翻译中")
-        max_workers = min(max(1, text_workers), total)
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {}
-            for i, item in enumerate(upload_items, start=1):
-                img = item["image"]
-                base_name = sanitize_filename(item.get("name") or f"image_{i:02d}")
-                entry = {
-                    "index": i,
-                    "translated": None,
-                    "extracted_lines": [],
-                    "translated_lines": [],
-                    "filename": f"{i:02d}_{base_name}_{mode_label}_{ratio_label}_{size_label}.png",
-                    "ratio_label": ratio_label,
-                    "size_label": size_label,
-                    "base_name": base_name,
-                    "compliance_hits": [],
-                }
-                futures[executor.submit(process_text_single, entry, img)] = i
-
-            ordered_map = {}
-            done_count = 0
-            for fut in as_completed(futures):
-                seq = futures[fut]
-                try:
-                    ordered_map[seq] = fut.result()
-                except Exception as e:
-                    msg = format_runtime_error_message(e, 220)
-                    errors.append(f"图{seq}: {msg}")
-                    ordered_map[seq] = {
-                        "index": seq,
-                        "translated": None,
-                        "extracted_lines": [],
-                        "translated_lines": [],
-                        "filename": f"{seq:02d}_image_{seq:02d}_{mode_label}_{ratio_label}_{size_label}.png",
-                        "ratio_label": ratio_label,
-                        "size_label": size_label,
-                        "base_name": f"image_{seq:02d}",
-                        "compliance_hits": [],
-                    }
-                done_count += 1
-                push_progress(done_count, "文本翻译中")
-                if done_count % 4 == 0 or done_count == total:
-                    push_log(f"已完成文本翻译 {done_count}/{total}")
-
-            for idx in sorted(ordered_map.keys()):
-                results.append(ordered_map[idx])
-    else:
-        for batch_idx, start in enumerate(range(0, total, batch_size), start=1):
-            end = min(start + batch_size, total)
-            if total > batch_size:
-                push_log(
-                    f"批次 {batch_idx}/{(total + batch_size - 1) // batch_size}: 图 {start + 1}-{end}"
-                )
-            for i, item in enumerate(upload_items[start:end], start=start + 1):
-                img = item["image"]
-                base_name = sanitize_filename(item.get("name") or f"image_{i:02d}")
-                entry = {
-                    "index": i,
-                    "translated": None,
-                    "extracted_lines": [],
-                    "translated_lines": [],
-                    "filename": f"{i:02d}_{base_name}_{mode_label}_{ratio_label}_{size_label}.png",
-                    "ratio_label": ratio_label,
-                    "size_label": size_label,
-                    "base_name": base_name,
-                    "compliance_hits": [],
-                }
-                try:
-                    if need_text:
-                        entry = process_text_single(entry, img)
-                    if need_image:
-                        if i % 3 == 1 or i == total:
-                            push_log(f"图像翻译生成中：{i}/{total}")
-                        aspect = (
-                            closest_aspect_ratio(img.size)
-                            if size_strategy == "保留原比例"
-                            else target_ratio
-                        )
-                        prepared_img = img
-                        if size_strategy != "保留原比例":
-                            prepared_img = apply_ratio_strategy(
-                                img, target_ratio, ratio_method
-                            )
-                        model_size = (
-                            "1K" if (size_strategy == "强制1:1" and force_1k) else size
-                        )
-                        if image_client is None:
-                            raise Exception("当前模型不支持图片翻译出图")
-                        entry["translated"] = image_client.translate_image(
-                            prepared_img,
-                            target_lang=target_prompt,
-                            source_lang=source_prompt,
-                            style_hint=style_hint,
-                            layout_hint=layout_hint,
-                            aspect=aspect,
-                            size=model_size,
-                            thinking_level=thinking_level,
-                            avoid_terms=avoid_terms,
-                            enforce_english=enforce_english_output,
-                            max_attempts=english_retry_max,
-                            cleanup_cn_overlay=cleanup_cn_overlay,
-                        )
-                        if entry["translated"]:
-                            if size_strategy != "保留原比例":
-                                entry["translated"] = apply_ratio_strategy(
-                                    entry["translated"], target_ratio, ratio_method
-                                )
-                            if size_strategy == "强制1:1" and force_1k:
-                                entry["translated"] = entry["translated"].resize(
-                                    (1024, 1024), Image.Resampling.LANCZOS
-                                )
-                        else:
-                            raise Exception(
-                                image_client.get_last_error() or "返回空图片"
-                            )
-                except Exception as e:
-                    msg = format_runtime_error_message(e, 220)
-                    errors.append(f"图{i}: {msg}")
-                results.append(entry)
-                push_progress(i, "处理中")
-
-    clear_translate_runtime_cache(results)
-    tokens_used = image_client.get_tokens_used() + text_client.get_tokens_used()
-    return results, errors, tokens_used
-
-
-try:
-    _BG_EXECUTOR_WORKERS = int(
-        os.getenv(
-            "IMG_TRANSLATE_BG_WORKERS",
-            str(DEFAULT_SETTINGS.get("translate_bg_max_concurrent", 2)),
-        )
-    )
-except Exception:
-    _BG_EXECUTOR_WORKERS = int(DEFAULT_SETTINGS.get("translate_bg_max_concurrent", 2))
-_BG_EXECUTOR_WORKERS = max(1, min(6, _BG_EXECUTOR_WORKERS))
-IMAGE_TRANSLATE_BG_EXECUTOR = ThreadPoolExecutor(max_workers=_BG_EXECUTOR_WORKERS)
-IMAGE_TRANSLATE_BG_EXECUTOR_WORKERS = _BG_EXECUTOR_WORKERS
-IMAGE_TRANSLATE_BG_TASKS = {}
-IMAGE_TRANSLATE_BG_LOCK = threading.RLock()
-MAX_BG_TASKS = 60
-
-
-def _bg_now():
-    return datetime.now().isoformat(timespec="seconds")
-
-
-def _prune_bg_tasks_locked():
-    if len(IMAGE_TRANSLATE_BG_TASKS) <= MAX_BG_TASKS:
-        return
-    removable = sorted(
-        [
-            t
-            for t in IMAGE_TRANSLATE_BG_TASKS.values()
-            if t.get("status") in ("completed", "failed", "cancelled")
-        ],
-        key=lambda x: x.get("created_at", ""),
-    )
-    drop_count = max(0, len(IMAGE_TRANSLATE_BG_TASKS) - MAX_BG_TASKS)
-    for item in removable[:drop_count]:
-        IMAGE_TRANSLATE_BG_TASKS.pop(item["id"], None)
-
-
-def _update_bg_task(task_id: str, **kwargs):
-    with IMAGE_TRANSLATE_BG_LOCK:
-        task = IMAGE_TRANSLATE_BG_TASKS.get(task_id)
-        if not task:
-            return
-        task.update(kwargs)
-        task["updated_at"] = _bg_now()
-
-
-def _ensure_image_translate_bg_executor(workers: int):
-    global IMAGE_TRANSLATE_BG_EXECUTOR, IMAGE_TRANSLATE_BG_EXECUTOR_WORKERS
-    workers = max(1, min(6, int(workers or 1)))
-    with IMAGE_TRANSLATE_BG_LOCK:
-        if (
-            IMAGE_TRANSLATE_BG_EXECUTOR
-            and IMAGE_TRANSLATE_BG_EXECUTOR_WORKERS == workers
-        ):
-            return IMAGE_TRANSLATE_BG_EXECUTOR
-        old_executor = IMAGE_TRANSLATE_BG_EXECUTOR
-        IMAGE_TRANSLATE_BG_EXECUTOR = ThreadPoolExecutor(max_workers=workers)
-        IMAGE_TRANSLATE_BG_EXECUTOR_WORKERS = workers
-    if old_executor:
-        try:
-            old_executor.shutdown(wait=False)
-        except Exception:
-            pass
-    return IMAGE_TRANSLATE_BG_EXECUTOR
-
-
-def _run_image_translate_bg_task(task_id: str, payload: dict):
-    _update_bg_task(task_id, status="running", message="处理中")
-    try:
-        total = len(payload.get("upload_items") or [])
-        _update_bg_task(task_id, done=0, total=total)
-
-        def progress(done, task_total, phase):
-            msg = format_translate_status(done, task_total, phase)
-            _update_bg_task(task_id, done=done, total=task_total, message=msg)
-
-        def log(msg):
-            _update_bg_task(task_id, message=msg)
-
-        results, errors, tokens_used = execute_image_translate_workload(
-            payload.get("api_key"),
-            payload.get("upload_items", []),
-            payload.get("options", {}),
-            progress_cb=progress,
-            log_cb=log,
-        )
-
-        if payload.get("charge_usage") and payload.get("owner_id"):
-            update_user_usage(payload.get("owner_id"), len(results), tokens_used)
-            update_stats(
-                len(results), tokens_used, image_count=count_generated_images(results)
-            )
-
-        record_platform_usage_event_safe(
-            feature="image_translate",
-            provider="中转站"
-            if str((payload.get("options") or {}).get("provider") or "").lower()
-            == "relay"
-            else "Gemini",
-            model=str(
-                (payload.get("options") or {}).get("model_key") or PRIMARY_IMAGE_MODEL
-            ),
-            request_count=total,
-            output_images=count_generated_images(results),
-            tokens_used=tokens_used,
-            charge_source="system_pool" if payload.get("charge_usage") else "own_key",
-            actor_label=str(payload.get("owner_id") or "background-job"),
-            operation_key=f"bg-image-translate:{task_id}",
-            metadata_json={"mode": "background", "errors": len(errors)},
-        )
-
-        _update_bg_task(
-            task_id,
-            status="completed",
-            done=total,
-            total=total,
-            message=f"✅ 完成 {max(0, len(results) - len(errors))}/{len(results)}",
-            result={
-                "results": results,
-                "errors": errors,
-                "tokens_used": tokens_used,
-                "source_items": payload.get("upload_items", []),
-                "last_options": payload.get("last_options", {}),
-            },
-            error="",
-        )
-    except Exception as e:
-        _update_bg_task(
-            task_id,
-            status="failed",
-            message="❌ 任务失败",
-            error=format_runtime_error_message(e, 220),
-        )
-
-
-def list_image_translate_bg_tasks(owner_id: str):
-    with IMAGE_TRANSLATE_BG_LOCK:
-        tasks = [
-            {k: v for k, v in item.items() if k != "future"}
-            for item in IMAGE_TRANSLATE_BG_TASKS.values()
-            if item.get("owner_id") == owner_id
-            and item.get("task_type") == "image_translate"
-        ]
-    return sorted(tasks, key=lambda x: x.get("created_at", ""), reverse=True)
-
-
-def get_image_translate_bg_task(owner_id: str, task_id: str):
-    with IMAGE_TRANSLATE_BG_LOCK:
-        task = IMAGE_TRANSLATE_BG_TASKS.get(task_id)
-        if (
-            not task
-            or task.get("owner_id") != owner_id
-            or task.get("task_type") != "image_translate"
-        ):
-            return None
-        return task
-
-
-def remove_image_translate_bg_task(owner_id: str, task_id: str):
-    with IMAGE_TRANSLATE_BG_LOCK:
-        task = IMAGE_TRANSLATE_BG_TASKS.get(task_id)
-        if (
-            not task
-            or task.get("owner_id") != owner_id
-            or task.get("task_type") != "image_translate"
-        ):
-            return False
-        if task.get("status") in ("queued", "running"):
-            return False
-        IMAGE_TRANSLATE_BG_TASKS.pop(task_id, None)
-        return True
-
-
-def submit_image_translate_bg_task(
-    owner_id: str, payload: dict, max_concurrent: int = 2
-):
-    max_concurrent = max(1, min(6, int(max_concurrent or 2)))
-    with IMAGE_TRANSLATE_BG_LOCK:
-        active_count = sum(
-            1
-            for t in IMAGE_TRANSLATE_BG_TASKS.values()
-            if t.get("owner_id") == owner_id
-            and t.get("task_type") == "image_translate"
-            and t.get("status") in ("queued", "running")
-        )
-        if active_count >= max_concurrent:
-            raise ValueError(
-                f"后台并发上限为 {max_concurrent}，请等待已有任务完成后再提交。"
-            )
-        executor = _ensure_image_translate_bg_executor(max_concurrent)
-        task_id = hashlib.md5(
-            f"{time.time()}_{random.random()}_{owner_id}".encode()
-        ).hexdigest()[:12]
-        task = {
-            "id": task_id,
-            "task_type": "image_translate",
-            "owner_id": owner_id,
-            "status": "queued",
-            "message": "等待执行",
-            "done": 0,
-            "total": len(payload.get("upload_items") or []),
-            "result": None,
-            "error": "",
-            "created_at": _bg_now(),
-            "updated_at": _bg_now(),
-        }
-        IMAGE_TRANSLATE_BG_TASKS[task_id] = task
-        _prune_bg_tasks_locked()
-        fut = executor.submit(_run_image_translate_bg_task, task_id, payload)
-        task["future"] = fut
-    return task_id
-
-
-def list_task_center_tasks(owner_id: str, task_type: str = ""):
-    with IMAGE_TRANSLATE_BG_LOCK:
-        tasks = [
-            {k: v for k, v in item.items() if k != "future"}
-            for item in IMAGE_TRANSLATE_BG_TASKS.values()
-            if item.get("owner_id") == owner_id
-            and (not task_type or item.get("task_type") == task_type)
-        ]
-    return sorted(tasks, key=lambda x: x.get("created_at", ""), reverse=True)
-
-
-def get_task_center_task(owner_id: str, task_id: str, task_type: str = ""):
-    with IMAGE_TRANSLATE_BG_LOCK:
-        task = IMAGE_TRANSLATE_BG_TASKS.get(task_id)
-        if not task or task.get("owner_id") != owner_id:
-            return None
-        if task_type and task.get("task_type") != task_type:
-            return None
-        return task
-
-
-def remove_task_center_task(owner_id: str, task_id: str):
-    with IMAGE_TRANSLATE_BG_LOCK:
-        task = IMAGE_TRANSLATE_BG_TASKS.get(task_id)
-        if not task or task.get("owner_id") != owner_id:
-            return False
-        if task.get("status") in ("queued", "running"):
-            return False
-        IMAGE_TRANSLATE_BG_TASKS.pop(task_id, None)
-        return True
-
-
-def execute_smart_generation_workload(payload: dict, progress_cb=None, log_cb=None):
-    image_provider = payload.get("image_provider", "Gemini")
-    gemini_api_key = payload.get("gemini_api_key", "")
-    runtime_relay_key = payload.get("relay_key", "")
-    runtime_relay_base = payload.get("relay_base", RELAY_API_BASE)
-    runtime_relay_model = payload.get("relay_model", "gemini-3.1-flash-image-preview")
-    images = payload.get("images", [])
-    name = payload.get("name", "")
-    material = payload.get("material", "")
-    selected_types = payload.get("selected_types", {})
-    total_count = int(payload.get("total_count") or 0)
-    aspect = payload.get("aspect", "1:1")
-    size = payload.get("size", "1K")
-    thinking_level = payload.get("thinking_level", "minimal")
-    enable_title = bool(payload.get("enable_title", False))
-    title_info = payload.get("title_info", "")
-    title_template = payload.get("title_template", "default")
-    templates = get_templates()["smart_types"]
-
-    gemini_image_client = (
-        GeminiClient(gemini_api_key, PRIMARY_IMAGE_MODEL)
-        if image_provider == "Gemini"
-        else None
-    )
-    relay_image_client = (
-        RelayImageClient(
-            runtime_relay_key,
-            runtime_relay_model,
-            base_url=runtime_relay_base or RELAY_API_BASE,
-        )
-        if image_provider == "中转站"
-        else None
-    )
-
-    def push_progress(done, total, phase):
-        if progress_cb:
-            progress_cb(done, total, phase)
-
-    def push_log(msg):
-        if log_cb:
-            log_cb(msg)
-
-    push_log("🤖 分析商品...")
-    anchor, anchor_tokens = build_smart_anchor(
-        image_provider,
-        gemini_api_key,
-        runtime_relay_key,
-        runtime_relay_base,
-        runtime_relay_model,
-        images,
-        name,
-        material or "",
-    )
-
-    results = []
-    errors = []
-    done = 0
-    title_error = ""
-    title_warnings = []
-    generation_tokens = anchor_tokens
-
-    for tk, cnt in selected_types.items():
-        info = templates[tk]
-        for idx in range(cnt):
-            done += 1
-            push_progress(done, total_count, f"生成 {info['name']}")
-            prompt = f"""Professional ecommerce product image.
-Product: {name}
-Material: {material or "not specified"}
-Style: {info["name"]}
-Features: {", ".join(anchor.get("visual_attrs", ["quality"]))}
-CRITICAL: ALL text MUST be ENGLISH only. NO Chinese characters.
-Aspect: {aspect}"""
-            try:
-                s = get_settings()
-                enforce_en = bool(s.get("enforce_english_text", True))
-                en_retries = int(s.get("english_text_max_retries", 2))
-                if image_provider == "Gemini":
-                    if gemini_image_client is None:
-                        raise Exception("当前未配置 Gemini API Key")
-                    img = gemini_image_client.generate_image(
-                        images,
-                        prompt,
-                        aspect,
-                        size,
-                        thinking_level,
-                        enforce_english=enforce_en,
-                        max_attempts=en_retries,
-                    )
-                    generation_tokens = gemini_image_client.get_tokens_used()
-                else:
-                    if relay_image_client is None:
-                        raise Exception("请先配置系统中转站 Key 或前台中转站 Key")
-                    img = relay_image_client.generate_image(
-                        images,
-                        prompt,
-                        aspect,
-                        size,
-                        thinking_level,
-                        enforce_english=enforce_en,
-                        max_attempts=1,
-                    )
-                    generation_tokens += relay_image_client.get_tokens_used()
-                    if img is None:
-                        raise Exception(
-                            relay_image_client.get_last_error() or "中转站返回空图片"
-                        )
-                if img:
-                    filename = f"{str(done).zfill(2)}_{info['name']}.png"
-                    label = f"{info['icon']} {info['name']}"
-                    results.append({"image": img, "filename": filename, "label": label})
-                else:
-                    error_msg = (
-                        gemini_image_client.get_last_error()
-                        if gemini_image_client is not None
-                        else relay_image_client.get_last_error()
-                        if relay_image_client is not None
-                        else "返回空图片"
-                    ) or "返回空图片"
-                    errors.append(f"{info['icon']} {info['name']}: {error_msg}")
-            except Exception as e:
-                errors.append(
-                    f"{info['icon']} {info['name']}: {format_runtime_error_message(e, 220)}"
-                )
-
-    generated_titles = []
-    title_tokens = 0
-    if should_attempt_title_generation(enable_title, images, title_info):
-        try:
-            title_templates_data = get_title_templates()
-            template_prompt = title_templates_data.get(title_template, {}).get(
-                "prompt", DEFAULT_TITLE_TEMPLATES["default"]["prompt"]
-            )
-            title_client = build_text_generation_client(
-                image_provider,
-                gemini_api_key,
-                runtime_relay_key,
-                runtime_relay_base,
-                runtime_relay_model,
-                model=TITLE_TEXT_MODEL,
-            )
-            generated_titles, title_warnings = generate_compliant_titles_or_raise(
-                title_client,
-                images,
-                title_info,
-                template_prompt,
-                compliance_checker=check_compliance,
-                compliance_mode=payload.get("compliance_mode", "strict"),
-            )
-            title_tokens = title_client.get_tokens_used()
-        except Exception as e:
-            title_error = format_runtime_error_message(str(e), 220)
-
-    tokens_used = generation_tokens + title_tokens
-    return {
-        "results": results,
-        "errors": errors,
-        "titles": generated_titles,
-        "title_error": title_error,
-        "title_warnings": title_warnings,
-        "tokens_used": tokens_used,
-        "total_count": total_count,
-    }
-
-
-def execute_combo_generation_workload(payload: dict, progress_cb=None, log_cb=None):
-    image_provider = payload.get("image_provider", "Gemini")
-    gemini_api_key = payload.get("gemini_api_key", "")
-    runtime_relay_key = payload.get("relay_key", "")
-    runtime_relay_base = payload.get("relay_base", RELAY_API_BASE)
-    runtime_relay_model = payload.get("relay_model", "gemini-3.1-flash-image-preview")
-    reqs = payload.get("reqs", [])
-    anchor = payload.get("anchor", {})
-    refs = payload.get("refs", [])
-    aspect = payload.get("aspect", "1:1")
-    size = payload.get("size", "1K")
-    thinking_level = payload.get("thinking_level", "minimal")
-    enable_title = bool(payload.get("enable_title", False))
-    title_info = payload.get("title_info", "")
-    title_template = payload.get("title_template", "default")
-    templates = get_templates()["combo_types"]
-
-    gemini_image_client = (
-        GeminiClient(gemini_api_key, PRIMARY_IMAGE_MODEL)
-        if image_provider == "Gemini"
-        else None
-    )
-    relay_image_client = (
-        RelayImageClient(
-            runtime_relay_key,
-            runtime_relay_model,
-            base_url=runtime_relay_base or RELAY_API_BASE,
-        )
-        if image_provider == "中转站"
-        else None
-    )
-    results = []
-    errors = []
-    title_error = ""
-    title_warnings = []
-    generation_tokens = 0
-
-    for i, r in enumerate(reqs):
-        type_key = r.get("type_key", "img")
-        type_name = r.get("type_name", f"图片{i + 1}")
-        type_info = templates.get(type_key, {})
-        type_icon = type_info.get("icon", "📷")
-        if progress_cb:
-            progress_cb(i + 1, len(reqs), f"生成 {type_name}")
-        try:
-            prompt = compose_combo_image_prompt(anchor, r, aspect)
-            s = get_settings()
-            enforce_en = bool(s.get("enforce_english_text", True))
-            en_retries = int(s.get("english_text_max_retries", 2))
-            if image_provider == "Gemini":
-                if gemini_image_client is None:
-                    raise Exception("当前未配置 Gemini API Key")
-                img = gemini_image_client.generate_image(
-                    refs,
-                    prompt,
-                    aspect,
-                    size,
-                    thinking_level,
-                    enforce_english=enforce_en,
-                    max_attempts=en_retries,
-                )
-                generation_tokens = gemini_image_client.get_tokens_used()
-            else:
-                if relay_image_client is None:
-                    raise Exception("请先配置系统中转站 Key 或前台中转站 Key")
-                img = relay_image_client.generate_image(
-                    refs,
-                    prompt,
-                    aspect,
-                    size,
-                    thinking_level,
-                    enforce_english=enforce_en,
-                    max_attempts=1,
-                )
-                generation_tokens += relay_image_client.get_tokens_used()
-                if img is None:
-                    raise Exception(
-                        relay_image_client.get_last_error() or "中转站返回空图片"
-                    )
-            if img:
-                filename = f"{str(i + 1).zfill(2)}_{type_name}.png"
-                label = f"{type_icon} {type_name}"
-                results.append({"image": img, "filename": filename, "label": label})
-            else:
-                error_msg = (
-                    gemini_image_client.get_last_error()
-                    if gemini_image_client is not None
-                    else relay_image_client.get_last_error()
-                    if relay_image_client is not None
-                    else "返回空图片"
-                ) or "返回空图片"
-                errors.append(f"{type_icon} {type_name}: {error_msg}")
-        except Exception as e:
-            errors.append(
-                f"{type_icon} {type_name}: {format_runtime_error_message(e, 220)}"
-            )
-
-    generated_titles = []
-    title_tokens = 0
-    if should_attempt_title_generation(enable_title, refs, title_info):
-        try:
-            title_templates = get_title_templates()
-            template_prompt = title_templates.get(title_template, {}).get(
-                "prompt", DEFAULT_TITLE_TEMPLATES["default"]["prompt"]
-            )
-            title_client = build_text_generation_client(
-                image_provider,
-                gemini_api_key,
-                runtime_relay_key,
-                runtime_relay_base,
-                runtime_relay_model,
-                model=TITLE_TEXT_MODEL,
-            )
-            generated_titles, title_warnings = generate_compliant_titles_or_raise(
-                title_client,
-                refs,
-                title_info,
-                template_prompt,
-                compliance_checker=check_compliance,
-                compliance_mode=payload.get("compliance_mode", "strict"),
-            )
-            title_tokens = title_client.get_tokens_used()
-        except Exception as e:
-            title_error = format_runtime_error_message(str(e), 220)
-
-    tokens_used = generation_tokens + title_tokens
-    return {
-        "results": results,
-        "errors": errors,
-        "titles": generated_titles,
-        "title_error": title_error,
-        "title_warnings": title_warnings,
-        "tokens_used": tokens_used,
-        "total_count": len(reqs),
-    }
-
-
-def _run_task_center_task(task_id: str, payload: dict):
-    _update_bg_task(task_id, status="running", message="处理中")
-    task_type = payload.get("task_type", "")
-    owner_id = payload.get("owner_id", "")
-    try:
-        if task_type == "image_translate":
-            total = len(payload.get("upload_items") or [])
-            _update_bg_task(task_id, done=0, total=total)
-
-            def progress(done, task_total, phase):
-                _update_bg_task(
-                    task_id,
-                    done=done,
-                    total=task_total,
-                    message=format_translate_status(done, task_total, phase),
-                )
-
-            def log(msg):
-                _update_bg_task(task_id, message=msg)
-
-            results, errors, tokens_used = execute_image_translate_workload(
-                payload.get("api_key"),
-                payload.get("upload_items", []),
-                payload.get("options", {}),
-                progress_cb=progress,
-                log_cb=log,
-            )
-            result_payload = {
-                "results": results,
-                "errors": errors,
-                "tokens_used": tokens_used,
-                "source_items": payload.get("upload_items", []),
-                "last_options": payload.get("last_options", {}),
-            }
-            record_platform_usage_event_safe(
-                feature="image_translate",
-                provider="中转站"
-                if str((payload.get("options") or {}).get("provider") or "").lower()
-                == "relay"
-                else "Gemini",
-                model=str(
-                    (payload.get("options") or {}).get("model_key")
-                    or PRIMARY_IMAGE_MODEL
-                ),
-                request_count=total,
-                output_images=count_generated_images(results),
-                tokens_used=tokens_used,
-                charge_source="system_pool"
-                if payload.get("charge_usage")
-                else "own_key",
-                actor_label=str(owner_id or "background-job"),
-                operation_key=f"bg-image-translate:{task_id}",
-                metadata_json={"mode": "background", "errors": len(errors)},
-            )
-        elif task_type == "smart_generation":
-            result_payload = execute_smart_generation_workload(payload)
-            total = result_payload.get("total_count", 0)
-            results = result_payload.get("results", [])
-            errors = result_payload.get("errors", [])
-            tokens_used = result_payload.get("tokens_used", 0)
-            record_platform_usage_event_safe(
-                feature="smart_image_generation",
-                provider=payload.get("image_provider", "Gemini"),
-                model=payload.get("relay_model")
-                if payload.get("image_provider") == "中转站"
-                else PRIMARY_IMAGE_MODEL,
-                request_count=total,
-                output_images=len(results),
-                tokens_used=tokens_used,
-                charge_source="own_key"
-                if payload.get("use_own_key")
-                else "system_pool",
-                actor_label=str(owner_id or "background-job"),
-                operation_key=f"bg-smart-generation:{task_id}",
-                metadata_json={
-                    "mode": "background",
-                    "errors": len(errors),
-                    "titles_generated": len(result_payload.get("titles", [])),
-                },
-            )
-        elif task_type == "combo_generation":
-            result_payload = execute_combo_generation_workload(payload)
-            total = result_payload.get("total_count", 0)
-            results = result_payload.get("results", [])
-            errors = result_payload.get("errors", [])
-            tokens_used = result_payload.get("tokens_used", 0)
-            record_platform_usage_event_safe(
-                feature="combo_image_generation",
-                provider=payload.get("image_provider", "Gemini"),
-                model=payload.get("relay_model")
-                if payload.get("image_provider") == "中转站"
-                else PRIMARY_IMAGE_MODEL,
-                request_count=total,
-                output_images=len(results),
-                tokens_used=tokens_used,
-                charge_source="own_key"
-                if payload.get("use_own_key")
-                else "system_pool",
-                actor_label=str(owner_id or "background-job"),
-                operation_key=f"bg-combo-generation:{task_id}",
-                metadata_json={
-                    "mode": "background",
-                    "errors": len(errors),
-                    "titles_generated": len(result_payload.get("titles", [])),
-                },
-            )
-        else:
-            raise Exception(f"unsupported task type: {task_type}")
-
-        _update_bg_task(
-            task_id,
-            status="completed",
-            done=total,
-            total=total,
-            message=f"✅ 完成 {max(0, len(results) - len(errors))}/{max(total, len(results))}",
-            result=result_payload,
-            error="",
-        )
-    except Exception as e:
-        _update_bg_task(
-            task_id,
-            status="failed",
-            message="❌ 任务失败",
-            error=format_runtime_error_message(e, 220),
-        )
-
-
-def submit_task_center_task(
-    owner_id: str, task_type: str, payload: dict, max_concurrent: int = 2
-):
-    max_concurrent = max(1, min(6, int(max_concurrent or 2)))
-    with IMAGE_TRANSLATE_BG_LOCK:
-        active_count = sum(
-            1
-            for t in IMAGE_TRANSLATE_BG_TASKS.values()
-            if t.get("owner_id") == owner_id
-            and t.get("status") in ("queued", "running")
-        )
-        if active_count >= max_concurrent:
-            raise ValueError(
-                f"后台并发上限为 {max_concurrent}，请等待已有任务完成后再提交。"
-            )
-        executor = _ensure_image_translate_bg_executor(max_concurrent)
-        task_id = hashlib.md5(
-            f"{time.time()}_{random.random()}_{owner_id}_{task_type}".encode()
-        ).hexdigest()[:12]
-        meta = build_task_type_meta(task_type)
-        task = {
-            "id": task_id,
-            "task_type": task_type,
-            "owner_id": owner_id,
-            "status": "queued",
-            "message": "等待执行",
-            "done": 0,
-            "total": int(payload.get("total") or 0),
-            "result": None,
-            "error": "",
-            "created_at": _bg_now(),
-            "updated_at": _bg_now(),
-            "restore_page": meta.get("page", "工作台"),
-        }
-        IMAGE_TRANSLATE_BG_TASKS[task_id] = task
-        _prune_bg_tasks_locked()
-        wrapped_payload = dict(payload)
-        wrapped_payload["task_type"] = task_type
-        wrapped_payload["owner_id"] = owner_id
-        fut = executor.submit(_run_task_center_task, task_id, wrapped_payload)
-        task["future"] = fut
-    return task_id
-
-
-def restore_task_center_result(task: dict):
-    task_type = task.get("task_type")
-    result_data = task.get("result") or {}
-    if task_type == "image_translate":
-        st.session_state.img_trans_results = result_data.get("results", [])
-        st.session_state.img_trans_errors = result_data.get("errors", [])
-        st.session_state.img_trans_tokens_used = result_data.get("tokens_used", 0)
-        st.session_state.img_trans_source_items = result_data.get("source_items", [])
-        st.session_state.img_trans_last_options = result_data.get("last_options", {})
-        st.session_state.img_trans_done = True
-        st.session_state.current_page = "图片翻译"
-    elif task_type == "smart_generation":
-        st.session_state.smart_results = result_data.get("results", [])
-        st.session_state.smart_errors = result_data.get("errors", [])
-        st.session_state.smart_titles = result_data.get("titles", [])
-        st.session_state.smart_title_error = result_data.get("title_error", "")
-        st.session_state.smart_title_warnings = result_data.get("title_warnings", [])
-        st.session_state.smart_tokens_used = result_data.get("tokens_used", 0)
-        st.session_state.smart_generation_done = True
-        st.session_state.smart_generating = False
-        st.session_state.current_page = "快速出图"
-    elif task_type == "combo_generation":
-        st.session_state.combo_results = result_data.get("results", [])
-        st.session_state.combo_errors = result_data.get("errors", [])
-        st.session_state.combo_titles = result_data.get("titles", [])
-        st.session_state.combo_title_error = result_data.get("title_error", "")
-        st.session_state.combo_title_warnings = result_data.get("title_warnings", [])
-        st.session_state.combo_tokens_used = result_data.get("tokens_used", 0)
-        st.session_state.combo_generation_done = True
-        st.session_state.combo_generating = False
-        st.session_state.current_page = "批量出图"
-
-
-def render_task_center_panel(owner_id: str):
-    tasks = list_task_center_tasks(owner_id)
-    if not tasks:
-        return
-    with st.expander(build_task_panel_title(len(tasks)), expanded=False):
-        for task in tasks[:12]:
-            meta = build_task_type_meta(task.get("task_type", ""))
-            c1, c2, c3 = st.columns([3, 1, 1])
-            with c1:
-                st.markdown(
-                    f"**{meta.get('icon', '●')} {meta.get('title', '任务')}** · {task.get('status', 'unknown')}"
-                )
-                st.caption(task.get("message", ""))
-            with c2:
-                if st.button(
-                    "查看",
-                    key=f"task_view_{task['id']}",
-                    use_container_width=True,
-                ):
-                    full_task = get_task_center_task(owner_id, task["id"])
-                    if full_task:
-                        restore_task_center_result(full_task)
-                        st.rerun()
-            with c3:
-                if task.get("status") not in ("queued", "running"):
-                    if st.button(
-                        "删除",
-                        key=f"task_del_{task['id']}",
-                        use_container_width=True,
-                    ):
-                        remove_task_center_task(owner_id, task["id"])
-                        st.rerun()
-
-
-def normalize_requirements(reqs, types_counts, templates):
-    """确保图需数量与用户选择一致，避免只生成8张"""
-    if not types_counts:
-        return reqs
-    result = []
-    for tk, cnt in types_counts.items():
-        if not cnt or cnt <= 0:
-            continue
-        items = [r for r in reqs if r.get("type_key") == tk]
-        if not items:
-            info = templates.get(tk, {})
-            for i in range(cnt):
-                result.append(
-                    {
-                        "type_key": tk,
-                        "type_name": info.get("name", tk),
-                        "index": i + 1,
-                        "topic": "",
-                        "scene": "",
-                        "copy": "",
-                    }
-                )
-        else:
-            for i in range(cnt):
-                base = items[i % len(items)]
-                new_item = {**base}
-                new_item["type_key"] = tk
-                new_item["type_name"] = base.get("type_name") or templates.get(
-                    tk, {}
-                ).get("name", tk)
-                new_item["index"] = i + 1
-                result.append(new_item)
-    return result
-
-
-def recommended_ref_limit(model_key: str) -> int:
-    return 5
-
-
-def contains_cjk(text: str) -> bool:
-    if not text:
-        return False
-    for ch in text:
-        code = ord(ch)
-        if (
-            0x4E00 <= code <= 0x9FFF  # CJK Unified Ideographs
-            or 0x3400 <= code <= 0x4DBF  # CJK Extension A
-            or 0x3040 <= code <= 0x30FF  # Hiragana/Katakana
-            or 0xAC00 <= code <= 0xD7AF  # Hangul
-        ):
-            return True
-    return False
-
-
-def create_zip_from_results(results: list, titles: list = None) -> bytes:
+def create_zip_from_results(
+    results: list, titles: list = None, target_language: str = "zh"
+) -> bytes:
     """从结果创建ZIP文件"""
     buf = io.BytesIO()
+    language_info = get_target_language(target_language)
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for item in results:
             filename = item.get("filename", "image.png")
@@ -4503,12 +3846,17 @@ def create_zip_from_results(results: list, titles: list = None) -> bytes:
                 z.writestr(filename, img_buf.getvalue())
 
         if titles:
-            titles_content = "\n\n".join(
-                [
-                    f"标题 {i // 2 + 1}:\nEN: {titles[i]}\nCN: {titles[i + 1]}"
-                    for i in range(0, len(titles) - 1, 2)
-                ]
-            )
+            if target_language == "en":
+                titles_content = "\n\n".join(
+                    [f"Title {i + 1}:\nEN: {t}" for i, t in enumerate(titles)]
+                )
+            else:
+                titles_content = "\n\n".join(
+                    [
+                        f"标题 {i // 2 + 1}:\nEN: {titles[i]}\n{language_info['copy_tag']}: {titles[i + 1]}"
+                        for i in range(0, len(titles) - 1, 2)
+                    ]
+                )
             if not titles_content and titles:
                 titles_content = "\n".join(
                     [f"Title {i + 1}: {t}" for i, t in enumerate(titles)]
@@ -4522,58 +3870,15 @@ def create_zip_from_results(results: list, titles: list = None) -> bytes:
 def apply_style():
     st.markdown(
         """<style>
-    :root { --primary: #0f766e; --accent: #2563eb; --surface: #ffffff; --canvas: #f4f7fb; --text: #0f172a; --muted: #64748b; --success: #059669; --warning: #d97706; --danger: #dc2626; --line: #dbe4ee; }
-    html, body, [class*="css"] { font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", "Helvetica Neue", Arial, sans-serif; background: var(--canvas); color: var(--text); }
-    .stApp { background: radial-gradient(circle at top right, rgba(37,99,235,0.08), transparent 28%), linear-gradient(180deg, #f8fbff 0%, #f4f7fb 100%); }
-    .block-container { padding-top: 0.75rem; padding-bottom: 1.5rem; max-width: 1380px; }
-    .main-title { font-size: 2.6rem; font-weight: 800; text-align: center; margin: 0.8rem 0 0.6rem; color: var(--text); letter-spacing: -0.03em; }
-    .page-title { font-size: 1.75rem; font-weight: 750; margin-bottom: 1rem; padding-bottom: 0.55rem; border-bottom: 2px solid rgba(15,118,110,0.18); }
-    .shell-banner { background: linear-gradient(135deg, rgba(15,118,110,0.1) 0%, rgba(37,99,235,0.08) 100%); border: 1px solid rgba(15,118,110,0.18); border-radius: 18px; padding: 18px 20px; margin-bottom: 1rem; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.04); }
-    .shell-kicker { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--primary); }
-    .shell-heading { font-size: 28px; font-weight: 800; color: var(--text); margin-top: 4px; }
-    .shell-subtext { font-size: 13px; color: var(--muted); margin-top: 6px; }
-    .notice-card { border-radius: 14px; padding: 14px 16px; margin: 0.75rem 0 1rem; border: 1px solid var(--line); background: #ffffff; }
-    .notice-card.info { background: linear-gradient(135deg, rgba(37,99,235,0.08), rgba(15,118,110,0.06)); }
-    .notice-card.success { background: linear-gradient(135deg, rgba(5,150,105,0.09), rgba(15,118,110,0.05)); }
-    .notice-card.warning { background: linear-gradient(135deg, rgba(217,119,6,0.09), rgba(245,158,11,0.06)); }
-    .notice-title { font-size: 15px; font-weight: 700; color: var(--text); margin-bottom: 4px; }
-    .notice-body { font-size: 13px; color: var(--muted); }
-    .config-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 0.75rem 0 1rem; }
-    .config-card { background: rgba(255,255,255,0.98); border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px; box-shadow: 0 8px 20px rgba(15,23,42,0.04); }
-    .config-badge { display: inline-flex; align-items: center; justify-content: center; padding: 4px 8px; font-size: 10px; font-weight: 700; border-radius: 999px; background: rgba(37,99,235,0.1); color: var(--accent); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px; }
-    .config-title { font-size: 15px; font-weight: 750; color: var(--text); margin-bottom: 6px; }
-    .config-desc { font-size: 13px; line-height: 1.65; color: var(--muted); }
-    .mini-guide-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 0.75rem 0 1rem; }
-    .mini-guide-card { background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.98)); border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px; }
-    .mini-guide-title { font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
-    .mini-guide-desc { font-size: 12px; color: var(--muted); line-height: 1.65; }
-    .status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 1rem 0 1.2rem; }
-    .status-card { background: rgba(255,255,255,0.9); border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px; box-shadow: 0 6px 18px rgba(15, 23, 42, 0.04); }
-    .status-label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
-    .status-value { font-size: 18px; font-weight: 750; color: var(--text); }
-    .dashboard-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 1rem 0; }
-    .dashboard-card { background: rgba(255,255,255,0.96); border: 1px solid var(--line); border-radius: 18px; padding: 18px; box-shadow: 0 12px 28px rgba(15, 23, 42, 0.05); }
-    .dashboard-icon { width: 42px; height: 42px; border-radius: 12px; background: linear-gradient(135deg, rgba(15,118,110,0.14), rgba(37,99,235,0.12)); display: flex; align-items: center; justify-content: center; font-size: 20px; color: var(--primary); margin-bottom: 12px; }
-    .dashboard-title { font-size: 16px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
-    .dashboard-desc { font-size: 13px; color: var(--muted); line-height: 1.6; }
-    .section-frame { background: rgba(255,255,255,0.96); border: 1px solid var(--line); border-radius: 18px; padding: 16px 18px; margin: 0 0 14px; box-shadow: 0 8px 24px rgba(15,23,42,0.04); }
-    .section-eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--primary); font-weight: 700; margin-bottom: 6px; }
-    .section-heading { font-size: 18px; font-weight: 750; color: var(--text); margin-bottom: 4px; }
-    .section-caption { font-size: 13px; color: var(--muted); margin-bottom: 14px; line-height: 1.65; }
-    .result-shell { background: rgba(255,255,255,0.98); border: 1px solid var(--line); border-radius: 18px; padding: 18px; margin-bottom: 14px; box-shadow: 0 12px 30px rgba(15,23,42,0.05); }
-    .result-summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 0.5rem 0 1rem; }
-    .result-summary-card { background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; }
-    .result-summary-label { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
-    .result-summary-value { font-size: 15px; font-weight: 700; color: var(--text); }
-    .results-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
-    .results-toolbar-title { font-size: 18px; font-weight: 750; color: var(--text); }
-    .results-toolbar-subtitle { font-size: 13px; color: var(--muted); }
-    .stButton>button { border-radius: 10px; font-weight: 600; transition: all 0.2s; border: 1px solid #e2e8f0; background: #f8fafc; color: #0f172a; }
-    .stButton>button:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15, 23, 42, 0.12); }
-    button[kind="primary"] { background: linear-gradient(135deg, #1677ff 0%, #36cfc9 100%); color: #fff !important; border: 0 !important; box-shadow: 0 6px 16px rgba(22, 119, 255, 0.28); }
-    button[kind="primary"]:hover { box-shadow: 0 8px 20px rgba(22, 119, 255, 0.24); }
-    button[kind="secondary"] { background: #f1f5f9 !important; color: #0f172a !important; border: 1px solid #e2e8f0 !important; }
-    .stButton>button:focus { box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.25); }
+    :root { --primary: #6366f1; --success: #10b981; --warning: #f59e0b; --danger: #ef4444; }
+    .main-title { font-size: 2.5rem; font-weight: 800; text-align: center; margin: 1rem 0; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .page-title { font-size: 1.75rem; font-weight: 700; margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 3px solid var(--primary); }
+    .stButton>button { border-radius: 10px; font-weight: 600; transition: all 0.2s; }
+    .stButton>button:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3); }
+    section[data-testid="stSidebar"] .stButton>button { padding: 0.38rem 0.65rem; min-height: 0; margin-bottom: 0.18rem; }
+    section[data-testid="stSidebar"] h4 { margin-top: 0.15rem; margin-bottom: 0.45rem; font-size: 0.92rem; }
+    section[data-testid="stSidebar"] .element-container { margin-bottom: 0.15rem; }
+    section[data-testid="stSidebar"] hr { margin: 0.75rem 0; }
     [data-testid="stFileUploader"] { border: 2px dashed var(--primary); border-radius: 12px; padding: 1rem; }
     .info-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 1rem 1.25rem; margin-bottom: 0.75rem; }
     .success-card { background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%); border: 1px solid #86efac; border-radius: 12px; padding: 1rem 1.25rem; }
@@ -4586,355 +3891,59 @@ def apply_style():
     .feature-title { font-weight: 600; font-size: 15px; margin-bottom: 0.25rem; }
     .feature-desc { font-size: 12px; color: #64748b; }
     .token-badge { background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); border: 1px solid #f59e0b; border-radius: 8px; padding: 0.25rem 0.75rem; font-size: 12px; font-weight: 500; color: #92400e; display: inline-block; }
-    .footer { margin-top: 3rem; padding: 1.5rem; border-top: 1px solid #e2e8f0; text-align: center; color: #64748b; font-size: 12px; }
+    .footer { margin-top: 2.5rem; padding: 1.1rem 0 0.35rem 0; border-top: 1px solid #e2e8f0; text-align: right; color: #64748b; font-size: 11px; }
     #MainMenu, footer, header { visibility: hidden; }
     .title-box { background: linear-gradient(135deg, #eff6ff 0%, #f5f3ff 100%); border: 1px solid #c7d2fe; border-radius: 12px; padding: 1rem; margin: 0.75rem 0; }
     .image-card { border: 1px solid #e2e8f0; border-radius: 12px; padding: 0.5rem; margin: 0.5rem 0; background: white; }
     .image-label { font-size: 12px; font-weight: 600; color: #6366f1; text-align: center; margin-top: 0.25rem; }
-    .translate-header { display: flex; align-items: center; gap: 12px; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 12px 16px; margin-bottom: 14px; }
-    .translate-logo { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg, #1677ff 0%, #36cfc9 100%); color: #fff; font-weight: 700; display: flex; align-items: center; justify-content: center; font-size: 16px; }
-    .translate-title { font-size: 18px; font-weight: 700; }
-    .translate-subtitle { font-size: 12px; color: #64748b; margin-top: 2px; }
-    .form-card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 12px 14px; margin-bottom: 12px; box-shadow: 0 1px 6px rgba(15, 23, 42, 0.04); }
-    .section-title { font-size: 14px; font-weight: 700; color: #111827; margin: 4px 0 10px 0; display: flex; align-items: center; gap: 8px; }
-    .section-chip { font-size: 11px; color: #1677ff; background: #e6f4ff; border-radius: 999px; padding: 2px 8px; }
-    .guide-card { background: linear-gradient(135deg, #f8fafc 0%, #eef2ff 100%); border: 1px solid #e5e7eb; border-radius: 12px; padding: 10px 12px; font-size: 12px; }
-    .thumb-grid img { border-radius: 8px; border: 1px solid #e5e7eb; }
-    section[data-testid="stSidebar"] { background: linear-gradient(180deg, #fbfcff 0%, #f5f8fc 100%); border-right: 1px solid rgba(148,163,184,0.18); }
-    .sidebar-brand { padding: 6px 0 10px; }
-    .sidebar-kicker { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--primary); font-weight: 700; }
-    .sidebar-title { font-size: 20px; font-weight: 800; color: var(--text); margin-top: 4px; }
-    .sidebar-subtitle { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.6; }
-    .sidebar-section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: #475569; font-weight: 700; margin: 0.8rem 0 0.5rem; }
-    .stepper { display: flex; gap: 8px; flex-wrap: wrap; margin: 0.5rem 0 1rem; }
-    .step { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 6px 10px; font-size: 12px; display: inline-flex; align-items: center; gap: 6px; color: #334155; }
-    .step-num { width: 18px; height: 18px; border-radius: 999px; background: #e2e8f0; color: #0f172a; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; }
-    .step.active { background: linear-gradient(135deg, #e6f4ff 0%, #f0f5ff 100%); border-color: #91caff; color: #1e293b; }
-    .step.active .step-num { background: #1677ff; color: #fff; }
-    @media (max-width: 900px) {
-      .status-grid, .dashboard-grid, .result-summary-grid, .config-grid, .mini-guide-grid { grid-template-columns: 1fr; }
-      .shell-heading { font-size: 22px; }
-    }
+    .template-preview-shell { border: 1px solid #dbe4f0; border-radius: 16px; background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%); padding: 1rem; margin: 0.5rem 0 1rem 0; }
+    .template-preview-title { font-size: 13px; font-weight: 700; color: #1e3a8a; margin-bottom: 0.4rem; }
+    .template-preview-subtitle { font-size: 12px; color: #64748b; margin-bottom: 0.75rem; }
+    .template-preview-card { border: 1px solid #dbe4f0; border-radius: 14px; background: white; padding: 0.9rem; min-height: 128px; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05); }
+    .template-preview-card.disabled { opacity: 0.55; border-style: dashed; }
+    .template-preview-badge { display: inline-block; border-radius: 999px; background: #eff6ff; color: #1d4ed8; padding: 0.16rem 0.55rem; font-size: 11px; font-weight: 600; margin-right: 0.35rem; }
+    .template-preview-badge.off { background: #f3f4f6; color: #6b7280; }
+    .template-preview-name { font-size: 16px; font-weight: 700; color: #0f172a; margin: 0.55rem 0 0.3rem 0; }
+    .template-preview-desc { font-size: 13px; color: #334155; line-height: 1.5; }
+    .template-preview-hint { font-size: 12px; color: #64748b; margin-top: 0.55rem; }
+    .template-preview-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75rem; margin-top: 0.75rem; }
+    .template-preview-mini { border: 1px solid #e2e8f0; border-radius: 12px; background: #fff; padding: 0.75rem; }
+    .template-preview-mini.disabled { opacity: 0.45; }
+    .template-preview-mini-name { font-size: 13px; font-weight: 700; color: #0f172a; margin-top: 0.3rem; }
+    .template-preview-mini-meta { font-size: 11px; color: #64748b; margin-top: 0.25rem; }
     </style>""",
         unsafe_allow_html=True,
     )
 
 
 def show_footer():
-    today_images = get_today_generated_images_count()
-    footer_meta = build_footer_meta()
+    if st.session_state.get("_footer_rendered"):
+        return
+    st.session_state["_footer_rendered"] = True
     st.markdown(
         f"""
     <div class="footer">
-        <p><strong>{APP_NAME}</strong> · {APP_EN_NAME}</p>
-        <p>📈 今日已出图: <strong>{today_images}</strong> 张</p>
-        <p>{APP_TAGLINE}</p>
-        <p>{footer_meta["company_line"]}</p>
-        <p>{footer_meta["version_line"]}</p>
-        <p style="margin-top:0.75rem;font-size:11px;color:#94a3b8">© {datetime.now().year} All Rights Reserved.</p>
+        <p><strong>{APP_NAME}</strong></p>
+        <p>核心作者: {APP_AUTHOR} · 商业订阅: {APP_COMMERCIAL}</p>
+        <p style="margin-top:0.45rem;font-size:10px;color:#94a3b8">© {datetime.now().year} All Rights Reserved.</p>
     </div>
     """,
         unsafe_allow_html=True,
     )
 
 
-def render_notice_card(title: str, body: str, level: str = "info"):
-    safe_level = level if level in {"info", "success", "warning"} else "info"
-    st.markdown(
-        f'<div class="notice-card {safe_level}"><div class="notice-title">{title}</div><div class="notice-body">{body}</div></div>',
-        unsafe_allow_html=True,
-    )
-
-
-def render_workspace_dashboard():
-    settings = get_settings()
-    mode_value = "团队模式" if platform_auth_ready() else "管理员模式"
-    image_engine = settings.get("default_image_provider", "Gemini")
-    relay_model = settings.get("relay_default_image_model", "未配置")
-    db_value = "已启用" if platform_auth_ready() else "未启用"
-    used, limit = check_user_limit(get_user_id())[1:]
-    usage_value = "无限额度" if st.session_state.use_own_key else f"{used}/{limit}"
-    st.markdown(
-        f"""<div class="shell-banner">
-            <div class="shell-kicker">AI Studio Dashboard</div>
-            <div class="shell-heading">{APP_NAME}</div>
-            <div class="shell-subtext">{APP_LAST_UPDATED} · {APP_TAGLINE}</div>
-        </div>""",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f"""<div class="status-grid">
-            <div class="status-card"><div class="status-label">当前模式</div><div class="status-value">{mode_value}</div></div>
-            <div class="status-card"><div class="status-label">默认出图引擎</div><div class="status-value">{image_engine}</div></div>
-            <div class="status-card"><div class="status-label">系统中转站模型</div><div class="status-value">{relay_model}</div></div>
-            <div class="status-card"><div class="status-label">今日额度</div><div class="status-value">{usage_value}</div></div>
-        </div>""",
-        unsafe_allow_html=True,
-    )
-    notice = build_admin_mode_notice(
-        has_service_access=_has_system_service_access(),
-        team_ready=platform_auth_ready(),
-    )
-    render_notice_card(notice["title"], notice["body"], notice["level"])
-    catalog = build_feature_catalog()
-    cards = []
-    for item in catalog[1:]:
-        cards.append(
-            f"""<div class="dashboard-card"><div class="dashboard-icon">{item["emoji"]}</div><div class="dashboard-title">{item["title"]}</div><div class="dashboard-desc">{item["subtitle"]}</div></div>"""
-        )
-    st.markdown(
-        '<div class="dashboard-grid">' + "".join(cards) + "</div>",
-        unsafe_allow_html=True,
-    )
-    action_defs = build_workspace_actions()
-    action_cols = st.columns(4)
-    for idx, action in enumerate(action_defs):
-        with action_cols[idx]:
-            if st.button(
-                action["label"], key=f"workspace_action_{idx}", use_container_width=True
-            ):
-                set_current_page(action["target"])
-
-
-def render_brand_mark(center: bool = False, width: int = 72):
-    if not BRAND_MARK_PATH.exists():
-        return
-    if center:
-        c1, c2, c3 = st.columns([1, 1, 1])
-        with c2:
-            st.image(str(BRAND_MARK_PATH), width=width)
-    else:
-        st.image(str(BRAND_MARK_PATH), width=width)
-
-
-def render_action_reasons(title: str, reasons: list, success_note: str = ""):
-    if reasons:
-        render_notice_card(title, "<br>".join([f"- {r}" for r in reasons]), "warning")
-    elif success_note:
-        render_notice_card(title, success_note, "success")
-
-
-def set_current_page(page: str):
-    st.session_state.current_page = page
-    st.rerun()
-
-
-def render_sidebar_primary_nav(current_page: str):
-    home_col, reset_col = st.columns(2)
-    with home_col:
-        if st.button("⌂ 首页", key="nav_home", use_container_width=True):
-            set_current_page("工作台")
-    with reset_col:
-        if st.button("↺ 新任务", key="nav_new_task", use_container_width=True):
-            reset_working_session()
-            st.rerun()
-
-    nav_items = build_core_function_nav()
-    for row_start in range(0, len(nav_items), 2):
-        cols = st.columns(2)
-        for idx, item in enumerate(nav_items[row_start : row_start + 2]):
-            label = item["label"]
-            button_label = f"● {label}" if current_page == label else label
-            with cols[idx]:
-                if st.button(
-                    button_label,
-                    key=f"nav_{item['key']}",
-                    use_container_width=True,
-                ):
-                    set_current_page(label)
-
-
-def render_page_toolbar(
-    current_page: str, restart_key: str, restart_label: str = "重新开始当前任务"
-):
-    targets = build_page_switch_targets(current_page)
-    badge = build_task_badge(count_pending_tasks(list_task_center_tasks(get_user_id())))
-    cols = st.columns(len(targets) + 2 if badge["show"] else len(targets) + 1)
-    for idx, item in enumerate(targets):
-        with cols[idx]:
-            if st.button(
-                item["label"],
-                key=f"toolbar_{current_page}_{item['key']}",
-                use_container_width=True,
-            ):
-                target = "工作台" if item["key"] == "workspace" else item["label"]
-                set_current_page(target)
-    action_col_index = len(cols) - 1
-    if badge["show"]:
-        with cols[-2]:
-            if st.button(
-                badge["label"],
-                key=f"task_badge_{current_page}",
-                use_container_width=True,
-            ):
-                st.session_state.show_task_center = True
-                st.rerun()
-    with cols[action_col_index]:
-        return st.button(restart_label, key=restart_key, use_container_width=True)
-
-
-def render_thumbnail_gallery(images: list, kind: str, max_visible: int = 8):
-    if not images:
-        return
-    size = get_thumbnail_sizes().get(kind, 84)
-    visible = images[:max_visible]
-    cols = st.columns(min(len(visible), 4))
-    for idx, image in enumerate(visible):
-        with cols[idx % len(cols)]:
-            st.image(image, caption=f"图{idx + 1}", width=size)
-    if len(images) > max_visible:
-        st.caption(f"已加载 {len(images)} 张，仅显示前 {max_visible} 张缩略图。")
-
-
-def reset_combo_task_state():
-    st.session_state.combo_anchor = None
-    st.session_state.combo_reqs = []
-    st.session_state.combo_images = []
-    st.session_state.combo_results = []
-    st.session_state.combo_errors = []
-    st.session_state.combo_titles = []
-    st.session_state.combo_title_error = ""
-    st.session_state.combo_title_warnings = []
-    st.session_state.combo_generation_done = False
-    st.session_state.combo_generating = False
-
-
-def reset_smart_task_state():
-    st.session_state.smart_results = []
-    st.session_state.smart_errors = []
-    st.session_state.smart_titles = []
-    st.session_state.smart_title_error = ""
-    st.session_state.smart_title_warnings = []
-    st.session_state.smart_generation_done = False
-    st.session_state.smart_generating = False
-
-
-def reset_title_task_state():
-    for key in [
-        "title_input_mode",
-        "title_product_info",
-        "title_template_select",
-        "title_custom_prompt",
-    ]:
-        if key in st.session_state:
-            st.session_state.pop(key, None)
-
-
-def reset_translate_task_state():
-    st.session_state.img_trans_results = []
-    st.session_state.img_trans_errors = []
-    st.session_state.img_trans_tokens_used = 0
-    st.session_state.img_trans_done = False
-    st.session_state.img_trans_zip_cache = {"key": "", "bytes": b""}
-
-
-def render_section_frame(section: dict, index: int):
-    st.markdown(
-        f"""<div class="section-frame"><div class="section-eyebrow">Step {index}</div><div class="section-heading">{section.get("title", "")}</div><div class="section-caption">{section.get("desc", "")}</div></div>""",
-        unsafe_allow_html=True,
-    )
-
-
-def render_result_summary_shell(summary: dict):
-    state_label = {
-        "success": "结果已完成",
-        "partial": "结果部分完成",
-        "error": "结果未完成",
-        "neutral": "结果待确认",
-    }.get(summary.get("state", "neutral"), "结果待确认")
-    st.markdown(
-        f"""<div class="result-shell"><div class="results-toolbar"><div><div class="results-toolbar-title">{summary.get("title", "结果")}</div><div class="results-toolbar-subtitle">{state_label}</div></div></div><div class="result-summary-grid"><div class="result-summary-card"><div class="result-summary-label">完成情况</div><div class="result-summary-value">{summary.get("headline", "")}</div></div><div class="result-summary-card"><div class="result-summary-label">Token</div><div class="result-summary-value">{summary.get("token_text", "")}</div></div><div class="result-summary-card"><div class="result-summary-label">警告</div><div class="result-summary-value">{summary.get("warning_text", "")}</div></div><div class="result-summary-card"><div class="result-summary-label">错误</div><div class="result-summary-value">{summary.get("error_text", "")}</div></div></div></div>""",
-        unsafe_allow_html=True,
-    )
-
-
-def render_config_cards(section_defs: dict, keys: list):
-    cards = []
-    for section_key, item_key in keys:
-        item = section_defs.get(section_key, {}).get(item_key, {})
-        if not item:
-            continue
-        cards.append(
-            f"""<div class="config-card"><div class="config-badge">{item.get("badge", "配置")}</div><div class="config-title">{item.get("title", "")}</div><div class="config-desc">{item.get("desc", "")}</div></div>"""
-        )
-    if cards:
-        st.markdown(
-            '<div class="config-grid">' + "".join(cards) + "</div>",
-            unsafe_allow_html=True,
-        )
-
-
-def render_recommended_templates_cards():
-    cards = []
-    for item in build_recommended_provider_templates():
-        cards.append(
-            f"""<div class="mini-guide-card"><div class="mini-guide-title">{item.get("title", "")}</div><div class="mini-guide-desc">{item.get("summary", "")}</div></div>"""
-        )
-    if cards:
-        st.markdown(
-            '<div class="mini-guide-grid">' + "".join(cards) + "</div>",
-            unsafe_allow_html=True,
-        )
-
-
-def inject_browser_key_persistence():
-    components.html(
-        """
-        <script>
-        const mappings = [
-          { label: "Gemini / Vertex API Key", storageKey: "temu_ai_studio_login_key" },
-          { label: "中转站 API Key", storageKey: "temu_ai_studio_relay_key" },
-          { label: "中转站 API 地址", storageKey: "temu_ai_studio_relay_base" }
-        ];
-        function applyPersistence() {
-          const doc = window.parent.document;
-          mappings.forEach((mapping) => {
-            const inputs = doc.querySelectorAll(`input[aria-label="${mapping.label}"]`);
-            if (!inputs.length) return;
-            const saved = window.parent.localStorage.getItem(mapping.storageKey) || "";
-            inputs.forEach((input) => {
-              if (saved && !input.value) {
-                input.value = saved;
-                input.dispatchEvent(new Event("input", { bubbles: true }));
-                input.dispatchEvent(new Event("change", { bubbles: true }));
-              }
-              if (!input.dataset.persistBound) {
-                input.addEventListener("input", () => {
-                  window.parent.localStorage.setItem(mapping.storageKey, input.value || "");
-                });
-                input.dataset.persistBound = "1";
-              }
-            });
-          });
-        }
-        applyPersistence();
-        const observer = new MutationObserver(() => applyPersistence());
-        observer.observe(window.parent.document.body, { childList: true, subtree: true });
-        </script>
-        """,
-        height=0,
-        width=0,
-    )
-
-
 # ==================== 初始化 ====================
 def init_session():
+    s = get_settings()
+    if "startup_maintenance_done" not in st.session_state:
+        purged_records = cleanup_expired_trashed_records()
+        if purged_records:
+            st.session_state["startup_maintenance_notice"] = (
+                f"系统已按回收站保留策略自动清理 {len(purged_records)} 条过期记录。"
+            )
+        st.session_state["startup_maintenance_done"] = True
     defaults = {
-        "authenticated": False,
-        "is_admin": False,
-        "use_own_key": False,
-        "own_provider": "gemini",
-        "own_api_key": "",
-        "own_relay_key": "",
-        "own_relay_base": RELAY_API_BASE,
-        "own_relay_model": "gemini-3.1-flash-image-preview",
-        "auth_user_id": "",
-        "auth_username": "",
-        "auth_display_name": "",
-        "auth_role": "",
-        "auth_provider": "",
-        "show_admin": False,
-        "user_compliance_mode": "strict",
+        "user_compliance_mode": s.get("compliance_mode", "strict"),
         "combo_anchor": None,
         "combo_reqs": [],
         "combo_images": [],
@@ -4943,135 +3952,36 @@ def init_session():
         "combo_results": [],
         "combo_errors": [],
         "combo_titles": [],
-        "combo_title_error": "",
-        "combo_title_warnings": [],
+        "combo_title_result": {},
+        "combo_result_title_language": s.get(
+            "default_title_language", DEFAULT_TARGET_LANGUAGE
+        ),
+        "combo_title_language": s.get(
+            "default_title_language", DEFAULT_TARGET_LANGUAGE
+        ),
+        "combo_image_language": s.get(
+            "default_image_language", DEFAULT_TARGET_LANGUAGE
+        ),
         "smart_generating": False,
         "smart_generation_done": False,
         "smart_results": [],
         "smart_errors": [],
         "smart_titles": [],
-        "smart_title_error": "",
-        "smart_title_warnings": [],
-        "img_trans_results": [],
-        "img_trans_errors": [],
-        "img_trans_done": False,
-        "img_trans_zip_cache": {"key": "", "bytes": b""},
-        "img_trans_tokens_used": 0,
-        "img_trans_source_items": [],
-        "img_trans_last_options": {},
-        "remember_login": False,
-        "remember_role": None,
-        "remember_until": 0,
+        "smart_title_result": {},
+        "smart_result_title_language": s.get(
+            "default_title_language", DEFAULT_TARGET_LANGUAGE
+        ),
+        "smart_title_language": s.get(
+            "default_title_language", DEFAULT_TARGET_LANGUAGE
+        ),
+        "smart_image_language": s.get(
+            "default_image_language", DEFAULT_TARGET_LANGUAGE
+        ),
         "session_tokens": 0,
-        "platform_org_id": "",
-        "platform_org_name": "",
-        "platform_user_id": "",
-        "platform_username": "",
-        "platform_role": "",
-        "platform_project_id": "",
-        "platform_project_name": "",
-        "platform_wallet_balance": 0,
-        "platform_context_error": "",
-        "platform_project_options": [],
-        "current_page": "工作台",
-        "show_task_center": False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
-
-
-def reset_working_session():
-    keep_keys = {
-        "authenticated",
-        "is_admin",
-        "use_own_key",
-        "own_provider",
-        "own_api_key",
-        "own_relay_key",
-        "own_relay_base",
-        "own_relay_model",
-        "auth_user_id",
-        "auth_username",
-        "auth_display_name",
-        "auth_role",
-        "auth_provider",
-        "remember_login",
-        "remember_role",
-        "remember_until",
-        "user_id",
-        "platform_org_id",
-        "platform_org_name",
-        "platform_user_id",
-        "platform_username",
-        "platform_role",
-        "platform_project_id",
-        "platform_project_name",
-        "platform_wallet_balance",
-        "platform_context_error",
-        "platform_project_options",
-        "current_page",
-        "show_task_center",
-    }
-    for k in list(st.session_state.keys()):
-        if k not in keep_keys:
-            del st.session_state[k]
-    init_session()
-
-
-def render_reference_tips():
-    st.markdown(
-        """
-    <div class="help-section">
-        <h4>💡 参考图选择建议</h4>
-        <ul>
-            <li>优先选择 <b>代表性</b> 图片：白底主图、带文字卖点图、场景/细节图、尺寸/标签图</li>
-            <li>避免重复角度/水印/拼图/过度美化，文字尽量清晰无遮挡</li>
-            <li>数量建议：每次 2-5 张参考图（过多会增加失败率和延迟）</li>
-            <li>当前默认官方出图模型为 Gemini 2.5 Flash Image；中转站模式可使用独立图片模型</li>
-        </ul>
-        <h4>🛠️ 稳定性建议</h4>
-        <ul>
-            <li>遇到 503/内部错误/长时间处理中：减少参考图、降低分辨率或分批提交</li>
-            <li>点击侧边栏「清理会话缓存」后重试，必要时降低并发</li>
-        </ul>
-    </div>
-    """,
-        unsafe_allow_html=True,
-    )
-    render_stepper(["上传", "翻译", "导出"], 1)
-
-
-def render_translation_tips():
-    st.markdown(
-        """
-    <div class="help-section">
-        <h4>💡 图片建议</h4>
-        <ul>
-            <li>文字清晰、无遮挡、对比度足够，可显著提升 OCR 与翻译质量</li>
-            <li>避免严重压缩或过小分辨率；批量过大请分批处理</li>
-            <li>翻译出图取决于当前 provider 和模型能力；不支持时页面会直接提示</li>
-        </ul>
-        <h4>🛠️ 稳定性建议</h4>
-        <ul>
-            <li>遇到 503/内部错误/长时间处理中：降低分辨率、减少批次或稍后重试</li>
-            <li>点击侧边栏「清理会话缓存」后重试，必要时降低并发</li>
-            <li>结果页默认仅保留译后图下载链路，避免原图对照与格式切换导致卡顿</li>
-        </ul>
-    </div>
-    """,
-        unsafe_allow_html=True,
-    )
-
-
-def render_stepper(steps, active_idx=1):
-    items = []
-    for i, label in enumerate(steps, start=1):
-        active = "active" if i == active_idx else ""
-        items.append(
-            f'<div class="step {active}"><span class="step-num">{i}</span>{label}</div>'
-        )
-    st.markdown(f'<div class="stepper">{"".join(items)}</div>', unsafe_allow_html=True)
 
 
 # ==================== 用户合规设置 ====================
@@ -5100,12 +4010,276 @@ def show_user_compliance():
         st.success("✅ 已保存")
 
 
+def show_provider_settings():
+    s = get_settings()
+    st.markdown(
+        '<div class="page-title">⚙️ 提供商设置</div>', unsafe_allow_html=True
+    )
+    st.markdown(
+        "在本地管理 API 提供商信息。支持直连 Gemini 与中转/Relay Base URL，并为后续任务切换提供保护。"
+    )
+
+    data = get_providers()
+    providers = data.get("providers", [])
+    current_id = data.get("current_id")
+
+    current = next((p for p in providers if p.get("id") == current_id), None)
+    if current:
+        st.info(f"当前提供商: {current.get('name', '')}")
+
+    with st.expander("➕ 添加提供商"):
+        new_name = st.text_input("名称", key="prov_new_name")
+        new_type = st.selectbox("类型", ["gemini", "relay"], key="prov_new_type")
+        new_key = st.text_input("API Key", type="password", key="prov_new_key")
+        new_base = st.text_input("Base URL (可选)", key="prov_new_base")
+        new_title_model = st.text_input(
+            "标题模型 (可选)",
+            value=s.get("default_title_model", "gemini-3.1-flash-lite-preview"),
+            key="prov_new_title_model",
+        )
+        new_vision_model = st.text_input(
+            "视觉模型 (可选)",
+            value=s.get("default_vision_model", "gemini-3.1-flash-lite-preview"),
+            key="prov_new_vision_model",
+        )
+        new_image_model = st.text_input(
+            "图像模型 (可选)",
+            value=s.get("default_model", "gemini-3.1-flash-image-preview"),
+            key="prov_new_image_model",
+        )
+        if st.button("添加提供商", type="primary"):
+            errors = validate_provider_config(new_name, new_type, new_key, new_base)
+            if errors:
+                for error in errors:
+                    st.error(error)
+            else:
+                new_id = _new_provider_id()
+                provider = {
+                    "id": new_id,
+                    "name": new_name.strip(),
+                    "provider_type": new_type,
+                    "api_key": new_key.strip(),
+                    "base_url": new_base.strip(),
+                    "title_model": new_title_model.strip(),
+                    "vision_model": new_vision_model.strip(),
+                    "image_model": new_image_model.strip(),
+                    "enabled": True,
+                    "is_default": not providers,
+                }
+                provider, stored_in_keychain = persist_provider_secret(
+                    provider, new_key
+                )
+                providers.append(provider)
+                if not data.get("current_id"):
+                    data["current_id"] = new_id
+                data["providers"] = providers
+                save_providers(data)
+                st.success(
+                    "✅ 已添加"
+                    + ("，Key 已安全保存到 Keychain" if stored_in_keychain else "")
+                )
+                st.rerun()
+
+    if not providers:
+        st.warning("暂无提供商，请先添加。")
+        return
+
+    for idx, p in enumerate(providers):
+        label = f"{p.get('name', '提供商')} ({p.get('provider_type', 'gemini')})"
+        with st.expander(label, expanded=False):
+            current_secret = resolve_provider_api_key(p)
+            provider_active_tasks = provider_has_active_tasks(p.get("id"))
+            provider_is_current = data.get("current_id") == p.get("id")
+            p["name"] = st.text_input(
+                "名称", p.get("name", ""), key=f"prov_name_{p['id']}"
+            )
+            p["provider_type"] = st.selectbox(
+                "类型",
+                ["gemini", "relay"],
+                index=["gemini", "relay"].index(p.get("provider_type", "gemini"))
+                if p.get("provider_type") in ["gemini", "relay"]
+                else 0,
+                key=f"prov_type_{p['id']}",
+            )
+            p["api_key"] = st.text_input(
+                "API Key",
+                current_secret,
+                type="password",
+                key=f"prov_key_{p['id']}",
+            )
+            p["base_url"] = st.text_input(
+                "Base URL (可选)", p.get("base_url", ""), key=f"prov_base_{p['id']}"
+            )
+            p["title_model"] = st.text_input(
+                "标题模型 (可选)", p.get("title_model", ""), key=f"prov_title_{p['id']}"
+            )
+            p["vision_model"] = st.text_input(
+                "视觉模型 (可选)",
+                p.get("vision_model", ""),
+                key=f"prov_vision_{p['id']}",
+            )
+            p["image_model"] = st.text_input(
+                "图像模型 (可选)", p.get("image_model", ""), key=f"prov_image_{p['id']}"
+            )
+            p["enabled"] = st.checkbox(
+                "启用", p.get("enabled", True), key=f"prov_enabled_{p['id']}"
+            )
+            if provider_active_tasks:
+                st.warning("当前有进行中任务正在使用该提供商，暂不允许删除。")
+            if provider_is_current:
+                st.caption("当前默认提供商")
+
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                if st.button("设为当前", key=f"prov_set_{p['id']}"):
+                    set_current_provider(p["id"])
+                    st.success("✅ 已设为当前")
+                    st.rerun()
+            with c2:
+                if st.button(
+                    "测试连接",
+                    key=f"prov_test_{p['id']}",
+                    disabled=not current_secret,
+                ):
+                    provider_errors = validate_provider_config(
+                        p.get("name", ""),
+                        p.get("provider_type", "gemini"),
+                        current_secret,
+                        p.get("base_url", ""),
+                    )
+                    if provider_errors:
+                        st.error("；".join(provider_errors))
+                    else:
+                        try:
+                            client = GeminiClient(
+                                current_secret,
+                                base_url=p.get("base_url", ""),
+                                title_model=p.get("title_model", ""),
+                                vision_model=p.get("vision_model", ""),
+                            )
+                            resp = client._call(
+                                lambda: client.client.models.generate_content(
+                                    model=p.get("title_model")
+                                    or s.get(
+                                        "default_title_model",
+                                        "gemini-3.1-flash-lite-preview",
+                                    ),
+                                    contents=["Return exactly OK."],
+                                    config=types.GenerateContentConfig(
+                                        response_modalities=["TEXT"]
+                                    ),
+                                ),
+                                timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS,
+                            )
+                            st.success(f"✅ 连接成功: {(resp.text or '').strip()[:60]}")
+                        except Exception as e:
+                            st.error(sanitize_task_error(str(e)))
+            with c3:
+                delete_confirm_key = f"confirm_delete_provider_{p['id']}"
+                if st.button(
+                    "删除",
+                    key=f"prov_del_{p['id']}",
+                    disabled=provider_active_tasks,
+                ):
+                    activate_confirmation(delete_confirm_key)
+                    st.rerun()
+                replacement = find_replacement_provider(p.get("id"))
+                delete_message = "删除后会移除该提供商配置。"
+                if provider_is_current:
+                    if replacement:
+                        delete_message += f" 当前默认将切换为 {replacement.get('name', '其他提供商')}。"
+                    else:
+                        delete_message += " 删除后当前默认提供商将被清空。"
+                if render_confirmation_bar(
+                    delete_confirm_key,
+                    delete_message,
+                    confirm_label="确认删除提供商",
+                ):
+                    delete_keychain_secret(p.get("keychain_account"))
+                    providers.pop(idx)
+                    if provider_is_current:
+                        data["current_id"] = replacement.get("id", "") if replacement else ""
+                    data["providers"] = providers
+                    save_providers(data)
+                    st.success("✅ 已删除提供商")
+                    st.rerun()
+
+    if st.button("💾 保存设置", type="primary"):
+        all_errors = []
+        for p in providers:
+            provider_errors = validate_provider_config(
+                p.get("name", ""),
+                p.get("provider_type", "gemini"),
+                p.get("api_key", ""),
+                p.get("base_url", ""),
+            )
+            if provider_errors:
+                all_errors.extend(
+                    [f"{p.get('name', '提供商')}: {message}" for message in provider_errors]
+                )
+                continue
+            p, _ = persist_provider_secret(p, p.get("api_key", ""))
+        if all_errors:
+            for error in all_errors:
+                st.error(error)
+            return
+        data["providers"] = providers
+        save_providers(data)
+        st.success("✅ 已保存")
+
+
+def show_settings_center():
+    st.markdown('<div class="page-title">🛠️ 系统设置</div>', unsafe_allow_html=True)
+    st.markdown(
+        "统一管理默认语言、模型、输出目录、代理、自动清理与诊断。模板资产已独立到「模板库」。"
+    )
+
+    tabs = st.tabs(["🌐 默认设置", "🩺 诊断", "🛡️ 合规词", "🧠 提示词"])
+
+    with tabs[0]:
+        render_settings_defaults_tab()
+
+    with tabs[1]:
+        render_settings_diagnostics_tab()
+
+    with tabs[2]:
+        st.markdown("### 🛡️ 个人合规词管理")
+        show_user_compliance()
+
+        st.markdown("---")
+        st.markdown("### 🔒 全局合规黑白名单")
+        comp = get_compliance()
+        global_blacklist = st.text_area(
+            "全局黑名单 (逗号分隔)",
+            ", ".join(comp.get("custom_blacklist", [])),
+            height=80,
+            key="global_comp_blacklist",
+        )
+        global_whitelist = st.text_area(
+            "全局白名单 (逗号分隔)",
+            ", ".join(comp.get("whitelist", [])),
+            height=80,
+            key="global_comp_whitelist",
+        )
+        if st.button("💾 保存全局合规词", key="save_global_compliance"):
+            comp["custom_blacklist"] = [
+                w.strip() for w in global_blacklist.split(",") if w.strip()
+            ]
+            comp["whitelist"] = [
+                w.strip() for w in global_whitelist.split(",") if w.strip()
+            ]
+            save_compliance(comp)
+            st.success("✅ 全局合规词已保存")
+
+    with tabs[3]:
+        render_prompt_management()
+
+
 # ==================== 标题生成选项组件 ====================
-def render_title_gen_option(prefix: str, has_images: bool = False):
-    title_templates = get_title_templates()
-    enabled_templates = {
-        k: v for k, v in title_templates.items() if v.get("enabled", True)
-    }
+def render_title_gen_option(prefix: str):
+    enabled_templates, template_options, template_names = (
+        build_title_template_selector_options(include_custom=False)
+    )
 
     st.markdown("---")
     st.markdown("### 🏷️ 智能标题生成 (可选)")
@@ -5113,14 +4287,24 @@ def render_title_gen_option(prefix: str, has_images: bool = False):
     enable_title = st.checkbox(
         "📝 同时生成商品标题",
         key=f"{prefix}_enable_title",
-        help="勾选后将在出图完成时一并生成英文标题。已上传图片时会优先结合图片分析，补充商品信息可选。",
+        help="勾选后将在出图完成时一并生成英文 + 目标语言标题",
     )
 
     if enable_title:
         st.markdown('<div class="title-box">', unsafe_allow_html=True)
 
-        template_options = list(enabled_templates.keys())
-        template_names = {k: v["name"] for k, v in enabled_templates.items()}
+        target_language = render_target_language_selector(
+            prefix,
+            "title_language",
+            "🌐 标题目标语言",
+            "标题默认优先英文；若选择英语，则输出纯英文标题。",
+        )
+        if target_language == "en":
+            st.caption("当前模式: 🇺🇸 纯英文标题")
+        else:
+            st.caption(
+                f"固定首行: 🇺🇸 English · 第二行: {get_title_language_caption(target_language)}"
+            )
 
         selected_template = st.selectbox(
             "标题模板",
@@ -5133,22 +4317,12 @@ def render_title_gen_option(prefix: str, has_images: bool = False):
         template_info = enabled_templates.get(selected_template, {})
         st.caption(f"📝 {template_info.get('desc', '')}")
 
-        field_label = (
-            f"补充商品信息 / 关键词 (可选，最多{MAX_TITLE_INFO_CHARS}字)"
-            if has_images
-            else f"商品信息描述 (最多{MAX_TITLE_INFO_CHARS}字)"
-        )
-        placeholder = (
-            "已上传图片时可不填；补充材质、规格、核心卖点会帮助标题更准确。"
-            if has_images
-            else "输入商品的详细信息，如：名称、材质、规格、特点、用途等..."
-        )
         title_info = st.text_area(
-            field_label,
+            f"商品信息描述 (最多{MAX_TITLE_INFO_CHARS}字)",
             height=100,
             max_chars=MAX_TITLE_INFO_CHARS,
             key=f"{prefix}_title_info",
-            placeholder=placeholder,
+            placeholder="输入商品的详细信息，如：名称、材质、规格、特点、用途等...",
         )
 
         char_count = len(title_info) if title_info else 0
@@ -5156,26 +4330,36 @@ def render_title_gen_option(prefix: str, has_images: bool = False):
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-        return enable_title, title_info, selected_template
+        return enable_title, title_info, selected_template, target_language
 
-    return False, "", "default"
+    return (
+        False,
+        "",
+        "default",
+        st.session_state.get(f"{prefix}_title_language", DEFAULT_TARGET_LANGUAGE),
+    )
 
 
-def display_generated_titles(titles: list, prefix: str = ""):
-    """显示生成的中英双语标题"""
+def display_generated_titles(
+    titles: list, prefix: str = "", target_language: str = "zh"
+):
     if not titles:
         return
 
-    st.markdown("### 🏷️ 生成的商品标题 (中英双语)")
+    language_info = get_target_language(target_language)
 
-    # 检测是否为中英双语格式 (6行)
-    if len(titles) >= 6:
+    if target_language == "en":
+        st.markdown("### 🏷️ 生成的商品标题 (纯英文)")
+    else:
+        st.markdown(f"### 🏷️ 生成的商品标题 (英文 + {language_info['label']})")
+
+    if target_language != "en" and len(titles) >= 6:
         labels = ["🔍 搜索优化", "💰 转化优化", "✨ 差异化"]
         for i in range(0, min(6, len(titles)), 2):
             title_idx = i // 2
             label = labels[title_idx] if title_idx < 3 else f"标题 {title_idx + 1}"
             en_title = titles[i] if i < len(titles) else ""
-            cn_title = titles[i + 1] if i + 1 < len(titles) else ""
+            localized_title = titles[i + 1] if i + 1 < len(titles) else ""
 
             # 计算英文字符数
             en_chars = len(en_title)
@@ -5195,8 +4379,8 @@ def display_generated_titles(titles: list, prefix: str = ""):
                     <span style="font-size:14px">{en_title}</span>
                 </div>
                 <div style="background:#fef3c7;padding:0.5rem;border-radius:6px">
-                    <span style="font-size:11px;color:#92400e">🇨🇳 中文</span><br>
-                    <span style="font-size:14px">{cn_title}</span>
+                    <span style="font-size:11px;color:#92400e">{language_info["flag"]} {language_info["label"]}</span><br>
+                    <span style="font-size:14px">{localized_title}</span>
                 </div>
             </div>
             """,
@@ -5221,11 +4405,11 @@ def display_generated_titles(titles: list, prefix: str = ""):
     copy_text = (
         "\n\n".join(
             [
-                f"Title {i // 2 + 1}:\nEN: {titles[i]}\nCN: {titles[i + 1]}"
+                f"Title {i // 2 + 1}:\nEN: {titles[i]}\n{language_info['copy_tag']}: {titles[i + 1]}"
                 for i in range(0, min(6, len(titles)), 2)
             ]
         )
-        if len(titles) >= 6
+        if target_language != "en" and len(titles) >= 6
         else "\n".join(titles)
     )
     st.text_area(
@@ -5325,9 +4509,389 @@ def render_type_selector(
     return result, calc_total()
 
 
+def render_title_template_management():
+    # Title template editing is kept separate from image template editing so the
+    # user-facing settings model stays aligned with product concepts.
+    st.markdown("### 🏷️ 标题模板管理")
+    title_templates = get_title_templates()
+    for key, value in title_templates.items():
+        with st.expander(f"{value.get('name', key)}", expanded=False):
+            value["name"] = st.text_input(
+                "模板名称", value.get("name", ""), key=f"title_tpl_name_{key}"
+            )
+            value["desc"] = st.text_input(
+                "模板说明", value.get("desc", ""), key=f"title_tpl_desc_{key}"
+            )
+            value["enabled"] = st.checkbox(
+                "启用", value.get("enabled", True), key=f"title_tpl_enabled_{key}"
+            )
+            value["prompt"] = st.text_area(
+                "模板提示词",
+                value.get("prompt", ""),
+                height=220,
+                key=f"title_tpl_prompt_{key}",
+            )
+    if st.button("💾 保存标题模板", key="save_title_templates_btn"):
+        save_title_templates(title_templates)
+        st.success("✅ 标题模板已保存")
+
+
+def render_prompt_management():
+    st.markdown("### 🧠 提示词管理")
+    prompts = get_prompts()
+    prompt_keys = list(DEFAULT_PROMPTS.keys())
+    selected_prompt = st.selectbox(
+        "选择提示词", prompt_keys, key="settings_prompt_key"
+    )
+    prompts[selected_prompt] = st.text_area(
+        f"编辑提示词：{selected_prompt}",
+        value=prompts.get(selected_prompt, DEFAULT_PROMPTS[selected_prompt]),
+        height=260,
+        key=f"prompt_editor_{selected_prompt}",
+    )
+    if st.button("💾 保存提示词", key="save_prompts_btn"):
+        save_prompts(prompts)
+        st.success("✅ 提示词已保存")
+
+
+def render_settings_defaults_tab():
+    s = get_settings()
+    st.markdown("### 🌐 全局默认")
+    c1, c2 = st.columns(2)
+    with c1:
+        default_title_language = st.selectbox(
+            "默认标题语言",
+            [item["code"] for item in TARGET_LANGUAGES],
+            index=[item["code"] for item in TARGET_LANGUAGES].index(
+                s.get("default_title_language", DEFAULT_TARGET_LANGUAGE)
+                if s.get("default_title_language", DEFAULT_TARGET_LANGUAGE)
+                in [item["code"] for item in TARGET_LANGUAGES]
+                else DEFAULT_TARGET_LANGUAGE
+            ),
+            format_func=format_target_language_option,
+            key="settings_default_title_language",
+            help="标题页和出图页标题功能默认使用此语言。标题始终优先英文；若选择英语，则输出纯英文标题。",
+        )
+        default_image_language = st.selectbox(
+            "默认图片文案语言",
+            [item["code"] for item in TARGET_LANGUAGES],
+            index=[item["code"] for item in TARGET_LANGUAGES].index(
+                s.get("default_image_language", DEFAULT_TARGET_LANGUAGE)
+                if s.get("default_image_language", DEFAULT_TARGET_LANGUAGE)
+                in [item["code"] for item in TARGET_LANGUAGES]
+                else DEFAULT_TARGET_LANGUAGE
+            ),
+            format_func=format_target_language_option,
+            key="settings_default_image_language",
+            help="智能组图和快速出图里的图需、入图文案、图片提示词默认语言。",
+        )
+        compliance_mode = st.selectbox(
+            "默认合规模式",
+            [
+                k
+                for k, v in get_compliance().get("presets", {}).items()
+                if v.get("enabled", True)
+            ],
+            index=[
+                k
+                for k, v in get_compliance().get("presets", {}).items()
+                if v.get("enabled", True)
+            ].index(s.get("compliance_mode", "strict"))
+            if s.get("compliance_mode", "strict")
+            in [
+                k
+                for k, v in get_compliance().get("presets", {}).items()
+                if v.get("enabled", True)
+            ]
+            else 0,
+            format_func=lambda x: (
+                get_compliance().get("presets", {}).get(x, {}).get("name", x)
+            ),
+            key="settings_compliance_mode",
+        )
+    with c2:
+        proxy_mode = st.selectbox(
+            "代理模式",
+            ["system", "manual", "none"],
+            index=["system", "manual", "none"].index(s.get("proxy_mode", "system"))
+            if s.get("proxy_mode", "system") in ["system", "manual", "none"]
+            else 0,
+            format_func=lambda x: {
+                "system": "跟随系统",
+                "manual": "手动代理",
+                "none": "不使用代理",
+            }.get(x, x),
+            key="settings_proxy_mode",
+        )
+        proxy_url = st.text_input(
+            "手动代理地址",
+            value=s.get("proxy_url", "http://127.0.0.1:10808"),
+            key="settings_proxy_url",
+            help="例如 http://127.0.0.1:10808",
+        )
+        default_model = st.selectbox(
+            "默认出图模型",
+            list(MODELS.keys()),
+            index=list(MODELS.keys()).index(
+                s.get("default_model", "gemini-3.1-flash-image-preview")
+            )
+            if s.get("default_model", "gemini-3.1-flash-image-preview") in MODELS
+            else 0,
+            format_func=lambda x: MODELS[x]["name"],
+            key="settings_default_model",
+        )
+        default_title_model = st.text_input(
+            "默认标题模型",
+            value=s.get("default_title_model", "gemini-3.1-flash-lite-preview"),
+            key="settings_default_title_model",
+        )
+        default_vision_model = st.text_input(
+            "默认视觉模型",
+            value=s.get("default_vision_model", "gemini-3.1-flash-lite-preview"),
+            key="settings_default_vision_model",
+        )
+        current_output_dir = s.get("project_output_dir", _default_project_output_dir())
+        if runtime_supports_output_dir_editing():
+            project_output_dir = st.text_input(
+                "项目保存目录",
+                value=current_output_dir,
+                key="settings_project_output_dir",
+                help="标题、图片、ZIP 和错误日志都会按项目文件夹保存在这里。",
+            )
+        else:
+            project_output_dir = current_output_dir
+            st.text_input(
+                "服务器项目目录",
+                value=current_output_dir,
+                disabled=True,
+                key="settings_project_output_dir_server",
+                help="服务器版默认把项目保存在服务器项目中心，用户通过浏览器下载结果。",
+            )
+            st.caption(
+                "当前运行模式不会直接操作访问者电脑上的文件夹。结果会先进入服务器项目中心，再由用户下载。"
+            )
+        trash_retention_days = st.number_input(
+            "回收站保留天数",
+            min_value=0,
+            step=1,
+            value=int(s.get("trash_retention_days", 15)),
+            key="settings_trash_retention_days",
+            help="0 表示不自动清理；该值将用于后续回收站自动清理策略。",
+        )
+    if st.button("💾 保存全局默认", type="primary", key="save_global_defaults"):
+        s["default_title_language"] = default_title_language
+        s["default_image_language"] = default_image_language
+        s["compliance_mode"] = compliance_mode
+        s["default_model"] = default_model
+        s["default_title_model"] = default_title_model.strip()
+        s["default_vision_model"] = default_vision_model.strip()
+        s["project_output_dir"] = project_output_dir.strip()
+        s["trash_retention_days"] = int(trash_retention_days)
+        s["proxy_mode"] = proxy_mode
+        s["proxy_url"] = proxy_url.strip()
+        save_settings(s)
+        apply_proxy_settings(s)
+        st.session_state.user_compliance_mode = compliance_mode
+        st.success("✅ 全局默认已保存")
+
+    if st.button("🌐 测试 Gemini 连接", key="test_proxy_connectivity"):
+        apply_proxy_settings(s)
+        provider = get_active_provider()
+        if not provider or not provider.get("api_key"):
+            st.warning("请先配置可用 Provider/K。")
+        else:
+            try:
+                client = GeminiClient(
+                    provider.get("api_key"),
+                    base_url=provider.get("base_url", ""),
+                    title_model=provider.get("title_model", ""),
+                    vision_model=provider.get("vision_model", ""),
+                )
+                resp = client._call(
+                    lambda: client.client.models.generate_content(
+                        model=provider.get("title_model")
+                        or s.get(
+                            "default_title_model", "gemini-3.1-flash-lite-preview"
+                        ),
+                        contents=["Return exactly OK."],
+                        config=types.GenerateContentConfig(
+                            response_modalities=["TEXT"]
+                        ),
+                    ),
+                    timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS,
+                )
+                st.success(f"✅ 连接成功: {(resp.text or '').strip()[:60]}")
+            except Exception as e:
+                msg = str(e)
+                if (
+                    "FAILED_PRECONDITION" in msg
+                    or "User location is not supported" in msg
+                ):
+                    st.warning(
+                        "✅ 已连通 Google，但当前账号或地区不支持该 API 调用。请切换可用的账号、项目或代理出口。"
+                    )
+                else:
+                    st.error(f"连接失败: {sanitize_task_error(msg)}")
+
+
+def render_settings_diagnostics_tab():
+    records = list_history_records()
+    diagnostics = collect_diagnostics(records)
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("历史记录", diagnostics["record_count"])
+    d2.metric("manifest", diagnostics["manifest_count"])
+    d3.metric("缺失文件项目", diagnostics["missing_record_count"])
+    d4.metric("孤儿目录", diagnostics["orphan_dir_count"])
+
+    st.caption(f"当前提供商: {diagnostics['provider_name']}")
+    st.caption(f"进行中任务: {diagnostics['active_task_count']}")
+    st.caption(f"项目输出目录: {diagnostics['output_dir']}")
+
+    button_count = 2 if runtime_supports_local_file_access() else 1
+    columns = st.columns(button_count)
+    c1 = columns[0]
+    with c1:
+        if st.button("🛠️ 重建历史索引", key="settings_rebuild_history_index"):
+            rebuilt_records = rebuild_history_index_from_manifests()
+            st.success(f"已重建 {len(rebuilt_records)} 条历史记录。")
+            st.rerun()
+    if runtime_supports_local_file_access():
+        with columns[1]:
+            if st.button("📂 打开输出目录", key="settings_open_output_dir"):
+                if open_in_file_manager(diagnostics["output_dir"]):
+                    st.success("已打开输出目录。")
+                else:
+                    st.error("无法打开输出目录。")
+    else:
+        st.caption("服务器版不提供“打开本地文件夹”，请在项目中心下载或清理服务器结果。")
+
+    if diagnostics["missing_records"]:
+        st.warning("检测到部分历史项目存在缺失文件。建议前往项目中心 > 文件管理进行修复。")
+    if diagnostics["orphan_dirs"]:
+        st.warning("检测到输出目录中存在未收录的孤儿目录。可在文件管理中检查或清理。")
+
+
+def show_template_library():
+    st.markdown('<div class="page-title">🧩 模板库</div>', unsafe_allow_html=True)
+    st.markdown(
+        "统一管理标题模板与图片模板资产。业务页面只负责选择并使用模板，模板资产统一在这里维护。"
+    )
+
+    diagnostics = collect_template_library_diagnostics()
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("标题模板", diagnostics["title_template_count"])
+    d2.metric("启用标题模板", diagnostics["enabled_title_template_count"])
+    d3.metric("图片模板", diagnostics["image_template_count"])
+    d4.metric("启用翻译模板", diagnostics["enabled_translation_count"])
+
+    if diagnostics["issues"]:
+        st.warning("模板库健康检查发现潜在问题。建议修正后再交给业务页面使用。")
+        for issue in diagnostics["issues"][:8]:
+            st.caption(f"• {issue}")
+    else:
+        st.success("模板库健康检查通过。当前模板结构与关键占位符完整。")
+
+    tabs = st.tabs(["🏷️ 标题模板", "🖼️ 图片模板"])
+
+    with tabs[0]:
+        render_title_template_management()
+
+    with tabs[1]:
+        render_image_template_management()
+
+
+def render_image_template_management():
+    # Image template management intentionally renders from workflow groups instead
+    # of raw storage keys, so the UI can stay business-oriented while storage
+    # remains backward-compatible.
+    st.markdown("### 🧩 图片模板管理")
+    st.caption(
+        "按业务工作流管理图片模板。先看模板影响哪个页面，再决定是否启用、排序或修改名称说明。"
+    )
+    templates = get_templates()
+    st.info("当前模板页已支持真实模板管理与第一版所见即所得预览。")
+
+    for group_key in TEMPLATE_GROUP_ORDER:
+        group_meta = TEMPLATE_PAGE_META.get(group_key, {})
+        st.markdown(f"#### {group_meta.get('title', group_key)}")
+        st.caption(group_meta.get("desc", ""))
+        group = templates.get(group_key, {})
+        render_template_group_preview(group_key, group_meta, group)
+        sorted_items = get_sorted_templates(group_key, enabled_only=False)
+        for item_key, item in sorted_items:
+            item_meta = TEMPLATE_ITEM_META.get(group_key, {}).get(item_key, {})
+            with st.expander(
+                f"{item.get('icon', '📦')} {item.get('name', item_key)}",
+                expanded=False,
+            ):
+                c1, c2 = st.columns([1.1, 1])
+                with c1:
+                    st.caption(
+                        f"适用页面: {group_meta.get('page_label', '未定义')} · 用途: {item_meta.get('usage_note', item.get('desc', ''))}"
+                    )
+                    item["name"] = st.text_input(
+                        "模板名称",
+                        item.get("name", item_meta.get("recommended_name", "")),
+                        key=f"tpl_name_{group_key}_{item_key}",
+                        help="建议使用业务人员能一眼看懂的名称。",
+                    )
+                    item["desc"] = st.text_input(
+                        "模板说明",
+                        item.get("desc", item_meta.get("recommended_desc", "")),
+                        key=f"tpl_desc_{group_key}_{item_key}",
+                        help="建议直接写清这个模板会生成什么类型的图。",
+                    )
+                    if item_meta.get("usage_note"):
+                        st.caption(f"用途提示: {item_meta.get('usage_note')}")
+                    if "hint" in item:
+                        item["hint"] = st.text_input(
+                            "提示语 / Hint",
+                            item.get("hint", ""),
+                            key=f"tpl_hint_{group_key}_{item_key}",
+                            help="供系统内部生成时参考的英文或说明性提示。",
+                        )
+                    if "prompt" in item:
+                        item["prompt"] = st.text_area(
+                            "模板 Prompt",
+                            item.get("prompt", ""),
+                            height=220,
+                            key=f"tpl_prompt_{group_key}_{item_key}",
+                            help="该模板会直接影响翻译保版模式下的实际生成提示词。",
+                        )
+                    item["enabled"] = st.checkbox(
+                        "启用",
+                        item.get("enabled", True),
+                        key=f"tpl_enabled_{group_key}_{item_key}",
+                    )
+                    item["order"] = st.number_input(
+                        "排序",
+                        min_value=1,
+                        step=1,
+                        value=int(item.get("order", 1)),
+                        key=f"tpl_order_{group_key}_{item_key}",
+                    )
+                with c2:
+                    render_template_item_preview(item, group_meta, item_meta)
+
+        st.markdown("---")
+    if st.button("💾 保存图片模板", key="save_templates_btn"):
+        save_templates(templates)
+        st.success("✅ 图片模板已保存")
+
+
 # ==================== Gemini 3 高级设置 ====================
 def render_gemini3_settings(prefix: str, model_key: str):
-    model_info = MODELS.get(model_key, MODELS[PRIMARY_IMAGE_MODEL])
+    model_info = MODELS.get(
+        model_key,
+        {
+            "name": model_key,
+            "resolutions": ["1K"],
+            "max_refs": 3,
+            "thinking_levels": [],
+            "default_thinking": None,
+            "supports_thinking": False,
+        },
+    )
     supports_thinking = model_info.get("supports_thinking", False)
 
     st.markdown("#### ⚙️ 高级设置")
@@ -5344,12 +4908,12 @@ def render_gemini3_settings(prefix: str, model_key: str):
         available_res = model_info.get("resolutions", ["1K"])
         size = st.selectbox("🖼️ 分辨率", available_res, key=f"{prefix}_size")
 
-    thinking_level = "minimal"  # 默认值
+    thinking_level = "high"  # 默认值
 
     if supports_thinking:
         with c3:
             thinking_levels = model_info.get("thinking_levels", ["low", "high"])
-            default_thinking = model_info.get("default_thinking", "minimal")
+            default_thinking = model_info.get("default_thinking", "high")
             default_idx = (
                 thinking_levels.index(default_thinking)
                 if default_thinking in thinking_levels
@@ -5362,208 +4926,13 @@ def render_gemini3_settings(prefix: str, model_key: str):
                 index=default_idx,
                 format_func=lambda x: THINKING_LEVEL_DESC.get(x, x),
                 key=f"{prefix}_thinking_level",
-                help="当前 Gemini 出图模型支持 minimal/high，minimal 更快",
+                help="仅 Nano Banana Pro 支持此功能",
             )
     else:
-        st.caption("💡 当前模型不支持推理深度调节")
+        # Flash模型不支持thinking_level，显示提示
+        st.caption("💡 Nano Banana Flash 不支持推理深度调节")
 
     return aspect, size, thinking_level
-
-
-def render_image_engine_selector(prefix: str, settings: dict):
-    default_provider = settings.get("default_image_provider", "Gemini")
-    if (
-        st.session_state.get("use_own_key")
-        and st.session_state.get("own_provider") == "relay"
-    ):
-        default_provider = "中转站"
-    elif (
-        st.session_state.get("use_own_key")
-        and st.session_state.get("own_provider") == "gemini"
-    ):
-        default_provider = "Gemini"
-    provider = st.radio(
-        "出图引擎",
-        ["Gemini", "中转站"],
-        index=0 if default_provider == "Gemini" else 1,
-        horizontal=True,
-        key=f"{prefix}_image_provider",
-    )
-    relay_model = settings.get(
-        "relay_default_image_model", "gemini-3.1-flash-image-preview"
-    )
-    relay_key = ""
-    relay_base = settings.get("relay_api_base", RELAY_API_BASE)
-    saved_relay_key = settings.get("relay_api_key", "")
-    if (
-        st.session_state.get("use_own_key")
-        and st.session_state.get("own_provider") == "relay"
-    ):
-        relay_model = st.session_state.get("own_relay_model", relay_model)
-        relay_base = st.session_state.get("own_relay_base", relay_base)
-        saved_relay_key = st.session_state.get("own_relay_key", saved_relay_key)
-    if provider == "Gemini":
-        st.caption(f"Gemini 默认模型：{MODELS[PRIMARY_IMAGE_MODEL]['name']}")
-    else:
-
-        def relay_model_format(model_id: str):
-            status = RELAY_MODEL_STATUS.get(model_id, {})
-            suffix = status.get("label", "未知")
-            return f"{model_id} · {suffix}"
-
-        relay_model = st.selectbox(
-            "中转站模型",
-            list(RELAY_IMAGE_MODELS.keys()),
-            index=list(RELAY_IMAGE_MODELS.keys()).index(relay_model)
-            if relay_model in RELAY_IMAGE_MODELS
-            else 0,
-            format_func=relay_model_format,
-            key=f"{prefix}_relay_model",
-        )
-        relay_key = st.text_input(
-            "中转站 API Key",
-            type="password",
-            placeholder="sk-...（留空则使用系统已保存的 Key）"
-            if saved_relay_key
-            else "sk-...",
-            key=f"{prefix}_relay_key",
-        ).strip()
-        relay_base_input = (
-            st.text_input(
-                "中转站 API 地址",
-                value=relay_base,
-                placeholder="https://newapi.aisonnet.org/v1",
-                key=f"{prefix}_relay_base",
-            )
-            .strip()
-            .rstrip("/")
-        )
-        relay_key, relay_base, relay_model = resolve_relay_runtime_config(
-            settings,
-            relay_key,
-            relay_base_input,
-            relay_model,
-        )
-        if (
-            st.session_state.get("use_own_key")
-            and st.session_state.get("own_provider") == "relay"
-        ):
-            relay_key = st.session_state.get("own_relay_key", relay_key) or relay_key
-            relay_base = (
-                st.session_state.get("own_relay_base", relay_base) or relay_base
-            )
-            relay_model = (
-                st.session_state.get("own_relay_model", relay_model) or relay_model
-            )
-        status = RELAY_MODEL_STATUS.get(relay_model, {})
-        if status:
-            st.markdown(
-                f"<div class='guide-card'><strong style='color:{status.get('color', '#1677ff')}'>{status.get('label', '未知')}</strong><br>{status.get('note', '')}</div>",
-                unsafe_allow_html=True,
-            )
-        st.caption("支持前台直接改 API 地址和 API Key；浏览器会自动记住。")
-        if (
-            saved_relay_key
-            and not st.session_state.get(f"{prefix}_relay_key", "").strip()
-        ):
-            st.caption("未填写中转站 Key 时，自动回退使用系统管理员保存的中转站 Key。")
-        st.caption(
-            f"当前中转站模式下：图片生成使用所选中转站图片模型，分析/标题使用 `{get_relay_analysis_model()}`。"
-        )
-    return provider, relay_model, relay_key, relay_base
-
-
-def render_relay_config_panel(prefix: str, settings: dict, expanded: bool = False):
-    with st.expander("🛰️ 中转站配置", expanded=expanded):
-        relay_base = (
-            st.text_input(
-                "中转站 API 地址",
-                value=settings.get("relay_api_base", RELAY_API_BASE),
-                placeholder="https://newapi.aisonnet.org/v1",
-                key=f"{prefix}_relay_base_panel",
-            )
-            .strip()
-            .rstrip("/")
-        )
-        relay_key = st.text_input(
-            "中转站 API Key",
-            type="password",
-            placeholder="sk-...",
-            key=f"{prefix}_relay_key_panel",
-        ).strip()
-        relay_model = st.selectbox(
-            "测试模型",
-            list(RELAY_IMAGE_MODELS.keys()),
-            index=list(RELAY_IMAGE_MODELS.keys()).index(
-                settings.get("relay_default_image_model", "imagine_x_1")
-            )
-            if settings.get("relay_default_image_model", "imagine_x_1")
-            in RELAY_IMAGE_MODELS
-            else 0,
-            format_func=lambda model_id: (
-                f"{model_id} · {RELAY_MODEL_STATUS.get(model_id, {}).get('label', '未知')}"
-            ),
-            key=f"{prefix}_relay_test_model",
-        )
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button(
-                "测试连接", key=f"{prefix}_relay_probe", use_container_width=True
-            ):
-                ok, message = probe_relay_api(relay_base, relay_key)
-                if ok:
-                    st.success(message)
-                else:
-                    st.error(message)
-        with c2:
-            if st.button(
-                "测试当前模型",
-                key=f"{prefix}_relay_probe_model",
-                use_container_width=True,
-            ):
-                ok, message = probe_relay_api(relay_base, relay_key, relay_model)
-                if ok:
-                    st.success(message)
-                else:
-                    st.error(message)
-        st.caption("这里的输入只保存在当前浏览器本地，不写入服务端文件。")
-
-
-def render_image_translate_settings(
-    prefix: str, model_key: str, default_size: str = "1K"
-):
-    model_info = MODELS.get(model_key, MODELS[PRIMARY_IMAGE_MODEL])
-    supports_thinking = model_info.get("supports_thinking", False)
-    st.markdown("#### ⚙️ 翻译出图设置")
-    cols = st.columns(2) if supports_thinking else st.columns(1)
-    with cols[0]:
-        available_res = model_info.get("resolutions", ["1K"])
-        default_idx = (
-            available_res.index(default_size) if default_size in available_res else 0
-        )
-        size = st.selectbox(
-            "🖼️ 输出分辨率", available_res, index=default_idx, key=f"{prefix}_size"
-        )
-    thinking_level = "minimal"
-    if supports_thinking:
-        with cols[1]:
-            thinking_levels = model_info.get("thinking_levels", ["low", "high"])
-            default_thinking = model_info.get("default_thinking", "minimal")
-            default_idx = (
-                thinking_levels.index(default_thinking)
-                if default_thinking in thinking_levels
-                else 0
-            )
-            thinking_level = st.selectbox(
-                "🧠 推理深度",
-                thinking_levels,
-                index=default_idx,
-                format_func=lambda x: THINKING_LEVEL_DESC.get(x, x),
-                key=f"{prefix}_thinking_level",
-            )
-    else:
-        st.caption("💡 当前模型不支持推理深度调节")
-    return size, thinking_level
 
 
 # ==================== 结果显示组件 ====================
@@ -5573,8 +4942,7 @@ def display_generation_results(
     titles: list,
     tokens_used: int,
     prefix: str,
-    title_error: str = "",
-    title_warnings: Optional[list] = None,
+    target_language: str = "zh",
 ):
     """显示生成结果 - 修复版"""
 
@@ -5589,8 +4957,6 @@ def display_generation_results(
         with st.expander(f"⚠️ {len(errors)} 个错误", expanded=False):
             for err in errors:
                 st.error(err)
-
-    title_warnings = title_warnings or []
 
     # 显示图片
     if results:
@@ -5610,7 +4976,7 @@ def display_generation_results(
 
         # 下载按钮
         st.markdown("---")
-        zip_bytes = create_zip_from_results(results, titles)
+        zip_bytes = create_zip_from_results(results, titles, target_language)
 
         col1, col2 = st.columns(2)
         with col1:
@@ -5641,388 +5007,890 @@ def display_generation_results(
         st.warning("未能生成任何图片，请检查错误信息")
 
     # 显示标题
-    if title_error:
-        st.error(f"标题生成失败: {title_error}")
-    for warning in title_warnings:
-        st.warning(warning)
     if titles:
         st.markdown("---")
-        display_generated_titles(titles, prefix)
+        display_generated_titles(titles, prefix, target_language)
 
 
-def render_admin_tool_mode_login(s):
-    st.caption("当前为管理员工具模式，不提供注册用户/系统普通用户入口。")
-    remember_default = st.session_state.get("remember_login", False)
-    remember_login = st.checkbox(
-        "记住本次登录（8小时）", value=remember_default, key="remember_login"
+def build_smart_requirements(selected_types: dict, templates: dict) -> list:
+    requirements = []
+    for tk, cnt in selected_types.items():
+        info = templates.get(tk, {})
+        for idx in range(cnt):
+            requirements.append(
+                {
+                    "type_key": tk,
+                    "type_name": info.get("name", tk),
+                    "index": idx + 1,
+                    "topic": info.get("name", tk),
+                    "scene": info.get("desc", ""),
+                    "copy": info.get("desc", ""),
+                }
+            )
+    return requirements
+
+
+def _save_uploaded_images(files, prefix: str):
+    saved = []
+    upload_dir = DATA_DIR / "task_uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    for idx, f in enumerate(files or []):
+        try:
+            img = (
+                f.copy().convert("RGB")
+                if isinstance(f, Image.Image)
+                else Image.open(f).convert("RGB")
+            )
+            filename = f"{prefix}_{idx + 1}.png"
+            path = upload_dir / filename
+            img.save(path, format="PNG")
+            saved.append(str(path))
+        except Exception:
+            continue
+    return saved
+
+
+def _execute_title_task(task: dict):
+    payload = task.get("payload", {})
+    provider = (
+        get_provider_by_id(payload.get("provider_id", "")) or get_active_provider()
     )
+    if not provider or not provider.get("api_key"):
+        raise Exception("未配置可用的提供商")
+    client = GeminiClient(
+        provider.get("api_key"),
+        base_url=provider.get("base_url", ""),
+        title_model=provider.get("title_model", ""),
+        vision_model=provider.get("vision_model", ""),
+    )
+    images = load_image_paths(payload.get("image_paths", []))
+    if images:
+        result = client.generate_titles_from_image(
+            images,
+            payload.get("product_info", ""),
+            payload.get("template_prompt"),
+            payload.get("title_language", DEFAULT_TARGET_LANGUAGE),
+        )
+    else:
+        result = client.generate_titles(
+            payload.get("product_info", ""),
+            payload.get("template_prompt"),
+            payload.get("title_language", DEFAULT_TARGET_LANGUAGE),
+        )
+    if not result.get("success"):
+        raise Exception(format_title_error(result))
+    return {
+        "titles": result.get("titles", []),
+        "errors": [],
+        "files": [],
+        "target_language": payload.get("title_language", DEFAULT_TARGET_LANGUAGE),
+    }
 
-    if (
-        remember_login
-        and st.session_state.get("remember_until", 0) > datetime.now().timestamp()
-    ):
-        if st.session_state.get("remember_role") == "admin":
-            st.session_state.authenticated = True
-            st.session_state.is_admin = True
-            st.session_state.use_own_key = False
-            clear_registered_auth_session()
-            clear_own_credential_session()
-            st.rerun()
 
-    admin_pwd = st.text_input("管理员密码", type="password", key="admin_pwd")
-    if st.button("🛠️ 进入后台", use_container_width=True):
-        if admin_pwd == s.get("admin_password"):
-            st.session_state.authenticated = True
-            st.session_state.is_admin = True
-            st.session_state.use_own_key = False
-            clear_registered_auth_session()
-            clear_own_credential_session()
-            if remember_login:
-                st.session_state.remember_role = "admin"
-                st.session_state.remember_until = datetime.now().timestamp() + 8 * 3600
-            st.rerun()
+def _execute_smart_task(task: dict):
+    payload = task.get("payload", {})
+    provider = (
+        get_provider_by_id(payload.get("provider_id", "")) or get_active_provider()
+    )
+    if not provider or not provider.get("api_key"):
+        raise Exception("未配置可用的提供商")
+    images = load_image_paths(payload.get("image_paths", []))
+    if not images:
+        raise Exception("任务图片已丢失，请重新上传")
+    templates = get_template_group("smart_types")
+    client = GeminiClient(
+        provider.get("api_key"),
+        payload.get("model", provider.get("image_model", "")),
+        base_url=provider.get("base_url", ""),
+        title_model=provider.get("title_model", ""),
+        vision_model=provider.get("vision_model", ""),
+    )
+    anchor = client.analyze_product(
+        images, payload.get("name", ""), payload.get("material", "")
+    )
+    selected_types = payload.get("selected_types", {})
+    image_language = payload.get("image_language", DEFAULT_TARGET_LANGUAGE)
+    requirements = build_smart_requirements(selected_types, templates)
+    requirements = client.generate_en_copy(anchor, requirements, image_language)
+    req_map = {(req.get("type_key"), req.get("index")): req for req in requirements}
+    results = []
+    errors = []
+    done = 0
+    total = sum(selected_types.values())
+    for tk, cnt in selected_types.items():
+        info = templates[tk]
+        for idx in range(cnt):
+            ensure_task_not_cancelled(task["id"])
+            done += 1
+            update_task(task["id"], progress={"done": done, "total": total})
+            req = req_map.get(
+                (tk, idx + 1),
+                {
+                    "type_key": tk,
+                    "type_name": info["name"],
+                    "index": idx + 1,
+                    "topic": info.get("name", tk),
+                    "scene": info.get("desc", ""),
+                },
+            )
+            prompt = client.compose_image_prompt(
+                anchor, req, payload.get("aspect", "1:1"), image_language
+            )
+            try:
+                img = client.generate_image(
+                    images,
+                    prompt,
+                    payload.get("aspect", "1:1"),
+                    payload.get("size", "1K"),
+                    payload.get("thinking_level", "high"),
+                    image_language,
+                )
+            except Exception as e:
+                client.last_error = str(e)
+                img = None
+            if img:
+                filename = f"{task['id']}_{str(done).zfill(2)}_{info['name']}.png"
+                results.append(persist_image_for_task(img, filename))
+            else:
+                errors.append(client.get_last_error() or f"{info['name']} 生成失败")
+    titles = []
+    if payload.get("enable_title") and payload.get("title_info"):
+        title_result = client.generate_titles(
+            payload.get("title_info", ""),
+            payload.get("template_prompt"),
+            payload.get("title_language", DEFAULT_TARGET_LANGUAGE),
+        )
+        if title_result.get("success"):
+            titles = title_result.get("titles", [])
         else:
-            st.error("密码错误")
+            errors.append(format_title_error(title_result))
+    if not results and errors:
+        raise Exception(errors[0])
+    return {
+        "titles": titles,
+        "errors": errors,
+        "files": results,
+        "target_language": payload.get("title_language", DEFAULT_TARGET_LANGUAGE),
+    }
 
 
-def render_system_init_panel(s):
-    if _has_system_service_access():
+def _execute_translate_task(task: dict):
+    payload = task.get("payload", {})
+    provider = (
+        get_provider_by_id(payload.get("provider_id", "")) or get_active_provider()
+    )
+    if not provider or not provider.get("api_key"):
+        raise Exception("未配置可用的提供商")
+    images = load_image_paths(payload.get("image_paths", []))
+    if not images:
+        raise Exception("任务图片已丢失，请重新上传")
+    client = GeminiClient(
+        provider.get("api_key"),
+        payload.get("model", provider.get("image_model", "")),
+        base_url=provider.get("base_url", ""),
+        title_model=provider.get("title_model", ""),
+        vision_model=provider.get("vision_model", ""),
+    )
+    image_language = payload.get("image_language", DEFAULT_TARGET_LANGUAGE)
+    compliance_mode = payload.get("compliance_mode", "strict")
+    prompt = build_translation_prompt(
+        image_language,
+        payload.get("aspect", "1:1"),
+        compliance_mode,
+        payload.get("translation_template", "preserve_layout"),
+    )
+    results = []
+    errors = []
+    total = len(images)
+    for idx, image in enumerate(images):
+        ensure_task_not_cancelled(task["id"])
+        update_task(task["id"], progress={"done": idx + 1, "total": total})
+        try:
+            translated = client.generate_image(
+                [image],
+                prompt,
+                payload.get("aspect", "1:1"),
+                payload.get("size", "1K"),
+                payload.get("thinking_level", "high"),
+                image_language,
+            )
+        except Exception as e:
+            client.last_error = str(e)
+            translated = None
+        if translated:
+            filename = f"{task['id']}_{str(idx + 1).zfill(2)}_translated.png"
+            results.append(persist_image_for_task(translated, filename))
+        else:
+            errors.append(client.get_last_error() or f"第{idx + 1}张翻译失败")
+    if not results and errors:
+        raise Exception(errors[0])
+    return {
+        "titles": [],
+        "errors": errors,
+        "files": results,
+        "target_language": image_language,
+    }
+
+
+def _execute_combo_task(task: dict):
+    payload = task.get("payload", {})
+    provider = (
+        get_provider_by_id(payload.get("provider_id", "")) or get_active_provider()
+    )
+    if not provider or not provider.get("api_key"):
+        raise Exception("未配置可用的提供商")
+    refs = load_image_paths(payload.get("image_paths", []))
+    if not refs:
+        raise Exception("任务参考图已丢失，请重新上传")
+    reqs = payload.get("reqs", [])
+    anchor = payload.get("anchor", {})
+    client = GeminiClient(
+        provider.get("api_key"),
+        payload.get("model", provider.get("image_model", "")),
+        base_url=provider.get("base_url", ""),
+        title_model=provider.get("title_model", ""),
+        vision_model=provider.get("vision_model", ""),
+    )
+    results = []
+    errors = []
+    total = len(reqs)
+    for i, req in enumerate(reqs):
+        ensure_task_not_cancelled(task["id"])
+        update_task(task["id"], progress={"done": i + 1, "total": total})
+        prompt = client.compose_image_prompt(
+            anchor,
+            req,
+            payload.get("aspect", "1:1"),
+            payload.get("image_language", DEFAULT_TARGET_LANGUAGE),
+        )
+        try:
+            img = client.generate_image(
+                refs,
+                prompt,
+                payload.get("aspect", "1:1"),
+                payload.get("size", "1K"),
+                payload.get("thinking_level", "high"),
+                payload.get("image_language", DEFAULT_TARGET_LANGUAGE),
+            )
+        except Exception as e:
+            client.last_error = str(e)
+            img = None
+        if img:
+            filename = f"{task['id']}_{str(i + 1).zfill(2)}_{req.get('type_name', 'image')}.png"
+            results.append(persist_image_for_task(img, filename))
+        else:
+            errors.append(
+                client.get_last_error() or f"{req.get('type_name', '图片')} 生成失败"
+            )
+    titles = []
+    if payload.get("enable_title") and payload.get("title_info"):
+        title_result = client.generate_titles(
+            payload.get("title_info", ""),
+            payload.get("template_prompt"),
+            payload.get("title_language", DEFAULT_TARGET_LANGUAGE),
+        )
+        if title_result.get("success"):
+            titles = title_result.get("titles", [])
+        else:
+            errors.append(format_title_error(title_result))
+    if not results and errors:
+        raise Exception(errors[0])
+    return {
+        "titles": titles,
+        "errors": errors,
+        "files": results,
+        "target_language": payload.get("title_language", DEFAULT_TARGET_LANGUAGE),
+    }
+
+
+def run_task_worker(task_id: str):
+    task_threads = get_task_threads()
+    task = next((t for t in list_tasks() if t.get("id") == task_id), None)
+    if not task or task.get("status") != "queued":
         return
-    with st.expander("🚀 初始化系统配置", expanded=True):
-        st.info("当前尚未配置系统 Gemini 或系统中转站，请先完成管理员初始化。")
-        admin_pwd = st.text_input("管理员密码", type="password", key="init_admin_pwd")
-        keys_text = st.text_area(
-            "系统 Gemini Keys（每行一个，可选）",
-            height=120,
-            placeholder="AIza... 或 AQ...",
-        )
-        c1, c2 = st.columns(2)
-        with c1:
-            new_admin_pwd = st.text_input(
-                "新管理员密码",
-                value=s.get("admin_password"),
-                type="password",
-                key="init_new_admin_pwd",
-            )
-        with c2:
-            st.caption(
-                "如果配置了 `PLATFORM_ENCRYPTION_KEY`，系统 API Key 会优先加密存进 PostgreSQL；否则仅保存在本地数据目录。"
-            )
-        relay_base_init = st.text_input(
-            "系统中转站 API 地址（可选）",
-            value=s.get("relay_api_base", RELAY_API_BASE),
-            key="init_relay_base",
-        )
-        relay_key_init = st.text_input(
-            "系统中转站 API Key（可选）",
-            type="password",
-            key="init_relay_key",
-        )
-        relay_model_init = st.selectbox(
-            "系统中转站默认模型",
-            list(RELAY_IMAGE_MODELS.keys()),
-            index=list(RELAY_IMAGE_MODELS.keys()).index(
-                s.get("relay_default_image_model", "gemini-3.1-flash-image-preview")
-            )
-            if s.get("relay_default_image_model", "gemini-3.1-flash-image-preview")
-            in RELAY_IMAGE_MODELS
-            else 0,
-            key="init_relay_model",
-        )
-        if st.button("✅ 保存并启用", type="primary", use_container_width=True):
-            if admin_pwd != s.get("admin_password"):
-                st.error("管理员密码错误")
-            else:
-                keys = [k.strip() for k in (keys_text or "").splitlines() if k.strip()]
-                if not keys and not relay_key_init.strip():
-                    st.error("请至少填写 1 个系统 Gemini Key，或填写系统中转站 Key")
-                else:
-                    if keys:
-                        data = get_api_keys()
-                        data["keys"] = [{"key": k, "enabled": True} for k in keys]
-                        data["current_index"] = 0
-                        save_api_keys(data)
-                    s["relay_api_base"] = (
-                        str(relay_base_init or RELAY_API_BASE).strip().rstrip("/")
-                    )
-                    if relay_key_init.strip():
-                        s["relay_api_key"] = relay_key_init.strip()
-                    s["relay_default_image_model"] = relay_model_init
-                    s["admin_password"] = new_admin_pwd or s.get("admin_password")
-                    save_settings(s)
-                    st.success("已保存！")
-                    st.rerun()
-
-
-def render_registered_system_service_login(s):
-    login_tab, register_tab, admin_tab = st.tabs(
-        ["👤 用户登录", "📝 用户注册", "🛠️ 管理员"]
-    )
-
-    with login_tab:
-        st.caption("团队模式下，官方版注册用户登录后可直接使用 1/2/3/4。")
-        username = st.text_input("用户名", key="registered_login_username")
-        password = st.text_input(
-            "密码", type="password", key="registered_login_password"
-        )
-        if st.button(
-            "登录系统服务",
-            type="primary",
-            key="registered_login_submit",
-            use_container_width=True,
-        ):
-            if not _has_system_service_access():
-                st.warning("⚠️ 系统未配置 Gemini Key 或系统中转站配置")
-            else:
-                try:
-                    with session_scope() as session:
-                        user = authenticate_local_user(session, username, password)
-                        ctx = get_login_context_for_user(session, user)
-                    set_registered_auth_session(
-                        user_id=ctx.user_id,
-                        username=ctx.username,
-                        display_name=ctx.display_name,
-                        role=ctx.role,
-                    )
-                    sync_platform_session_context()
-                    st.rerun()
-                except Exception as exc:
-                    st.error(str(exc))
-
-    with register_tab:
-        with session_scope() as session:
-            registration_open = platform_registration_open(session)
-        if not registration_open:
-            st.warning("当前管理员已关闭新用户注册。")
+    update_task(task_id, status="running")
+    try:
+        ensure_task_not_cancelled(task_id)
+        if task.get("type") == "title":
+            result = _execute_title_task(task)
+        elif task.get("type") == "translate":
+            result = _execute_translate_task(task)
+        elif task.get("type") == "smart":
+            result = _execute_smart_task(task)
         else:
-            username = st.text_input("用户名", key="register_username")
-            display_name = st.text_input("显示名称", key="register_display_name")
-            email = st.text_input("邮箱（可选）", key="register_email")
-            password = st.text_input("密码", type="password", key="register_password")
-            confirm_password = st.text_input(
-                "确认密码", type="password", key="register_password_confirm"
+            result = _execute_combo_task(task)
+        if is_task_cancelled(task_id):
+            return
+        completed_task = update_task(
+            task_id,
+            status="done",
+            titles=result.get("titles", []),
+            errors=result.get("errors", []),
+            result_files=result.get("files", []),
+            result_title_language=result.get(
+                "target_language", DEFAULT_TARGET_LANGUAGE
+            ),
+        )
+        record_task_history(completed_task or task, result)
+    except Exception as e:
+        if is_task_cancelled(task_id):
+            return
+        failed_task = update_task(
+            task_id, status="error", errors=[sanitize_task_error(str(e))]
+        )
+        record_task_history(
+            failed_task or task,
+            {
+                "titles": [],
+                "errors": [sanitize_task_error(str(e))],
+                "files": [],
+                "target_language": task.get(
+                    "result_title_language", DEFAULT_TARGET_LANGUAGE
+                ),
+            },
+        )
+    finally:
+        task_threads.pop(task_id, None)
+        schedule_task_workers()
+
+
+def schedule_task_workers():
+    normalize_running_tasks()
+    task_threads = get_task_threads()
+    running_threads = {tid: th for tid, th in task_threads.items() if th.is_alive()}
+    task_threads.clear()
+    task_threads.update(running_threads)
+    available = MAX_ACTIVE_TASKS - len(task_threads)
+    if available <= 0:
+        return
+    for task in sorted(list_tasks(), key=lambda x: x.get("created_at", "")):
+        if available <= 0:
+            break
+        if task.get("status") != "queued":
+            continue
+        th = threading.Thread(
+            target=run_task_worker, args=(task.get("id"),), daemon=True
+        )
+        task_threads[task.get("id")] = th
+        th.start()
+        available -= 1
+
+
+def render_task_center():
+    tasks = list_tasks()
+    records = list_active_history_records()
+    trashed_records = list_trashed_history_records()
+    st.markdown("#### 📚 项目中心概览")
+    if not tasks and not records and not trashed_records:
+        st.caption("暂无项目")
+        return
+    active = [t for t in tasks if t.get("status") in {"queued", "running"}]
+    completed_records = [r for r in records if r.get("status") == "done"]
+    st.caption(
+        f"进行中 {len(active)} · 历史 {len(records)} · 回收站 {len(trashed_records)}"
+    )
+    if active:
+        for task in active[:3]:
+            total = task.get("progress", {}).get("total", 0)
+            done = task.get("progress", {}).get("done", 0)
+            st.caption(
+                f"• {task.get('summary', task.get('type', 'task'))} · {done}/{total}"
             )
-            if st.button(
-                "创建账号",
-                type="primary",
-                key="register_submit",
-                use_container_width=True,
+    elif completed_records:
+        st.caption(f"最近已完成项目 {len(completed_records)} 个")
+    else:
+        st.caption("暂无进行中的任务")
+
+
+def set_nav_page(page: str):
+    st.session_state["nav_page"] = page
+
+
+def get_nav_page():
+    current = st.session_state.get("nav_page", MAIN_NAV_ITEMS[0])
+    if current == "🎨 快速出图":
+        current = "🎨 快速出图 / 图片翻译"
+    allowed = set(MAIN_NAV_ITEMS + MANAGEMENT_NAV_ITEMS + [PROJECT_CENTER_PAGE])
+    if current not in allowed:
+        current = MAIN_NAV_ITEMS[0]
+    st.session_state["nav_page"] = current
+    return current
+
+
+def render_sidebar_nav_section(title: str, items: list, current_page: str):
+    st.markdown(f"#### {title}")
+    next_page = current_page
+    for item in items:
+        button_type = "primary" if item == current_page else "secondary"
+        if st.button(item, key=f"nav_{title}_{item}", use_container_width=True, type=button_type):
+            next_page = item
+    return next_page
+
+
+def render_status_center_content():
+    tasks = list_tasks()
+    active_tasks = [task for task in tasks if task.get("status") in {"queued", "running"}]
+    active_records = list_active_history_records()
+    recent_done = [record for record in active_records if record.get("status") == "done"][:3]
+    recent_error = [record for record in active_records if record.get("status") == "error"][:3]
+
+    st.caption(f"进行中 {len(active_tasks)} · 历史 {len(active_records)} · 回收站 {len(list_trashed_history_records())}")
+    if active_tasks:
+        st.markdown("**进行中任务**")
+        for task in active_tasks[:4]:
+            progress = task.get("progress", {}) or {}
+            st.caption(
+                f"• {task.get('summary', task.get('type', 'task'))} · {progress.get('done', 0)}/{progress.get('total', 0)}"
+            )
+    else:
+        st.caption("当前没有进行中的任务。")
+
+    if recent_done:
+        st.markdown("**最近完成**")
+        for record in recent_done:
+            st.caption(f"• {record.get('summary', record.get('task_type', '任务'))}")
+
+    if recent_error:
+        st.markdown("**最近失败**")
+        for record in recent_error:
+            st.caption(f"• {record.get('summary', record.get('task_type', '任务'))}")
+
+    if st.button("打开完整项目中心", key="status_center_open_project", use_container_width=True):
+        set_nav_page(PROJECT_CENTER_PAGE)
+        st.rerun()
+
+
+def render_global_toolbar(current_page: str):
+    left, mid, right = st.columns([6, 1.4, 1.6])
+    with left:
+        page_label = current_page if current_page != PROJECT_CENTER_PAGE else "📡 状态中心 / 项目中心"
+        st.caption(f"当前区域: {page_label}")
+    with mid:
+        if hasattr(st, "popover"):
+            with st.popover("📡 状态中心", use_container_width=True):
+                render_status_center_content()
+        elif st.button("📡 状态中心", key="status_center_fallback", use_container_width=True):
+            set_nav_page(PROJECT_CENTER_PAGE)
+            st.rerun()
+    with right:
+        if st.button("📚 项目中心", key="toolbar_project_center", use_container_width=True):
+            set_nav_page(PROJECT_CENTER_PAGE)
+            st.rerun()
+
+
+def _record_status_label(status: str):
+    return {
+        "done": "🟢 已完成",
+        "error": "🔴 失败",
+        "cancelled": "⚫ 已取消",
+        "expired": "🟠 已过期",
+    }.get(status, status or "unknown")
+
+
+def _task_status_label(status: str):
+    return {
+        "queued": "🟡 排队中",
+        "running": "🔵 执行中",
+        "done": "🟢 已完成",
+        "error": "🔴 失败",
+        "cancelled": "⚫ 已取消",
+        "expired": "🟠 已过期",
+    }.get(status, status or "unknown")
+
+
+def render_history_record_block(record: dict, in_trash: bool = False):
+    title = record.get("summary") or record.get("task_type", "任务")
+    completed_at = record.get("completed_at") or record.get("created_at", "")
+    target_language = record.get("target_language", DEFAULT_TARGET_LANGUAGE)
+    zip_path = record.get("zip_path", "")
+    artifact_dir = record.get("artifact_dir", "")
+    files = record.get("file_paths", []) or []
+    titles = record.get("titles", []) or []
+    file_summary = summarize_record_files(record)
+    state_label = "🗑️ 回收站" if in_trash else _record_status_label(record.get("status"))
+
+    with st.expander(
+        f"{state_label} · {title} · {len(files)} 文件 · {completed_at}",
+        expanded=False,
+    ):
+        st.caption(f"任务ID: {record.get('task_id', '')}")
+        st.caption(
+            f"项目文件夹: {record.get('project_name', Path(artifact_dir).name if artifact_dir else '')}"
+        )
+        st.caption(f"语言: {get_target_language(target_language)['label']}")
+        st.caption(
+            f"磁盘占用: {format_bytes(file_summary['size_bytes'])} · 输入素材 {file_summary['input_count']} 个"
+        )
+        if artifact_dir:
+            st.caption(
+                f"{'本地项目目录' if DESKTOP_MODE else '服务器项目目录'}: {artifact_dir}"
+            )
+        if file_summary["missing_count"]:
+            st.warning(f"检测到 {file_summary['missing_count']} 个文件缺失，建议到文件管理页检查。")
+        if record.get("errors"):
+            st.warning("; ".join(record.get("errors", [])[:3]))
+
+        if zip_path and Path(zip_path).exists() and not in_trash:
+            try:
+                zip_bytes = Path(zip_path).read_bytes()
+                st.download_button(
+                    "⬇️ 下载本地 ZIP",
+                    data=zip_bytes,
+                    file_name=Path(zip_path).name,
+                    mime="application/zip",
+                    key=f"hist_zip_{record.get('task_id')}",
+                )
+            except Exception:
+                st.caption("ZIP 文件暂时不可读取")
+
+        if in_trash:
+            column_weights = [1, 1, 1] if runtime_supports_local_file_access() else [1, 1]
+            columns = st.columns(column_weights)
+            restore_key = f"restore_hist_{record.get('task_id')}"
+            purge_key = f"purge_hist_{record.get('task_id')}"
+            with columns[0]:
+                if st.button("♻️ 恢复", key=f"{restore_key}_trigger"):
+                    restored = restore_history_record(record.get("task_id"))
+                    if restored:
+                        st.success("已恢复到历史项目")
+                        st.rerun()
+            if runtime_supports_local_file_access():
+                with columns[1]:
+                    if st.button("📂 打开文件夹", key=f"trash_open_{record.get('task_id')}"):
+                        if open_record_output(record):
+                            st.success("已打开文件夹")
+                        else:
+                            st.error("无法打开文件夹")
+                purge_col = columns[2]
+            else:
+                purge_col = columns[1]
+            with purge_col:
+                if st.button("🧨 彻底删除", key=f"{purge_key}_trigger"):
+                    activate_confirmation(purge_key)
+                    st.rerun()
+            if render_confirmation_bar(
+                purge_key,
+                "彻底删除会移除该记录及其本地文件，执行后不可恢复。",
+                confirm_label="确认彻底删除",
             ):
-                if password != confirm_password:
-                    st.error("两次输入的密码不一致")
-                elif not _has_system_service_access():
-                    st.warning("⚠️ 系统未配置 Gemini Key 或系统中转站配置")
-                else:
-                    try:
-                        with session_scope() as session:
-                            user = ensure_local_user(
-                                session,
-                                username=username,
-                                password=password,
-                                display_name=display_name,
-                                email=email,
-                                actor_label="self-service-register",
+                purged_record = purge_trashed_history_record(record.get("task_id"))
+                if purged_record:
+                    st.success("已彻底删除")
+                    st.rerun()
+        else:
+            if runtime_supports_local_file_access():
+                c1, c2, c3, c4 = st.columns(4)
+            else:
+                c1, c2, c3 = st.columns(3)
+            trash_key = f"trash_hist_{record.get('task_id')}"
+            action_col = c1
+            relaunch_col = c2 if runtime_supports_local_file_access() else c1
+            trash_col = c3 if runtime_supports_local_file_access() else c2
+            summary_col = c4 if runtime_supports_local_file_access() else c3
+            if runtime_supports_local_file_access():
+                with action_col:
+                    if st.button("📂 打开文件夹", key=f"hist_open_{record.get('task_id')}"):
+                        if open_record_output(record):
+                            st.success("已打开文件夹")
+                        else:
+                            st.error("无法打开文件夹")
+            with relaunch_col:
+                if st.button("🔄 重新发起", key=f"hist_relaunch_{record.get('task_id')}"):
+                    relaunched_task, relaunch_err = relaunch_history_record(
+                        record.get("task_id")
+                    )
+                    if relaunched_task:
+                        st.success(f"已重新发起：{relaunched_task.get('id')}")
+                        st.rerun()
+                    else:
+                        st.error(relaunch_err or "重新发起失败")
+            with trash_col:
+                if st.button("🗑️ 删除到回收站", key=f"{trash_key}_trigger"):
+                    activate_confirmation(trash_key)
+                    st.rerun()
+            with summary_col:
+                st.caption(f"共 {len(files)} 个结果文件")
+            if render_confirmation_bar(
+                trash_key,
+                "删除后会进入回收站，可在回收站恢复；本地文件会先保留。",
+                confirm_label="确认移入回收站",
+            ):
+                trashed = trash_history_record(record.get("task_id"))
+                if trashed:
+                    st.success("已移入回收站")
+                    st.rerun()
+
+        if record.get("input_file_paths"):
+            st.caption(f"可重发素材: {len(record.get('input_file_paths', []))} 个")
+
+        if files:
+            preview_cols = st.columns(min(4, len(files)))
+            for idx, file_path in enumerate(files[:4]):
+                p = Path(file_path)
+                if p.exists():
+                    with preview_cols[idx % len(preview_cols)]:
+                        try:
+                            st.image(
+                                Image.open(p),
+                                caption=p.name,
+                                use_container_width=True,
                             )
-                            ctx = get_login_context_for_user(session, user)
-                        set_registered_auth_session(
-                            user_id=ctx.user_id,
-                            username=ctx.username,
-                            display_name=ctx.display_name,
-                            role=ctx.role,
-                        )
-                        sync_platform_session_context()
-                        st.success("注册成功，已自动登录")
+                        except Exception:
+                            st.caption(p.name)
+
+        if titles:
+            st.markdown("##### 标题内容")
+            st.code("\n".join(titles), language="text")
+
+
+def render_file_management_tab(records: list):
+    if startup_notice := st.session_state.pop("startup_maintenance_notice", ""):
+        st.success(startup_notice)
+    if not records:
+        st.info("暂无可管理的项目文件。")
+    orphan_dirs = find_orphan_project_dirs(records)
+    total_size = sum(summarize_record_files(record)["size_bytes"] for record in records)
+    missing_records = [
+        record for record in records if summarize_record_files(record)["missing_count"]
+    ]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("项目数", len(records))
+    c2.metric("总占用", format_bytes(total_size))
+    c3.metric("异常项目", len(missing_records))
+    c4.metric("孤儿目录", len(orphan_dirs))
+
+    t1, t2 = st.columns(2)
+    with t1:
+        if st.button("🛠️ 从 manifest 重建历史索引", key="rebuild_history_index"):
+            rebuilt_records = rebuild_history_index_from_manifests()
+            st.success(f"已从项目目录重建 {len(rebuilt_records)} 条历史记录。")
+            st.rerun()
+    with t2:
+        st.caption("当 `history.json` 丢失或不完整时，可以用项目目录里的 manifest 重新生成索引。")
+
+    if orphan_dirs:
+        st.warning("检测到未被历史索引收录的项目目录。你可以先打开检查，再执行索引重建。")
+        for orphan in orphan_dirs:
+            orphan_delete_key = f"confirm_delete_orphan_{orphan['path']}"
+            with st.expander(
+                f"孤儿目录 · {orphan['name']} · {format_bytes(orphan['size_bytes'])} · {orphan['file_count']} 个文件",
+                expanded=False,
+            ):
+                st.caption(orphan["path"])
+                st.caption(
+                    "包含 manifest，可通过索引重建恢复"
+                    if orphan["has_manifest"]
+                    else "不包含 manifest，建议手动检查后决定是否保留"
+                )
+                if runtime_supports_local_file_access():
+                    if st.button(
+                        "📂 打开孤儿目录", key=f"open_orphan_{orphan['path']}"
+                    ):
+                        if open_in_file_manager(orphan["path"]):
+                            st.success("已打开目录")
+                        else:
+                            st.error("无法打开目录")
+                if not orphan["has_manifest"]:
+                    if st.button(
+                        "🧨 删除孤儿目录",
+                        key=f"delete_orphan_trigger_{orphan['path']}",
+                    ):
+                        activate_confirmation(orphan_delete_key)
                         st.rerun()
-                    except Exception as exc:
-                        st.error(str(exc))
+                    if render_confirmation_bar(
+                        orphan_delete_key,
+                        "该目录未被历史索引管理，也不包含 manifest。确认后会直接删除整个目录。",
+                        confirm_label="确认删除孤儿目录",
+                    ):
+                        if delete_orphan_project_dir(orphan["path"]):
+                            st.success("已删除孤儿目录")
+                            st.rerun()
+                        st.error("删除失败，请检查目录权限。")
 
-    with admin_tab:
-        admin_pwd = st.text_input(
-            "管理员密码", type="password", key="registered_admin_pwd"
-        )
-        if st.button(
-            "🛠️ 进入后台", key="registered_admin_submit", use_container_width=True
+    for record in records:
+        summary = summarize_record_files(record)
+        title = record.get("summary") or record.get("task_type", "任务")
+        rebuild_zip_key = f"rebuild_zip_{record.get('task_id')}"
+        with st.expander(
+            f"{title} · {format_bytes(summary['size_bytes'])} · 缺失 {summary['missing_count']} 个文件",
+            expanded=False,
         ):
-            if admin_pwd == s.get("admin_password"):
-                st.session_state.authenticated = True
-                st.session_state.is_admin = True
-                st.session_state.use_own_key = False
-                clear_registered_auth_session()
-                st.rerun()
-            else:
-                st.error("密码错误")
+            st.caption(f"目录: {record.get('artifact_dir', '')}")
+            st.caption(
+                f"结果文件 {summary['file_count']} 个 · 输入素材 {summary['input_count']} 个"
+            )
+            if summary["missing_count"]:
+                st.warning("检测到记录与文件不一致，可打开目录检查，或先尝试从 manifest 重建历史索引。")
+                for missing_path in summary["missing_paths"][:5]:
+                    st.code(missing_path, language="text")
+            if runtime_supports_local_file_access():
+                if st.button(
+                    "📂 打开项目目录", key=f"file_mgmt_open_{record.get('task_id')}"
+                ):
+                    if open_record_output(record):
+                        st.success("已打开项目目录")
+                    else:
+                        st.error("无法打开项目目录")
+            zip_exists = bool(record.get("zip_path")) and Path(record.get("zip_path")).exists()
+            if st.button(
+                "♻️ 重建 ZIP" if not zip_exists else "🔁 重新生成 ZIP",
+                key=f"{rebuild_zip_key}_trigger",
+            ):
+                rebuilt_record, rebuild_err = rebuild_record_zip(record.get("task_id"))
+                if rebuilt_record:
+                    st.success("ZIP 已重建完成。")
+                    st.rerun()
+                st.error(rebuild_err or "ZIP 重建失败。")
+            if not zip_exists:
+                st.caption("当前 ZIP 缺失，建议先重建后再下载或归档。")
 
 
-# ==================== 登录页 ====================
-def show_login():
-    render_brand_mark(center=True, width=84)
-    st.markdown(f'<div class="main-title">{APP_NAME}</div>', unsafe_allow_html=True)
+def show_project_center():
+    st.markdown('<div class="page-title">📚 项目中心</div>', unsafe_allow_html=True)
     st.markdown(
-        f'<p style="text-align:center;color:#64748b;margin-bottom:0.4rem">{APP_EN_NAME} · {APP_LAST_UPDATED}</p>'
-        f'<p style="text-align:center;color:#94a3b8;margin-bottom:1.2rem">{APP_TAGLINE}</p>',
-        unsafe_allow_html=True,
+        "统一管理进行中任务、历史项目、回收站和项目文件。服务器版结果会先保存在项目中心，再由用户下载。"
+        if SERVER_MODE
+        else "统一管理进行中任务、历史项目、回收站和本地文件。"
     )
 
-    cols = st.columns(4)
-    features = [
-        ("1", "批量出图", "批量参考图一键出图"),
-        ("2", "快速出图", "更少步骤，直接生成"),
-        ("3", "标题优化", "中英标题优化"),
-        ("4", "图片翻译", "直接输出英文译后图"),
-    ]
-    for col, (icon, title, subtitle) in zip(cols, features):
-        col.markdown(
-            f'<div class="feature-card"><span class="feature-icon">{icon}</span><div class="feature-title">{title}</div><div class="feature-desc">{subtitle}</div></div>',
-            unsafe_allow_html=True,
-        )
+    tasks = list_tasks()
+    active_records = list_active_history_records()
+    trashed_records = list_trashed_history_records()
+    active_tasks = [t for t in tasks if t.get("status") in {"queued", "running"}]
+    completed_records = [r for r in active_records if r.get("status") == "done"]
 
-    st.markdown("<br>", unsafe_allow_html=True)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("进行中", len(active_tasks))
+    m2.metric("历史项目", len(active_records))
+    m3.metric("回收站", len(trashed_records))
+    m4.metric("已完成", len(completed_records))
 
-    bootstrap_runtime_config()
-    s = get_settings()
-    runtime_mode = current_runtime_mode()
+    tab_running, tab_history, tab_trash, tab_files = st.tabs(
+        ["🚧 进行中", "🗂️ 历史项目", "🗑️ 回收站", "🧾 文件管理"]
+    )
 
-    settings_sections = build_settings_sections()
-    runtime_mode_tabs = build_login_tab_labels(current_runtime_mode())
-    tabs = st.tabs(runtime_mode_tabs)
-    t1 = tabs[0]
-    t2 = tabs[1]
-    t3 = tabs[2] if len(tabs) > 2 else None
-
-    with t1:
-        render_config_cards(
-            settings_sections,
-            [("personal", "gemini"), ("personal", "relay")],
-        )
-        render_notice_card(
-            "个人模式",
-            "使用自己的 Gemini Key 或自己的中转站直接进入系统。个人模式不依赖团队数据库。",
-            "info",
-        )
-        st.markdown(
-            f'<div class="info-card"><strong>{settings_sections["personal"]["gemini"]["title"]}</strong><br><span style="font-size:13px;color:#64748b">{settings_sections["personal"]["gemini"]["desc"]}</span></div>',
-            unsafe_allow_html=True,
-        )
-        key = st.text_input(
-            "Gemini / Vertex API Key",
-            type="password",
-            placeholder="AIza... 或 AQ...",
-            key="login_key",
-        )
-        relay_input_base = st.text_input(
-            "我的中转站 API 地址",
-            value=st.session_state.get("own_relay_base", RELAY_API_BASE),
-            key="login_own_relay_base",
-        )
-        relay_input_key = st.text_input(
-            "我的中转站 API Key",
-            type="password",
-            key="login_own_relay_key",
-        )
-        relay_input_model = st.selectbox(
-            "我的中转站模型",
-            list(RELAY_IMAGE_MODELS.keys()),
-            index=list(RELAY_IMAGE_MODELS.keys()).index(
-                st.session_state.get(
-                    "own_relay_model", "gemini-3.1-flash-image-preview"
-                )
-            )
-            if st.session_state.get("own_relay_model", "gemini-3.1-flash-image-preview")
-            in RELAY_IMAGE_MODELS
-            else 0,
-            key="login_own_relay_model",
-        )
-        c1, c2, c3 = st.columns([1, 1, 2])
-        with c1:
-            if st.button(
-                "使用我的 Gemini Key", type="primary", use_container_width=True
+    with tab_running:
+        if not active_tasks:
+            st.info("当前没有进行中的任务。新的生成任务会出现在这里。")
+        for task in active_tasks:
+            total = task.get("progress", {}).get("total", 0)
+            done = task.get("progress", {}).get("done", 0)
+            provider = get_provider_by_id((task.get("payload", {}) or {}).get("provider_id", ""))
+            with st.expander(
+                f"{_task_status_label(task.get('status'))} · {task.get('summary', task.get('type', 'task'))} · {done}/{total}",
+                expanded=False,
             ):
-                key = (key or "").strip()
-                if key and (key.startswith("AIza") or key.startswith("AQ.")):
-                    try:
-                        create_genai_client(key)
-                        set_own_credential_session("gemini", gemini_key=key)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"❌ 验证失败: {str(e)[:80]}")
-                else:
-                    st.error("请输入有效的 API Key（`AIza...` 或 `AQ...`）")
-        with c2:
-            if st.button("使用我的中转站", use_container_width=True):
-                relay_runtime_key, relay_runtime_base, relay_runtime_model = (
-                    resolve_relay_runtime_config(
-                        get_settings(),
-                        relay_input_key,
-                        relay_input_base,
-                        relay_input_model,
-                    )
-                )
-                ok, msg = probe_relay_api(
-                    relay_runtime_base, relay_runtime_key, relay_runtime_model
-                )
-                if not ok:
-                    st.error(f"❌ 中转站验证失败: {msg}")
-                else:
-                    set_own_credential_session(
-                        "relay",
-                        relay_key=relay_runtime_key,
-                        relay_base=relay_runtime_base,
-                        relay_model=relay_runtime_model,
-                    )
+                st.caption(f"任务ID: {task.get('id', '')}")
+                if provider:
+                    st.caption(f"使用提供商: {provider.get('name', '')}")
+                if task.get("errors"):
+                    st.warning("; ".join(task.get("errors", [])[:3]))
+                if st.button(
+                    f"取消任务 {task.get('id')}", key=f"project_cancel_{task.get('id')}"
+                ):
+                    cancel_task(task.get("id"))
+                    st.success("已取消任务")
                     st.rerun()
-        with c3:
-            st.markdown(
-                '<a href="https://aistudio.google.com/apikey" target="_blank" style="color:#6366f1;font-size:13px">🔗 获取 Gemini API Key →</a><br><span style="font-size:12px;color:#64748b">如果你选择中转站，登录后 1/2/3 会优先复用你自己的中转站配置。</span>',
-                unsafe_allow_html=True,
-            )
-        st.markdown(
-            f'<div class="info-card"><strong>{settings_sections["personal"]["relay"]["title"]}</strong><br><span style="font-size:13px;color:#64748b">{settings_sections["personal"]["relay"]["desc"]}</span></div>',
-            unsafe_allow_html=True,
-        )
-        render_recommended_templates_cards()
 
-    with t2:
-        st.markdown(
-            '<div class="info-card"><strong>🛠️ 团队 / 管理员入口</strong></div>',
-            unsafe_allow_html=True,
-        )
-        notice = build_admin_mode_notice(
-            has_service_access=_has_system_service_access(),
-            team_ready=(runtime_mode == "team_mode"),
-        )
-        render_notice_card(notice["title"], notice["body"], notice["level"])
-        if runtime_mode == "team_mode":
-            render_registered_system_service_login(s)
+    with tab_history:
+        if completed_records:
+            clear_done_key = "confirm_clear_done_history"
+            st.caption("只会清理已完成项目，失败/取消/过期记录会保留。")
+            if st.button(
+                "🧹 清理已完成项目",
+                key="history_clear_done_trigger",
+                help="清理后会先进入回收站，本地文件暂不直接删除。",
+            ):
+                activate_confirmation(clear_done_key)
+                st.rerun()
+            if render_confirmation_bar(
+                clear_done_key,
+                f"将把 {len(completed_records)} 条已完成项目移入回收站，失败和取消项目不会受影响。",
+                confirm_label="确认清理",
+            ):
+                removed_tasks = clear_terminal_tasks()
+                moved_records = len(trash_history_records_by_status({"done"}))
+                st.session_state["project_center_notice"] = (
+                    f"已清理 {removed_tasks} 条队列记录，并将 {moved_records} 条已完成项目移入回收站。"
+                )
+                st.rerun()
+        if notice := st.session_state.pop("project_center_notice", ""):
+            st.success(notice)
+        if not active_records:
+            st.info("暂无历史项目。任务完成或失败后会自动出现在这里。")
         else:
-            st.caption(
-                "当前未启用团队数据库，因此这里作为管理员后台入口与系统初始化入口。"
-            )
-            render_system_init_panel(s)
-            render_admin_tool_mode_login(s)
+            render_batch_record_actions(active_records, mode="history")
+        for record in active_records:
+            render_history_record_block(record, in_trash=False)
 
-    show_footer()
+    with tab_trash:
+        retention_days = int(get_settings().get("trash_retention_days", 15) or 0)
+        if trashed_records:
+            purge_all_key = "confirm_purge_trash"
+            restore_all_key = "confirm_restore_all_trash"
+            retention_text = (
+                "不自动清理"
+                if retention_days <= 0
+                else f"自动保留 {retention_days} 天"
+            )
+            st.caption(f"回收站中的项目可以恢复，也可以彻底删除。当前策略：{retention_text}。")
+            if st.button("♻️ 全部恢复", key="trash_restore_all_trigger"):
+                activate_confirmation(restore_all_key)
+                st.rerun()
+            if render_confirmation_bar(
+                restore_all_key,
+                f"将把回收站中的 {len(trashed_records)} 条记录全部恢复到历史项目。",
+                confirm_label="确认全部恢复",
+            ):
+                restored_count = len(restore_all_trashed_history_records())
+                st.success(f"已恢复 {restored_count} 条记录。")
+                st.rerun()
+            render_batch_record_actions(trashed_records, mode="trash")
+            if retention_days > 0 and st.button("⏱️ 立即清理过期回收站", key="trash_cleanup_expired"):
+                purged_records = cleanup_expired_trashed_records()
+                if purged_records:
+                    st.success(f"已自动清理 {len(purged_records)} 条过期回收站记录。")
+                else:
+                    st.info("当前没有过期的回收站记录。")
+                st.rerun()
+            if st.button("🧨 清空回收站", key="trash_purge_all_trigger"):
+                activate_confirmation(purge_all_key)
+                st.rerun()
+            if render_confirmation_bar(
+                purge_all_key,
+                f"将彻底删除回收站中的 {len(trashed_records)} 条记录及其本地文件，执行后不可恢复。",
+                confirm_label="确认清空回收站",
+            ):
+                purged_count = len(purge_all_trashed_history_records())
+                st.success(f"已彻底删除 {purged_count} 条回收站记录")
+                st.rerun()
+        else:
+            st.info("回收站为空。删除的项目会先出现在这里。")
+        for record in trashed_records:
+            render_history_record_block(record, in_trash=True)
+
+    with tab_files:
+        render_file_management_tab(active_records + trashed_records)
 
 
 # ==================== 智能组图页面 ====================
 def show_combo_page():
-    st.markdown('<div class="page-title">1 批量出图</div>', unsafe_allow_html=True)
-    if render_page_toolbar("批量出图", "combo_restart", "重新开始批量任务"):
-        reset_combo_task_state()
-        st.rerun()
     st.markdown(
-        '<div class="info-card">标准批量工作流：先准备素材，再确认类型与图需，最后统一生成和查看结果。</div>',
-        unsafe_allow_html=True,
+        '<div class="page-title">🚀 智能组图工作流</div>', unsafe_allow_html=True
     )
-    for idx, section in enumerate(build_page_sections("combo"), start=1):
-        render_section_frame(section, idx)
 
     s = get_settings()
-    templates = get_templates()["combo_types"]
-    gemini_api_key = (
-        st.session_state.own_api_key
-        if st.session_state.use_own_key
-        else get_next_api_key()
-    )
+    templates = get_template_group("combo_types")
+    provider = get_active_provider()
+    if not provider or not provider.get("api_key"):
+        st.error("⚠️ 未配置可用的提供商，请先在「提供商设置」中添加")
+        return
+
+    api_key = provider.get("api_key")
+    base_url = provider.get("base_url", "")
+    title_model = provider.get("title_model", "")
+    vision_model = provider.get("vision_model", "")
+    provider_image_model = provider.get("image_model", "")
 
     # 侧边栏
     with st.sidebar:
@@ -6056,62 +5924,29 @@ def show_combo_page():
 
         st.markdown("---")
         st.markdown("#### 🤖 出图模型")
-        model_key = PRIMARY_IMAGE_MODEL
-        image_provider, relay_model, relay_key, relay_base = (
-            render_image_engine_selector("combo", s)
+        model_key = provider_image_model or s.get("default_model", "nano-banana")
+        st.caption(
+            f"当前按提供商配置使用：{MODELS.get(model_key, {'name': model_key}).get('name', model_key)}"
         )
-        st.session_state.combo_model_key = model_key
-
-        st.markdown("---")
-        if st.session_state.use_own_key:
-            st.success("🔑 无限额度")
-        else:
-            uid = get_user_id()
-            _, used, limit = check_user_limit(uid)
-            st.progress(min(used / limit, 1.0) if limit > 0 else 0)
-            st.caption(f"今日: {used}/{limit}")
 
         if st.session_state.session_tokens > 0:
             st.markdown(
                 f'<div class="token-badge">🎯 {st.session_state.session_tokens:,} tokens</div>',
                 unsafe_allow_html=True,
             )
-        active_api_key = (
-            st.session_state.own_api_key
-            if st.session_state.use_own_key
-            else peek_system_api_key()
-        )
-        rate_hint = get_rate_limit_hint(active_api_key)
-        st.caption(f"{rate_hint['provider']} · {rate_hint['note']}")
 
     # 检查是否有已完成的结果需要显示
-    if st.session_state.combo_generation_done and (
-        st.session_state.combo_results
-        or st.session_state.combo_errors
-        or st.session_state.combo_titles
-        or st.session_state.get("combo_title_error")
-        or st.session_state.get("combo_title_warnings")
-    ):
+    if st.session_state.combo_generation_done and st.session_state.combo_results:
         st.markdown("## 📸 生成结果")
-        summary = build_result_summary(
-            title="批量出图结果",
-            success_count=len(st.session_state.combo_results),
-            total_count=len(st.session_state.combo_results)
-            + len(st.session_state.combo_errors),
-            token_count=st.session_state.get("combo_tokens_used", 0),
-            warning_count=len(st.session_state.get("combo_title_warnings", [])),
-            error_count=len(st.session_state.combo_errors)
-            + (1 if st.session_state.get("combo_title_error") else 0),
-        )
-        render_result_summary_shell(summary)
         display_generation_results(
             st.session_state.combo_results,
             st.session_state.combo_errors,
             st.session_state.combo_titles,
             st.session_state.get("combo_tokens_used", 0),
             "combo",
-            st.session_state.get("combo_title_error", ""),
-            st.session_state.get("combo_title_warnings", []),
+            st.session_state.get(
+                "combo_result_title_language", DEFAULT_TARGET_LANGUAGE
+            ),
         )
 
         if st.button("🔄 开始新任务", type="primary", use_container_width=True):
@@ -6122,8 +5957,6 @@ def show_combo_page():
             st.session_state.combo_results = []
             st.session_state.combo_errors = []
             st.session_state.combo_titles = []
-            st.session_state.combo_title_error = ""
-            st.session_state.combo_title_warnings = []
             st.session_state.combo_generation_done = False
             st.session_state.combo_generating = False
             for tk in templates.keys():
@@ -6141,12 +5974,12 @@ def show_combo_page():
         ["📤 上传素材", "🎨 选择类型", "📝 图需文案", "🛡️ 合规检测", "🖼️ 生成出图"]
     )
 
-    steps = ["上传素材", "选择类型", "图需文案", "合规检测", "生成出图"]
-
     # Tab 1: 上传
     with tabs[0]:
-        render_stepper(steps, 1)
-        render_reference_tips()
+        st.markdown(
+            '<div class="help-section"><h4>💡 上传建议</h4><ul><li>至少上传1张<b>纯白底主体图</b>效果最佳</li><li>尺寸图建议上传原标注图作为参考</li></ul></div>',
+            unsafe_allow_html=True,
+        )
 
         files = st.file_uploader(
             "上传商品图片",
@@ -6158,18 +5991,17 @@ def show_combo_page():
 
         if files:
             images = []
-            display_count = min(len(files), MAX_IMAGES)
+            display_count = min(len(files), 6)
+            cols = st.columns(display_count)
             for i, f in enumerate(files[:display_count]):
                 img = Image.open(f).convert("RGB")
                 images.append(img)
+                with cols[i]:
+                    st.image(img, caption=f"图{i + 1}", use_container_width=True)
+            for f in files[display_count:MAX_IMAGES]:
+                images.append(Image.open(f).convert("RGB"))
             st.session_state.combo_images = images
-            render_thumbnail_gallery(images, "combo")
             st.success(f"✅ 已加载 {len(images)} 张图片")
-            ref_limit = recommended_ref_limit(model_key)
-            if len(images) > ref_limit:
-                st.warning(
-                    f"已上传 {len(images)} 张，将仅使用前 {ref_limit} 张作为参考图（模型推荐上限）"
-                )
 
         st.markdown("---")
         c1, c2 = st.columns(2)
@@ -6192,14 +6024,8 @@ def show_combo_page():
             key="combo_tags",
             placeholder="保温持久, 食品级, 大容量",
         )
-        st.info("下一步：点击「AI分析商品」后进入「选择类型」。")
 
         btn_disabled = not st.session_state.combo_images
-        render_action_reasons(
-            "分析前检查",
-            combo_analysis_reasons(len(st.session_state.combo_images)),
-            success_note="素材已齐全，可以开始商品分析。",
-        )
         if st.button(
             "🔍 AI分析商品",
             type="primary",
@@ -6208,45 +6034,28 @@ def show_combo_page():
         ):
             with st.spinner("🤖 AI正在分析..."):
                 try:
-                    runtime_relay_key, runtime_relay_base, runtime_relay_model = (
-                        resolve_relay_runtime_config(
-                            s,
-                            relay_key,
-                            relay_base,
-                            relay_model,
-                        )
+                    client = GeminiClient(
+                        api_key,
+                        model_key,
+                        base_url=base_url,
+                        title_model=title_model,
+                        vision_model=vision_model,
                     )
-                    ensure_provider_route_ready(
-                        provider="relay" if image_provider == "中转站" else "gemini",
-                        relay_base=runtime_relay_base,
-                        relay_key=runtime_relay_key,
-                        image_model=runtime_relay_model,
-                        analysis_model=get_relay_analysis_model(),
-                        required_capabilities=["image_analysis"],
-                    )
-                    anchor, used_tokens = build_combo_anchor(
-                        image_provider,
-                        gemini_api_key,
-                        runtime_relay_key,
-                        runtime_relay_base,
-                        runtime_relay_model,
-                        st.session_state.combo_images,
-                        name,
-                        detail,
+                    anchor = client.analyze_product(
+                        st.session_state.combo_images, name, detail
                     )
                     st.session_state.combo_anchor = anchor
                     st.session_state.combo_tags_list = [
                         t.strip() for t in tags.split(",") if t.strip()
                     ][:MAX_TAGS]
-                    st.session_state.session_tokens += used_tokens
+                    st.session_state.session_tokens += client.get_tokens_used()
                     st.success("✅ 分析完成！")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"分析失败: {str(e)}")
+                    st.error(f"分析失败: {sanitize_task_error(str(e))}")
 
     # Tab 2: 选择类型
     with tabs[1]:
-        render_stepper(steps, 2)
         if not st.session_state.combo_anchor:
             st.warning("👆 请先在「上传素材」完成商品分析")
         else:
@@ -6260,54 +6069,24 @@ def show_combo_page():
             if total_count > MAX_TOTAL_IMAGES:
                 st.error(f"❌ 超出最大限制 ({MAX_TOTAL_IMAGES}张)")
 
-            enable_title, title_info, title_template = render_title_gen_option(
-                "combo", has_images=bool(st.session_state.combo_images)
+            enable_title, title_info, title_template, title_language = (
+                render_title_gen_option("combo")
             )
-            st.info("下一步：生成图需文案后，进入「图需文案」查看并编辑。")
+
+            image_language = render_target_language_selector(
+                "combo",
+                "image_language",
+                "🌐 图需 / 入图文案语言",
+                "控制图需、入图文案和图片提示词里的目标语言。",
+            )
+            st.caption(
+                f"当前图片文案语言: {get_title_language_caption(image_language)}"
+            )
 
             st.markdown("---")
-            if image_provider == "Gemini":
-                aspect, size, thinking_level = render_gemini3_settings(
-                    "combo", model_key
-                )
-            else:
-                c1, c2 = st.columns(2)
-                with c1:
-                    aspect = st.selectbox(
-                        "📐 宽高比", ASPECT_RATIOS, key="combo_aspect"
-                    )
-                with c2:
-                    st.text_input(
-                        "输出分辨率", value="1K", disabled=True, key="combo_relay_size"
-                    )
-                size = "1K"
-                thinking_level = "minimal"
-                st.caption("中转站默认按 1K 低并发出图。")
+            aspect, size, thinking_level = render_gemini3_settings("combo", model_key)
 
             can_generate = total_count > 0 and total_count <= MAX_TOTAL_IMAGES
-            render_action_reasons(
-                "图需生成前检查",
-                combo_requirements_reasons(
-                    has_anchor=bool(st.session_state.combo_anchor),
-                    total_count=total_count,
-                    max_total=MAX_TOTAL_IMAGES,
-                ),
-                success_note="类型选择已完成，可以生成图需文案。",
-            )
-            if image_provider == "中转站":
-                render_action_reasons(
-                    "模型能力检查",
-                    describe_capability_reasons(
-                        provider="relay",
-                        image_model=relay_model
-                        or s.get(
-                            "relay_default_image_model",
-                            "gemini-3.1-flash-image-preview",
-                        ),
-                        analysis_model=get_relay_analysis_model(),
-                        required_capabilities=["text_generation"],
-                    ),
-                )
 
             if st.button(
                 "📝 AI生成图需文案",
@@ -6317,50 +6096,43 @@ def show_combo_page():
             ):
                 with st.spinner("🤖 生成中..."):
                     try:
-                        runtime_relay_key, runtime_relay_base, runtime_relay_model = (
-                            resolve_relay_runtime_config(
-                                s,
-                                relay_key,
-                                relay_base,
-                                relay_model,
-                            )
+                        client = GeminiClient(
+                            api_key,
+                            model_key,
+                            base_url=base_url,
+                            title_model=title_model,
+                            vision_model=vision_model,
                         )
-                        ensure_provider_route_ready(
-                            provider="relay"
-                            if image_provider == "中转站"
-                            else "gemini",
-                            relay_base=runtime_relay_base,
-                            relay_key=runtime_relay_key,
-                            image_model=runtime_relay_model,
-                            analysis_model=get_relay_analysis_model(),
-                            required_capabilities=["text_generation"],
-                        )
-                        reqs, used_tokens = build_combo_requirements(
-                            image_provider,
-                            gemini_api_key,
-                            runtime_relay_key,
-                            runtime_relay_base,
-                            runtime_relay_model,
+                        reqs = client.generate_requirements(
                             st.session_state.combo_anchor,
                             selected_types,
                             st.session_state.get("combo_tags_list", []),
+                            image_language,
+                        )
+                        reqs = client.generate_en_copy(
+                            st.session_state.combo_anchor,
+                            reqs,
+                            image_language,
                         )
                         st.session_state.combo_reqs = reqs
-                        st.session_state.session_tokens += used_tokens
+                        st.session_state.session_tokens += client.get_tokens_used()
                         st.success("✅ 生成完成！")
                         st.rerun()
                     except Exception as e:
-                        st.error(f"生成失败: {str(e)}")
+                        st.error(f"生成失败: {sanitize_task_error(str(e))}")
 
     # Tab 3: 图需文案
     with tabs[2]:
-        render_stepper(steps, 3)
         reqs = st.session_state.combo_reqs
         if not reqs:
             st.info("👆 请先在「选择类型」生成图需文案")
         else:
+            image_language = st.session_state.get(
+                "combo_image_language", DEFAULT_TARGET_LANGUAGE
+            )
+            language_info = get_target_language(image_language)
             st.markdown(
-                '<div class="help-section"><h4>✏️ 编辑提示</h4><ul><li>英文文案将直接出现在生成的图片上</li><li>避免使用认证词汇和绝对化用语</li></ul></div>',
+                f'<div class="help-section"><h4>✏️ 编辑提示</h4><ul><li>{language_info["label"]}文案将直接出现在生成的图片上</li><li>避免使用认证词汇和绝对化用语</li></ul></div>',
                 unsafe_allow_html=True,
             )
             for i, r in enumerate(reqs):
@@ -6371,7 +6143,7 @@ def show_combo_page():
                 ):
                     c1, c2 = st.columns(2)
                     with c1:
-                        st.markdown("**中文图需**")
+                        st.markdown(f"**{language_info['label']}图需**")
                         r["topic"] = st.text_input(
                             "主题",
                             value=r.get("topic", ""),
@@ -6386,7 +6158,7 @@ def show_combo_page():
                             key=f"scene_{i}",
                         )
                     with c2:
-                        st.markdown("**英文入图文案**")
+                        st.markdown(f"**{language_info['label']}入图文案**")
                         r["headline"] = st.text_input(
                             "标题",
                             value=r.get("headline", ""),
@@ -6408,7 +6180,6 @@ def show_combo_page():
 
     # Tab 4: 合规检测
     with tabs[3]:
-        render_stepper(steps, 4)
         reqs = st.session_state.combo_reqs
         if not reqs:
             st.info("👆 请先生成图需文案")
@@ -6442,410 +6213,115 @@ def show_combo_page():
 
     # Tab 5: 生成
     with tabs[4]:
-        render_stepper(steps, 5)
         reqs = st.session_state.combo_reqs
         if not reqs:
             st.info("👆 请完成前面的步骤")
         elif not st.session_state.combo_generating:
             task_desc = f"**待生成: {len(reqs)} 张图片**"
-            if should_attempt_title_generation(
-                st.session_state.get("combo_enable_title", False),
-                st.session_state.get("combo_images", []),
-                st.session_state.get("combo_title_info", ""),
+            if st.session_state.get("combo_enable_title") and st.session_state.get(
+                "combo_title_info"
             ):
-                task_desc += " + **中英双语标题**"
+                target_label = get_target_language(
+                    st.session_state.get(
+                        "combo_title_language", DEFAULT_TARGET_LANGUAGE
+                    )
+                )["label"]
+                task_desc += (
+                    " + **纯英文标题**"
+                    if st.session_state.get(
+                        "combo_title_language", DEFAULT_TARGET_LANGUAGE
+                    )
+                    == "en"
+                    else f" + **英文 + {target_label} 标题**"
+                )
             st.markdown(task_desc)
-            combo_run_mode = st.radio(
-                "执行方式",
-                ["前台处理（当前页等待）", "后台排队（可并发）"],
-                index=0,
-                horizontal=True,
-                key="combo_run_mode",
-            )
-            st.caption(
-                f"当前后台并发上限：{int(s.get('translate_bg_max_concurrent', 2))}（提交后台后可切换到其他功能继续操作）"
-            )
-            render_action_reasons(
-                "生成前检查",
-                combo_generate_reasons(
-                    req_count=len(reqs),
-                    generating=bool(st.session_state.combo_generating),
-                ),
-                success_note="图需文案已完成，可以开始批量出图。",
-            )
-            if st.button(
-                "提交后台任务"
-                if combo_run_mode.startswith("后台")
-                else "🚀 确认开始生成",
-                type="primary",
-                use_container_width=True,
-            ):
-                try:
-                    runtime_relay_key, runtime_relay_base, runtime_relay_model = (
-                        resolve_relay_runtime_config(
-                            s,
-                            relay_key,
-                            relay_base,
-                            relay_model,
-                        )
-                    )
-                    required_caps = ["image_generate"]
-                    if should_attempt_title_generation(
-                        st.session_state.get("combo_enable_title", False),
-                        st.session_state.get("combo_images", []),
-                        st.session_state.get("combo_title_info", ""),
-                    ):
-                        required_caps.append("title_from_image")
-                    ensure_provider_route_ready(
-                        provider="relay" if image_provider == "中转站" else "gemini",
-                        relay_base=runtime_relay_base,
-                        relay_key=runtime_relay_key,
-                        image_model=runtime_relay_model,
-                        analysis_model=get_relay_analysis_model(),
-                        required_capabilities=required_caps,
-                    )
-                except Exception as e:
-                    st.error(format_runtime_error_message(e, 220))
-                    return
-                if combo_run_mode.startswith("后台"):
+            if st.button("🚀 确认开始生成", type="primary", use_container_width=True):
+                template_key = st.session_state.get("combo_title_template", "default")
+                template_prompt = get_title_template_prompt(template_key)
+                combo_images = st.session_state.get("combo_images", [])
+                image_paths = []
+                upload_dir = DATA_DIR / "task_uploads"
+                upload_dir.mkdir(parents=True, exist_ok=True)
+                for idx, img in enumerate(combo_images):
+                    filename = f"combo_{int(time.time())}_{idx + 1}.png"
+                    path = upload_dir / filename
                     try:
-                        task_id = submit_task_center_task(
-                            owner_id=get_user_id(),
-                            task_type="combo_generation",
-                            payload={
-                                "image_provider": image_provider,
-                                "gemini_api_key": gemini_api_key,
-                                "relay_key": runtime_relay_key,
-                                "relay_base": runtime_relay_base,
-                                "relay_model": runtime_relay_model,
-                                "reqs": reqs,
-                                "anchor": st.session_state.combo_anchor,
-                                "refs": st.session_state.combo_images,
-                                "aspect": st.session_state.get("combo_aspect", "1:1"),
-                                "size": st.session_state.get("combo_size", "1K"),
-                                "thinking_level": st.session_state.get(
-                                    "combo_thinking_level", "minimal"
-                                ),
-                                "enable_title": bool(
-                                    st.session_state.get("combo_enable_title", False)
-                                ),
-                                "title_info": st.session_state.get(
-                                    "combo_title_info", ""
-                                ),
-                                "title_template": st.session_state.get(
-                                    "combo_title_template", "default"
-                                ),
-                                "compliance_mode": st.session_state.get(
-                                    "user_compliance_mode", "strict"
-                                ),
-                                "use_own_key": bool(
-                                    st.session_state.get("use_own_key")
-                                ),
-                                "total": len(reqs),
-                            },
-                            max_concurrent=int(s.get("translate_bg_max_concurrent", 2)),
-                        )
-                        st.success(f"✅ 已提交后台任务：{task_id}")
-                        st.info(
-                            "你可以切换到其他功能继续操作，稍后在任务中心查看结果。"
-                        )
-                        return
-                    except Exception as e:
-                        st.error(format_runtime_error_message(e, 220))
-                        return
-                st.session_state.combo_generating = True
-                st.rerun()
-        else:
-            # 执行生成
-            model = PRIMARY_IMAGE_MODEL
-            anchor = st.session_state.combo_anchor
-            aspect = st.session_state.get("combo_aspect", "1:1")
-            size = st.session_state.get("combo_size", "1K")
-            thinking_level = st.session_state.get("combo_thinking_level", "minimal")
-            refs = st.session_state.combo_images
-            runtime_relay_key, runtime_relay_base, runtime_relay_model = (
-                resolve_relay_runtime_config(
-                    s,
-                    relay_key,
-                    relay_base,
-                    relay_model,
+                        img.save(path, format="PNG")
+                        image_paths.append(str(path))
+                    except Exception:
+                        continue
+                task, err = create_task(
+                    "combo",
+                    {
+                        "provider_id": provider.get("id", ""),
+                        "anchor": st.session_state.combo_anchor,
+                        "reqs": reqs,
+                        "image_paths": image_paths,
+                        "total": len(reqs),
+                        "image_language": st.session_state.get(
+                            "combo_image_language", DEFAULT_TARGET_LANGUAGE
+                        ),
+                        "model": model_key,
+                        "aspect": st.session_state.get("combo_aspect", "1:1"),
+                        "size": st.session_state.get("combo_size", "1K"),
+                        "thinking_level": st.session_state.get(
+                            "combo_thinking_level", "high"
+                        ),
+                        "enable_title": st.session_state.get(
+                            "combo_enable_title", False
+                        ),
+                        "title_info": st.session_state.get("combo_title_info", ""),
+                        "template_prompt": template_prompt,
+                        "title_language": st.session_state.get(
+                            "combo_title_language", DEFAULT_TARGET_LANGUAGE
+                        ),
+                        "summary": f"智能组图任务 · {len(reqs)}张",
+                    },
                 )
-            )
-            try:
-                required_caps = ["image_generate"]
-                if should_attempt_title_generation(
-                    st.session_state.get("combo_enable_title", False),
-                    refs,
-                    st.session_state.get("combo_title_info", ""),
-                ):
-                    required_caps.append("title_from_image")
-                ensure_provider_route_ready(
-                    provider="relay" if image_provider == "中转站" else "gemini",
-                    relay_base=runtime_relay_base,
-                    relay_key=runtime_relay_key,
-                    image_model=runtime_relay_model,
-                    analysis_model=get_relay_analysis_model(),
-                    required_capabilities=required_caps,
-                )
-            except Exception as e:
-                st.error(format_runtime_error_message(e, 220))
-                st.session_state.combo_generating = False
-                return
-            gemini_image_client = (
-                GeminiClient(gemini_api_key, model)
-                if image_provider == "Gemini"
-                else None
-            )
-            relay_image_client = (
-                RelayImageClient(
-                    runtime_relay_key,
-                    runtime_relay_model,
-                    base_url=runtime_relay_base
-                    or s.get("relay_api_base", RELAY_API_BASE),
-                )
-                if image_provider == "中转站"
-                else None
-            )
-
-            progress = st.progress(0)
-            status = st.empty()
-            log_container = st.container()
-
-            results = []
-            errors = []
-            title_error = ""
-            title_warnings = []
-            generation_tokens = 0
-
-            for i, r in enumerate(reqs):
-                type_key = r.get("type_key", "img")
-                type_name = r.get("type_name", f"图片{i + 1}")
-                type_info = templates.get(type_key, {})
-                type_icon = type_info.get("icon", "📷")
-
-                status.info(f"⏳ 生成: {type_icon} {type_name} ({i + 1}/{len(reqs)})")
-
-                try:
-                    prompt = compose_combo_image_prompt(anchor, r, aspect)
-                    s = get_settings()
-                    enforce_en = bool(s.get("enforce_english_text", True))
-                    en_retries = int(s.get("english_text_max_retries", 2))
-                    if image_provider == "Gemini":
-                        if gemini_image_client is None:
-                            raise Exception("当前未配置 Gemini API Key")
-                        img = gemini_image_client.generate_image(
-                            refs,
-                            prompt,
-                            aspect,
-                            size,
-                            thinking_level,
-                            enforce_english=enforce_en,
-                            max_attempts=en_retries,
-                        )
-                        generation_tokens = gemini_image_client.get_tokens_used()
-                    else:
-                        if relay_image_client is None:
-                            raise Exception("请先配置系统中转站 Key 或前台中转站 Key")
-                        img = relay_image_client.generate_image(
-                            refs,
-                            prompt,
-                            aspect,
-                            size,
-                            thinking_level,
-                            enforce_english=enforce_en,
-                            max_attempts=1,
-                        )
-                        generation_tokens += relay_image_client.get_tokens_used()
-                        if img is None:
-                            raise Exception(
-                                relay_image_client.get_last_error()
-                                or "中转站返回空图片"
-                            )
-
-                    if img:
-                        # 带类型名称的文件名
-                        filename = f"{str(i + 1).zfill(2)}_{type_name}.png"
-                        label = f"{type_icon} {type_name}"
-
-                        results.append(
-                            {
-                                "image": img,
-                                "filename": filename,
-                                "label": label,
-                                "type_key": type_key,
-                                "index": r.get("index", 1),
-                            }
-                        )
-
-                        with log_container:
-                            st.success(f"✅ {type_icon} {type_name} 生成成功")
-                    else:
-                        error_msg = (
-                            gemini_image_client.get_last_error()
-                            if gemini_image_client is not None
-                            else relay_image_client.get_last_error()
-                            if relay_image_client is not None
-                            else "返回空图片"
-                        ) or "返回空图片"
-                        errors.append(f"{type_icon} {type_name}: {error_msg}")
-                        with log_container:
-                            st.error(f"❌ {type_icon} {type_name}: {error_msg}")
-
-                except Exception as e:
-                    error_msg = format_runtime_error_message(e, 220)
-                    errors.append(f"{type_icon} {type_name}: {error_msg}")
-                    with log_container:
-                        st.error(f"❌ {type_icon} {type_name}: {error_msg}")
-
-                progress.progress((i + 1) / len(reqs))
-
-            # 生成标题
-            generated_titles = []
-            title_tokens = 0
-            if should_attempt_title_generation(
-                st.session_state.get("combo_enable_title", False),
-                refs,
-                st.session_state.get("combo_title_info", ""),
-            ):
-                status.info("⏳ 生成中英双语标题...")
-                try:
-                    title_templates = get_title_templates()
-                    template_key = st.session_state.get(
-                        "combo_title_template", "default"
-                    )
-                    template_prompt = title_templates.get(template_key, {}).get(
-                        "prompt", DEFAULT_TITLE_TEMPLATES["default"]["prompt"]
-                    )
-                    title_client = build_text_generation_client(
-                        image_provider,
-                        gemini_api_key,
-                        runtime_relay_key,
-                        runtime_relay_base,
-                        runtime_relay_model,
-                        model=TITLE_TEXT_MODEL,
-                    )
-                    generated_titles, title_warnings = (
-                        generate_compliant_titles_or_raise(
-                            title_client,
-                            refs,
-                            st.session_state.get("combo_title_info", ""),
-                            template_prompt,
-                            compliance_checker=check_compliance,
-                            compliance_mode=st.session_state.get(
-                                "user_compliance_mode", "strict"
-                            ),
-                        )
-                    )
-                    title_tokens = title_client.get_tokens_used()
-                except Exception as e:
-                    title_error = format_runtime_error_message(str(e), 220)
-                    with log_container:
-                        st.warning(f"标题生成失败: {title_error}")
-                for warning in title_warnings:
-                    with log_container:
-                        st.warning(warning)
-
-            tokens_used = generation_tokens + title_tokens
-            st.session_state.session_tokens += tokens_used
-
-            # 保存结果到session_state
-            st.session_state.combo_results = results
-            st.session_state.combo_errors = errors
-            st.session_state.combo_titles = generated_titles
-            st.session_state.combo_title_error = title_error
-            st.session_state.combo_title_warnings = title_warnings
-            st.session_state.combo_tokens_used = tokens_used
-            st.session_state.combo_generating = False
-            st.session_state.combo_generation_done = True
-
-            # 更新统计
-            if results and not st.session_state.use_own_key:
-                update_user_usage(get_user_id(), len(results), tokens_used)
-                update_stats(len(results), tokens_used, image_count=len(results))
-
-            if results:
-                record_platform_usage_event_safe(
-                    feature="combo_image_generation",
-                    provider=image_provider,
-                    model=PRIMARY_IMAGE_MODEL
-                    if image_provider == "Gemini"
-                    else (relay_model or "relay-image"),
-                    request_count=len(reqs),
-                    output_images=len(results),
-                    tokens_used=tokens_used,
-                    charge_source="own_key"
-                    if st.session_state.use_own_key
-                    else "system_pool",
-                    actor_label=get_user_id(),
-                    operation_key=f"combo:{get_user_id()}:{int(time.time() * 1000)}",
-                    metadata_json={"titles_generated": len(generated_titles)},
-                )
-
-            status.success(f"✅ 完成！成功 {len(results)}/{len(reqs)} 张")
-
-            # 刷新页面显示结果
-            st.rerun()
+                if task:
+                    schedule_task_workers()
+                    st.success(f"✅ 已加入任务中心：{task['id']}")
+                else:
+                    st.error(err)
 
     show_footer()
 
 
 # ==================== 快速出图页面 ====================
 def show_smart_page():
-    st.markdown('<div class="page-title">2 快速出图</div>', unsafe_allow_html=True)
-    if render_page_toolbar("快速出图", "smart_restart", "重新开始快速任务"):
-        reset_smart_task_state()
-        st.rerun()
-    st.markdown(
-        '<div class="info-card">快速工作流：上传商品图、选择类型、直接生成。适合单批高频操作。</div>',
-        unsafe_allow_html=True,
-    )
-    for idx, section in enumerate(build_page_sections("smart"), start=1):
-        render_section_frame(section, idx)
+    st.markdown('<div class="page-title">🎨 快速出图 / 图片翻译</div>', unsafe_allow_html=True)
 
     s = get_settings()
-    templates = get_templates()["smart_types"]
-    gemini_api_key = (
-        st.session_state.own_api_key
-        if st.session_state.use_own_key
-        else get_next_api_key()
-    )
+    templates = get_template_group("smart_types")
+    provider = get_active_provider()
+    if not provider or not provider.get("api_key"):
+        st.error("⚠️ 未配置可用的提供商，请先在「提供商设置」中添加")
+        return
+
+    api_key = provider.get("api_key")
+    base_url = provider.get("base_url", "")
+    title_model = provider.get("title_model", "")
+    vision_model = provider.get("vision_model", "")
+    provider_image_model = provider.get("image_model", "")
 
     # 检查是否有已完成的结果
-    if st.session_state.smart_generation_done and (
-        st.session_state.smart_results
-        or st.session_state.smart_errors
-        or st.session_state.smart_titles
-        or st.session_state.get("smart_title_error")
-        or st.session_state.get("smart_title_warnings")
-    ):
+    if st.session_state.smart_generation_done and st.session_state.smart_results:
         st.markdown("## 📸 生成结果")
-        summary = build_result_summary(
-            title="快速出图结果",
-            success_count=len(st.session_state.smart_results),
-            total_count=len(st.session_state.smart_results)
-            + len(st.session_state.smart_errors),
-            token_count=st.session_state.get("smart_tokens_used", 0),
-            warning_count=len(st.session_state.get("smart_title_warnings", [])),
-            error_count=len(st.session_state.smart_errors)
-            + (1 if st.session_state.get("smart_title_error") else 0),
-        )
-        render_result_summary_shell(summary)
         display_generation_results(
             st.session_state.smart_results,
             st.session_state.smart_errors,
             st.session_state.smart_titles,
             st.session_state.get("smart_tokens_used", 0),
             "smart",
-            st.session_state.get("smart_title_error", ""),
-            st.session_state.get("smart_title_warnings", []),
+            st.session_state.get(
+                "smart_result_title_language", DEFAULT_TARGET_LANGUAGE
+            ),
         )
 
         if st.button("🔄 开始新任务", type="primary", use_container_width=True):
             st.session_state.smart_results = []
             st.session_state.smart_errors = []
             st.session_state.smart_titles = []
-            st.session_state.smart_title_error = ""
-            st.session_state.smart_title_warnings = []
             st.session_state.smart_generation_done = False
             st.session_state.smart_generating = False
             st.rerun()
@@ -6854,10 +6330,20 @@ def show_smart_page():
         return
 
     with st.expander("📖 使用说明"):
-        st.markdown("简化流程，快速生成图片。可同时生成中英双语标题。")
+        st.markdown(
+            "这里包含两种工作方式：创意出图，以及图片翻译（合规优先的保版翻译）。如果你要做原图文案替换，请选择“图片翻译”模式。"
+        )
 
-    render_stepper(["上传素材", "选择类型", "生成出图"], 1)
-    render_reference_tips()
+    workflow_mode = st.radio(
+        "工作模式",
+        ["creative", "translate"],
+        horizontal=True,
+        format_func=lambda x: {
+            "creative": "✨ 创意出图",
+            "translate": "🈯 图片翻译（合规翻译）",
+        }.get(x, x),
+        key="smart_workflow_mode",
+    )
 
     # 上传图片
     files = st.file_uploader(
@@ -6870,11 +6356,22 @@ def show_smart_page():
 
     images = []
     if files:
-        for f in files[:MAX_IMAGES]:
-            img = Image.open(f).convert("RGB")
-            images.append(img)
-
-        render_thumbnail_gallery(images, "smart")
+        num_files = len(files)
+        if num_files == 1:
+            col1, col2, col3 = st.columns([1, 2, 1])
+            with col1:
+                img = Image.open(files[0]).convert("RGB")
+                images.append(img)
+                st.image(img, caption="图1", width=100)
+        else:
+            cols = st.columns(min(num_files, 6))
+            for i, f in enumerate(files[:6]):
+                img = Image.open(f).convert("RGB")
+                images.append(img)
+                with cols[i]:
+                    st.image(img, caption=f"图{i + 1}", width=80)
+            for f in files[6:MAX_IMAGES]:
+                images.append(Image.open(f).convert("RGB"))
 
         st.success(f"✅ 已加载 {len(images)} 张图片")
 
@@ -6887,344 +6384,126 @@ def show_smart_page():
 
     st.markdown("---")
 
-    render_stepper(["上传素材", "选择类型", "生成出图"], 2)
-    selected_types, total_count = render_type_selector(
-        templates, prefix="smart", max_per_type=5, max_total=20
-    )
+    if workflow_mode == "creative":
+        selected_types, total_count = render_type_selector(
+            templates, prefix="smart", max_per_type=5, max_total=20
+        )
+        enable_title, title_info, title_template, title_language = (
+            render_title_gen_option("smart")
+        )
+        translation_template = "preserve_layout"
+    else:
+        selected_types, total_count = {}, len(images)
+        enable_title, title_info, title_template, title_language = (
+            False,
+            "",
+            "default",
+            DEFAULT_TARGET_LANGUAGE,
+        )
+        (
+            enabled_translation_templates,
+            translation_options,
+            translation_template_names,
+        ) = build_translation_template_selector_options()
+        translation_template = st.selectbox(
+            "翻译保版模板",
+            translation_options,
+            format_func=lambda key: translation_template_names.get(key, key),
+            key="smart_translation_template",
+            help="选择当前翻译任务使用的保版翻译策略模板。",
+        )
+        st.info(
+            f"当前为合规翻译模式：将按 {get_compliance().get('presets', {}).get(st.session_state.get('user_compliance_mode', 'strict'), {}).get('name', '当前合规模式')} 执行保版翻译。"
+        )
+        selected_translation_info = enabled_translation_templates.get(translation_template, {})
+        if selected_translation_info:
+            st.caption(
+                f"当前模板说明: {selected_translation_info.get('desc', '')}"
+            )
 
-    enable_title, title_info, title_template = render_title_gen_option(
-        "smart", has_images=bool(images)
+    image_language = render_target_language_selector(
+        "smart",
+        "image_language",
+        "🌐 图片文案语言",
+        "控制图片内文案和相关提示词使用的目标语言。",
     )
+    st.caption(f"当前图片文案语言: {get_title_language_caption(image_language)}")
 
     st.markdown("---")
 
-    render_stepper(["上传素材", "选择类型", "生成出图"], 3)
-    model = PRIMARY_IMAGE_MODEL
-    image_provider, relay_model, relay_key, relay_base = render_image_engine_selector(
-        "smart", s
-    )
-    if image_provider == "Gemini":
-        aspect, size, thinking_level = render_gemini3_settings("smart", model)
-    else:
-        c1, c2 = st.columns(2)
-        with c1:
-            aspect = st.selectbox("📐 宽高比", ASPECT_RATIOS, key="smart_aspect")
-        with c2:
-            st.text_input(
-                "输出分辨率", value="1K", disabled=True, key="smart_relay_size"
-            )
-        size = "1K"
-        thinking_level = "minimal"
-        st.caption("中转站默认按 1K 低并发出图。")
-
-    can_gen = images and name and total_count > 0
-    render_action_reasons(
-        "生成前检查",
-        smart_generate_reasons(
-            image_count=len(images), product_name=name, total_count=total_count
-        ),
-        success_note="素材、商品名称和类型已齐全，可以开始快速出图。",
-    )
-    if image_provider == "中转站":
-        required_caps = ["image_analysis", "image_generate"]
-        if should_attempt_title_generation(enable_title, images, title_info):
-            required_caps.append("title_from_image")
-        render_action_reasons(
-            "模型能力检查",
-            describe_capability_reasons(
-                provider="relay",
-                image_model=relay_model
-                or s.get("relay_default_image_model", "gemini-3.1-flash-image-preview"),
-                analysis_model=get_relay_analysis_model(),
-                required_capabilities=required_caps,
-            ),
-        )
-
-    smart_run_mode = st.radio(
-        "执行方式",
-        ["前台处理（当前页等待）", "后台排队（可并发）"],
-        index=0,
-        horizontal=True,
-        key="smart_run_mode",
-    )
+    model = provider_image_model or s.get("default_model", "nano-banana")
     st.caption(
-        f"当前后台并发上限：{int(s.get('translate_bg_max_concurrent', 2))}（提交后台后可切换到其他功能继续操作）"
+        f"当前按提供商配置使用出图模型：{MODELS.get(model, {'name': model}).get('name', model)}"
+    )
+    aspect, size, thinking_level = render_gemini3_settings("smart", model)
+
+    can_gen = bool(images) and (
+        workflow_mode == "translate" or (name and total_count > 0)
     )
 
     if st.button(
-        "提交后台任务" if smart_run_mode.startswith("后台") else "🚀 开始生成",
+        "🚀 开始翻译" if workflow_mode == "translate" else "🚀 开始生成",
         type="primary",
         use_container_width=True,
         disabled=not can_gen,
     ):
-        runtime_relay_key, runtime_relay_base, runtime_relay_model = (
-            resolve_relay_runtime_config(
-                s,
-                relay_key,
-                relay_base,
-                relay_model,
-            )
+        image_paths = _save_uploaded_images(files or [], f"smart_{int(time.time())}")
+        template_prompt = get_title_template_prompt(title_template)
+        task, err = create_task(
+            "translate" if workflow_mode == "translate" else "smart",
+            {
+                "provider_id": provider.get("id", ""),
+                "image_paths": image_paths,
+                "name": name,
+                "material": material or "",
+                "selected_types": selected_types,
+                "total": total_count,
+                "image_language": image_language,
+                "model": model,
+                "aspect": aspect,
+                "size": size,
+                "thinking_level": thinking_level,
+                "enable_title": enable_title,
+                "title_info": title_info,
+                "title_template": title_template,
+                "template_prompt": template_prompt,
+                "title_language": title_language,
+                "translation_template": translation_template,
+                "compliance_mode": st.session_state.get(
+                    "user_compliance_mode", "strict"
+                ),
+                "summary": (
+                    f"组图翻译任务 · {name or '未命名项目'} · {len(images)}张"
+                    if workflow_mode == "translate"
+                    else f"快速出图任务 · {name} · {total_count}张"
+                ),
+            },
         )
-        try:
-            required_caps = ["image_analysis", "image_generate"]
-            if should_attempt_title_generation(enable_title, images, title_info):
-                required_caps.append("title_from_image")
-            ensure_provider_route_ready(
-                provider="relay" if image_provider == "中转站" else "gemini",
-                relay_base=runtime_relay_base,
-                relay_key=runtime_relay_key,
-                image_model=runtime_relay_model,
-                analysis_model=get_relay_analysis_model(),
-                required_capabilities=required_caps,
-            )
-        except Exception as e:
-            st.error(format_runtime_error_message(e, 220))
-            return
-        if smart_run_mode.startswith("后台"):
-            try:
-                task_id = submit_task_center_task(
-                    owner_id=get_user_id(),
-                    task_type="smart_generation",
-                    payload={
-                        "image_provider": image_provider,
-                        "gemini_api_key": gemini_api_key,
-                        "relay_key": runtime_relay_key,
-                        "relay_base": runtime_relay_base,
-                        "relay_model": runtime_relay_model,
-                        "images": images,
-                        "name": name,
-                        "material": material,
-                        "selected_types": selected_types,
-                        "total_count": total_count,
-                        "aspect": aspect,
-                        "size": size,
-                        "thinking_level": thinking_level,
-                        "enable_title": enable_title,
-                        "title_info": title_info,
-                        "title_template": title_template,
-                        "compliance_mode": st.session_state.get(
-                            "user_compliance_mode", "strict"
-                        ),
-                        "use_own_key": bool(st.session_state.get("use_own_key")),
-                        "total": total_count,
-                    },
-                    max_concurrent=int(s.get("translate_bg_max_concurrent", 2)),
-                )
-                st.success(f"✅ 已提交后台任务：{task_id}")
-                st.info("你可以切换到其他功能继续操作，稍后在任务中心查看结果。")
-                return
-            except Exception as e:
-                st.error(format_runtime_error_message(e, 220))
-                return
-        gemini_image_client = (
-            GeminiClient(gemini_api_key, model) if image_provider == "Gemini" else None
-        )
-        relay_image_client = (
-            RelayImageClient(
-                runtime_relay_key,
-                runtime_relay_model,
-                base_url=runtime_relay_base or s.get("relay_api_base", RELAY_API_BASE),
-            )
-            if image_provider == "中转站"
-            else None
-        )
-
-        progress = st.progress(0)
-        status = st.empty()
-        log_container = st.container()
-
-        # 先分析商品
-        status.info("🤖 分析商品...")
-        anchor, anchor_tokens = build_smart_anchor(
-            image_provider,
-            gemini_api_key,
-            runtime_relay_key,
-            runtime_relay_base,
-            runtime_relay_model,
-            images,
-            name,
-            material or "",
-        )
-
-        results = []
-        errors = []
-        done = 0
-        title_error = ""
-        title_warnings = []
-        generation_tokens = anchor_tokens
-
-        for tk, cnt in selected_types.items():
-            info = templates[tk]
-            for idx in range(cnt):
-                done += 1
-                status.info(
-                    f"⏳ 生成: {info['icon']} {info['name']} ({done}/{total_count})"
-                )
-
-                prompt = f"""Professional ecommerce product image.
-Product: {name}
-Material: {material or "not specified"}
-Style: {info["name"]}
-Features: {", ".join(anchor.get("visual_attrs", ["quality"]))}
-CRITICAL: ALL text MUST be ENGLISH only. NO Chinese characters.
-Aspect: {aspect}"""
-
-                try:
-                    s = get_settings()
-                    enforce_en = bool(s.get("enforce_english_text", True))
-                    en_retries = int(s.get("english_text_max_retries", 2))
-                    if image_provider == "Gemini":
-                        if gemini_image_client is None:
-                            raise Exception("当前未配置 Gemini API Key")
-                        img = gemini_image_client.generate_image(
-                            images,
-                            prompt,
-                            aspect,
-                            size,
-                            thinking_level,
-                            enforce_english=enforce_en,
-                            max_attempts=en_retries,
-                        )
-                        generation_tokens = gemini_image_client.get_tokens_used()
-                    else:
-                        if relay_image_client is None:
-                            raise Exception("请先配置系统中转站 Key 或前台中转站 Key")
-                        img = relay_image_client.generate_image(
-                            images,
-                            prompt,
-                            aspect,
-                            size,
-                            thinking_level,
-                            enforce_english=enforce_en,
-                            max_attempts=1,
-                        )
-                        generation_tokens += relay_image_client.get_tokens_used()
-                        if img is None:
-                            raise Exception(
-                                relay_image_client.get_last_error()
-                                or "中转站返回空图片"
-                            )
-                    if img:
-                        filename = f"{str(done).zfill(2)}_{info['name']}.png"
-                        label = f"{info['icon']} {info['name']}"
-                        results.append(
-                            {"image": img, "filename": filename, "label": label}
-                        )
-                        with log_container:
-                            st.success(f"✅ {info['icon']} {info['name']} 生成成功")
-                    else:
-                        error_msg = (
-                            gemini_image_client.get_last_error()
-                            if gemini_image_client is not None
-                            else relay_image_client.get_last_error()
-                            if relay_image_client is not None
-                            else "返回空图片"
-                        ) or "返回空图片"
-                        errors.append(f"{info['icon']} {info['name']}: {error_msg}")
-                        with log_container:
-                            st.error(f"❌ {info['icon']} {info['name']}: {error_msg}")
-                except Exception as e:
-                    error_msg = format_runtime_error_message(e, 220)
-                    errors.append(f"{info['icon']} {info['name']}: {error_msg}")
-                    with log_container:
-                        st.error(f"❌ {info['icon']} {info['name']}: {error_msg}")
-
-                progress.progress(done / total_count)
-
-        # 生成标题
-        generated_titles = []
-        title_tokens = 0
-        if should_attempt_title_generation(enable_title, images, title_info):
-            status.info("⏳ 生成中英双语标题...")
-            try:
-                title_templates_data = get_title_templates()
-                template_prompt = title_templates_data.get(title_template, {}).get(
-                    "prompt", DEFAULT_TITLE_TEMPLATES["default"]["prompt"]
-                )
-                title_client = build_text_generation_client(
-                    image_provider,
-                    gemini_api_key,
-                    runtime_relay_key,
-                    runtime_relay_base,
-                    runtime_relay_model,
-                    model=TITLE_TEXT_MODEL,
-                )
-                generated_titles, title_warnings = generate_compliant_titles_or_raise(
-                    title_client,
-                    images,
-                    title_info,
-                    template_prompt,
-                    compliance_checker=check_compliance,
-                    compliance_mode=st.session_state.get(
-                        "user_compliance_mode", "strict"
-                    ),
-                )
-                title_tokens = title_client.get_tokens_used()
-            except Exception as e:
-                title_error = format_runtime_error_message(str(e), 220)
-                with log_container:
-                    st.warning(f"标题生成失败: {title_error}")
-            for warning in title_warnings:
-                with log_container:
-                    st.warning(warning)
-
-        tokens_used = generation_tokens + title_tokens
-        st.session_state.session_tokens += tokens_used
-
-        # 保存结果
-        st.session_state.smart_results = results
-        st.session_state.smart_errors = errors
-        st.session_state.smart_titles = generated_titles
-        st.session_state.smart_title_error = title_error
-        st.session_state.smart_title_warnings = title_warnings
-        st.session_state.smart_tokens_used = tokens_used
-        st.session_state.smart_generation_done = True
-
-        if results and not st.session_state.use_own_key:
-            update_user_usage(get_user_id(), len(results), tokens_used)
-            update_stats(len(results), tokens_used, image_count=len(results))
-
-        if results:
-            record_platform_usage_event_safe(
-                feature="smart_image_generation",
-                provider=image_provider,
-                model=PRIMARY_IMAGE_MODEL
-                if image_provider == "Gemini"
-                else (relay_model or "relay-image"),
-                request_count=total_count,
-                output_images=len(results),
-                tokens_used=tokens_used,
-                charge_source="own_key"
-                if st.session_state.use_own_key
-                else "system_pool",
-                actor_label=get_user_id(),
-                operation_key=f"smart:{get_user_id()}:{int(time.time() * 1000)}",
-                metadata_json={"titles_generated": len(generated_titles)},
-            )
-
-        status.success(f"✅ 完成！成功 {len(results)}/{total_count} 张")
-        st.rerun()
+        if task:
+            schedule_task_workers()
+            st.success(f"✅ 已加入任务中心：{task['id']}")
+        else:
+            st.error(err)
 
     show_footer()
 
 
 # ==================== 标题生成页面 ====================
 def show_title_page():
-    st.markdown('<div class="page-title">3 标题优化</div>', unsafe_allow_html=True)
-    if render_page_toolbar("标题优化", "title_restart", "重新开始标题任务"):
-        reset_title_task_state()
-        st.rerun()
-
-    runtime_credentials = get_runtime_credentials(
-        "relay"
-        if st.session_state.get("use_own_key")
-        and st.session_state.get("own_provider") == "relay"
-        else "gemini"
+    st.markdown(
+        '<div class="page-title">🏷️ 智能标题生成</div>',
+        unsafe_allow_html=True,
     )
 
-    if not runtime_credentials.get("api_key"):
-        st.error("⚠️ 当前未配置可用凭据，请先在“我的凭据”或“系统配置”中配置。")
+    provider = get_active_provider()
+    if not provider or not provider.get("api_key"):
+        st.error("⚠️ 未配置可用的提供商，请先在「提供商设置」中添加")
         return
+
+    api_key = provider.get("api_key")
+    base_url = provider.get("base_url", "")
+    title_model = provider.get("title_model", "")
+    vision_model = provider.get("vision_model", "")
 
     title_templates = get_title_templates()
 
@@ -7232,16 +6511,28 @@ def show_title_page():
         f"""<div class="help-section">
         <h4>🎯 输出规则</h4>
         <ul>
-            <li><b>双语输出</b> - 每个标题同时生成英文和中文</li>
+            <li><b>默认英文优先</b> - 可输出纯英文，或英文 + 所选目标语言</li>
             <li><b>英文字符</b> - {MIN_TITLE_EN_CHARS}-{MAX_TITLE_EN_CHARS}字符</li>
             <li><b>三种策略</b> - 搜索优化/转化优化/差异化</li>
-            <li><b>默认模型</b> - Gemini 文本链路 `"""
-        + TITLE_TEXT_MODEL
-        + """`，优先降低 token 和算力消耗</li>
         </ul>
     </div>""",
         unsafe_allow_html=True,
     )
+
+    title_language = render_target_language_selector(
+        "standalone_title",
+        "target_language",
+        "🌐 标题目标语言",
+        "标题默认优先英文；若选择英语，则输出纯英文标题。",
+    )
+    st.caption(f"当前标题模型：{title_model or '未配置'}")
+    st.caption(f"当前视觉模型：{vision_model or '未配置'}")
+    if title_language == "en":
+        st.caption("当前输出: 🇺🇸 纯英文标题")
+    else:
+        st.caption(
+            f"当前输出: 🇺🇸 English + {get_title_language_caption(title_language)}"
+        )
 
     # 输入模式
     st.markdown("### 📥 输入方式")
@@ -7266,10 +6557,12 @@ def show_title_page():
         )
 
         if title_files:
-            for i, f in enumerate(title_files[:MAX_IMAGES]):
+            cols = st.columns(min(len(title_files), 5))
+            for i, f in enumerate(title_files[:5]):
                 img = Image.open(f).convert("RGB")
                 uploaded_images.append(img)
-            render_thumbnail_gallery(uploaded_images, "title")
+                with cols[i]:
+                    st.image(img, caption=f"图{i + 1}", width=60)
             st.success(f"✅ 已加载 {len(uploaded_images)} 张图片")
 
     if input_mode in ["📝 文字描述", "🔀 图片+文字"]:
@@ -7288,19 +6581,11 @@ def show_title_page():
     st.markdown("---")
     st.markdown("### 📋 选择标题模板")
 
-    enabled_templates = {
-        k: v for k, v in title_templates.items() if v.get("enabled", True)
-    }
-
-    if input_mode == "🖼️ 图片分析":
-        template_options = ["image_analysis"] + [
-            k for k in enabled_templates.keys() if k != "image_analysis"
-        ]
-    else:
-        template_options = ["custom"] + list(enabled_templates.keys())
-
-    template_names = {"custom": "✏️ 自定义提示词"}
-    template_names.update({k: v["name"] for k, v in enabled_templates.items()})
+    enabled_templates, template_options, template_names = (
+        build_title_template_selector_options(
+            input_mode=input_mode, include_custom=(input_mode != "🖼️ 图片分析")
+        )
+    )
 
     default_idx = 0
     if input_mode == "🖼️ 图片分析" and "image_analysis" in template_options:
@@ -7318,10 +6603,10 @@ def show_title_page():
     if selected_template == "custom":
         st.markdown("#### ✏️ 自定义提示词")
         custom_prompt = st.text_area(
-            "提示词 ({product_info}为占位符)",
+            "提示词 ({product_info} 为占位符，可选 {target_language_name})",
             height=200,
             key="custom_title_prompt",
-            placeholder="Generate bilingual titles for: {product_info}",
+            placeholder="Generate titles in English or English plus {target_language_name} for: {product_info}",
         )
         final_prompt = (
             custom_prompt
@@ -7346,1824 +6631,89 @@ def show_title_page():
             product_info and len(product_info) >= 10
         )
 
-    render_action_reasons(
-        "标题生成前检查",
-        title_generate_reasons(
-            input_mode=input_mode,
-            product_info=product_info,
-            image_count=len(uploaded_images),
-        ),
-        success_note="输入条件已满足，可以生成标题。",
-    )
-    if runtime_credentials.get("provider") == "relay":
-        render_action_reasons(
-            "模型能力检查",
-            describe_capability_reasons(
-                provider="relay",
-                image_model=runtime_credentials.get("model")
-                or get_settings().get(
-                    "relay_default_image_model", "gemini-3.1-flash-image-preview"
-                ),
-                analysis_model=get_relay_analysis_model(),
-                required_capabilities=[
-                    "title_from_image" if uploaded_images else "text_generation"
-                ],
-            ),
-        )
-
     if st.button(
-        "🚀 生成中英双语标题",
+        "🚀 生成标题",
         type="primary",
         use_container_width=True,
         disabled=not can_generate,
     ):
-        with st.spinner("🤖 AI生成中..."):
-            try:
-                if runtime_credentials.get("provider") == "relay":
-                    required_capability = (
-                        "title_from_image" if uploaded_images else "text_generation"
-                    )
-                    ensure_provider_route_ready(
-                        provider="relay",
-                        relay_base=runtime_credentials.get("base_url")
-                        or RELAY_API_BASE,
-                        relay_key=runtime_credentials.get("api_key", ""),
-                        image_model=runtime_credentials.get("model")
-                        or get_settings().get(
-                            "relay_default_image_model",
-                            "gemini-3.1-flash-image-preview",
-                        ),
-                        analysis_model=get_relay_analysis_model(),
-                        required_capabilities=[required_capability],
-                    )
-                if runtime_credentials.get("provider") == "relay":
-                    client = RelayTextClient(
-                        runtime_credentials.get("api_key", ""),
-                        get_relay_analysis_model(),
-                        base_url=runtime_credentials.get("base_url") or RELAY_API_BASE,
-                    )
-                else:
-                    client = GeminiClient(
-                        runtime_credentials.get("api_key", ""), model=TITLE_TEXT_MODEL
-                    )
-                titles, title_warnings = generate_compliant_titles_or_raise(
-                    client,
-                    uploaded_images,
-                    product_info,
-                    final_prompt,
-                    compliance_checker=check_compliance,
-                    compliance_mode=st.session_state.get(
-                        "user_compliance_mode", "strict"
-                    ),
-                )
-
-                if titles:
-                    if not st.session_state.use_own_key:
-                        update_user_usage(get_user_id(), 1, client.get_tokens_used())
-                        update_stats(1, client.get_tokens_used(), image_count=0)
-
-                    record_platform_usage_event_safe(
-                        feature="title_optimization",
-                        provider="Gemini"
-                        if runtime_credentials.get("provider") == "gemini"
-                        else "中转站",
-                        model=TITLE_TEXT_MODEL
-                        if runtime_credentials.get("provider") == "gemini"
-                        else runtime_credentials.get("model") or "relay-text",
-                        request_count=1,
-                        output_images=0,
-                        tokens_used=client.get_tokens_used(),
-                        charge_source="own_key"
-                        if st.session_state.use_own_key
-                        else "system_pool",
-                        actor_label=get_user_id(),
-                        operation_key=f"title:{get_user_id()}:{int(time.time() * 1000)}",
-                        metadata_json={"titles_generated": len(titles)},
-                    )
-
-                    st.session_state.session_tokens += client.get_tokens_used()
-
-                    st.markdown("---")
-                    summary = build_result_summary(
-                        title="标题优化结果",
-                        success_count=max(len(titles) // 2, len(titles)),
-                        total_count=max(len(titles) // 2, len(titles)),
-                        token_count=client.get_tokens_used(),
-                        warning_count=len(title_warnings),
-                        error_count=0,
-                    )
-                    render_result_summary_shell(summary)
-                    for warning in title_warnings:
-                        st.warning(warning)
-                    display_generated_titles(titles, "title")
-                    st.markdown(
-                        f'<div class="token-badge">🎯 消耗: {client.get_tokens_used():,} tokens</div>',
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    st.error("标题生成失败，未返回有效结果")
-            except Exception as e:
-                st.error(f"生成失败: {format_runtime_error_message(str(e), 220)}")
+        image_paths = _save_uploaded_images(
+            uploaded_images, f"title_{int(time.time())}"
+        )
+        task, err = create_task(
+            "title",
+            {
+                "provider_id": provider.get("id", ""),
+                "product_info": product_info,
+                "template_prompt": final_prompt,
+                "title_language": title_language,
+                "image_paths": image_paths,
+                "summary": f"标题任务 · {get_target_language(title_language)['label']}",
+            },
+        )
+        if task:
+            schedule_task_workers()
+            st.success(f"✅ 已加入任务中心：{task['id']}")
+        else:
+            st.error(err)
 
     show_footer()
-
-
-# ==================== 图片翻译页面 ====================
-def show_image_translate_page():
-    if render_page_toolbar("图片翻译", "translate_restart", "重新开始翻译任务"):
-        reset_translate_task_state()
-        st.rerun()
-    st.markdown(
-        """
-    <div class="translate-header">
-        <div class="translate-logo">4</div>
-        <div>
-            <div class="translate-title">4 图片翻译</div>
-            <div class="translate-subtitle">批量翻译 · 英文出图 · 简化下载</div>
-        </div>
-    </div>
-    """,
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        "上传图片后默认直接生成英文译后图。当前只展示所选 provider 真正支持的翻译能力。"
-    )
-    render_translation_tips()
-
-    runtime_credentials = get_runtime_credentials()
-    active_provider = runtime_credentials.get("provider", "gemini")
-    active_model = runtime_credentials.get("model") or PRIMARY_IMAGE_MODEL
-    relay_text_model = get_relay_analysis_model()
-    if active_provider == "relay":
-        st.info(
-            f"当前翻译 provider：中转站 · 出图模型 `{active_model}` · 文本分析模型 `{relay_text_model}`"
-        )
-        if not runtime_credentials.get("api_key"):
-            st.warning("⚠️ 当前未配置可用的中转站凭据，请先在系统配置或我的凭据中填写。")
-            return
-    else:
-        st.info(f"当前翻译 provider：Gemini · 模型 `{PRIMARY_IMAGE_MODEL}`")
-        if not runtime_credentials.get("api_key"):
-            st.warning(
-                "⚠️ 当前未配置可用的 Gemini Key，请先在系统配置或我的凭据中填写。"
-            )
-            return
-
-    api_key = runtime_credentials.get("api_key", "")
-    if not api_key:
-        return
-    s = get_settings()
-    allowed_formats = parse_allowed_formats(
-        s.get("translate_allowed_formats", "png,jpg,jpeg,webp,heic,heif")
-    )
-    max_input = int(s.get("translate_max_input", 200))
-    batch_size = int(s.get("translate_batch_size", s.get("translate_max_upload", 20)))
-    max_file_mb = float(s.get("translate_max_file_mb", 7))
-    uid = get_user_id()
-
-    bg_tasks = list_task_center_tasks(uid, task_type="image_translate")
-    if bg_tasks:
-        st.markdown("### 🧵 后台任务")
-        c_refresh, c_hint = st.columns([1, 3])
-        with c_refresh:
-            if st.button("刷新后台任务", key="img_trans_bg_refresh"):
-                st.rerun()
-        with c_hint:
-            st.caption("已提交任务可在后台持续执行；你可继续上传并提交下一批。")
-        status_label = {
-            "queued": "排队中",
-            "running": "执行中",
-            "completed": "已完成",
-            "failed": "失败",
-        }
-        for task in bg_tasks[:12]:
-            task_id = task.get("id", "")
-            task_status = task.get("status", "queued")
-            total_items = int(task.get("total", 0) or 0)
-            done_items = int(task.get("done", 0) or 0)
-            c1, c2, c3, c4 = st.columns([1.8, 2.8, 1.6, 0.8])
-            with c1:
-                st.caption(f"任务ID: {task_id}")
-            with c2:
-                label = status_label.get(task_status, task_status)
-                if task_status in ("queued", "running"):
-                    st.write(f"{label} · {done_items}/{max(1, total_items)}")
-                    if total_items > 0:
-                        st.progress(min(1.0, done_items / total_items))
-                elif task_status == "completed":
-                    st.success(task.get("message", label))
-                else:
-                    st.error(task.get("error") or task.get("message") or label)
-            with c3:
-                if task_status == "completed":
-                    if st.button("加载结果", key=f"img_trans_bg_load_{task_id}"):
-                        full_task = get_task_center_task(
-                            uid, task_id, task_type="image_translate"
-                        )
-                        if full_task:
-                            restore_task_center_result(full_task)
-                        st.rerun()
-            with c4:
-                if task_status in ("completed", "failed"):
-                    if st.button("删除", key=f"img_trans_bg_del_{task_id}"):
-                        remove_task_center_task(uid, task_id)
-                        st.rerun()
-
-    # 已完成结果展示
-    if st.session_state.img_trans_done and st.session_state.img_trans_results:
-        st.markdown("## 翻译结果")
-        translated_only = [
-            r for r in st.session_state.img_trans_results if r.get("translated")
-        ]
-        summary = build_result_summary(
-            title="图片翻译结果",
-            success_count=len(translated_only),
-            total_count=len(st.session_state.img_trans_results),
-            token_count=st.session_state.get("img_trans_tokens_used", 0),
-            warning_count=0,
-            error_count=len(st.session_state.img_trans_errors),
-        )
-        render_result_summary_shell(summary)
-        guide_cols = st.columns(3)
-        with guide_cols[0]:
-            st.markdown(
-                '<div class="guide-card"><b>1 上传</b><br>支持批量图片，自动识别文本</div>',
-                unsafe_allow_html=True,
-            )
-        with guide_cols[1]:
-            st.markdown(
-                '<div class="guide-card"><b>2 翻译</b><br>北美电商英文 + 合规词策略</div>',
-                unsafe_allow_html=True,
-            )
-        with guide_cols[2]:
-            st.markdown(
-                '<div class="guide-card"><b>3 导出</b><br>勾选下载 / ZIP 压缩</div>',
-                unsafe_allow_html=True,
-            )
-        if st.session_state.img_trans_errors:
-            with st.expander(
-                f"⚠️ {len(st.session_state.img_trans_errors)} 个错误", expanded=False
-            ):
-                for err in st.session_state.img_trans_errors:
-                    st.error(err)
-
-        results = st.session_state.img_trans_results
-        text_blocks = []
-
-        if translated_only:
-            st.markdown("### 译后图速览")
-            grid_cols = st.columns(6)
-            for i, r in enumerate(translated_only):
-                with grid_cols[i % 6]:
-                    st.image(
-                        r.get("translated"),
-                        caption=f"{r.get('index', i + 1):02d}",
-                        width=120,
-                    )
-
-            option_labels = []
-            label_to_item = {}
-            for r in translated_only:
-                idx = r.get("index", 0)
-                base = r.get("base_name", f"image_{idx:02d}")
-                label = f"{idx:02d} - {base}"
-                option_labels.append(label)
-                label_to_item[label] = r
-
-            selected_labels = st.multiselect(
-                "勾选下载（集中选择）",
-                options=option_labels,
-                default=option_labels,
-                key="img_trans_batch_select",
-            )
-            selected_results = [
-                label_to_item[k] for k in selected_labels if k in label_to_item
-            ]
-            st.caption(
-                f"已勾选 {len(selected_results)}/{len(translated_only)} 张译后图"
-            )
-            with st.expander("统计信息", expanded=False):
-                st.write(f"总结果数: {len(results)}")
-                st.write(f"译后图数量: {len(translated_only)}")
-                st.write(
-                    f"总 Token: {st.session_state.get('img_trans_tokens_used', 0):,}"
-                )
-        else:
-            selected_results = []
-            st.info("本次任务未生成译后图，可在下方重试失败项。")
-
-        for i, r in enumerate(results, start=1):
-            src_lines = r.get("extracted_lines") or []
-            tgt_lines = r.get("translated_lines") or []
-            if src_lines or tgt_lines:
-                src_text = "\n".join(src_lines) if src_lines else "（未识别到文字）"
-                tgt_text = "\n".join(tgt_lines) if tgt_lines else "（未生成翻译）"
-                text_blocks.append(f"图{i}\n原文:\n{src_text}\n译文:\n{tgt_text}\n")
-
-        if translated_only:
-            preview_choice = st.selectbox(
-                "单图详情（可选）",
-                options=["不查看详情", *option_labels],
-                key="img_trans_preview_choice",
-            )
-            if preview_choice != "不查看详情":
-                picked = label_to_item.get(preview_choice)
-                if picked:
-                    idx = picked.get("index", 1)
-                    st.markdown(f"### 图{idx} 详情")
-                    st.image(picked.get("translated"), caption="翻译后", width=320)
-                    st.download_button(
-                        "下载该译后图",
-                        data=get_translated_png_bytes(picked),
-                        file_name=picked.get("filename", f"translated_{idx:02d}.png"),
-                        mime="image/png",
-                        key="img_trans_dl_preview",
-                    )
-                    if picked.get("compliance_hits"):
-                        st.warning(
-                            f"合规词命中: {', '.join(picked.get('compliance_hits'))}"
-                        )
-                    src_lines = picked.get("extracted_lines") or []
-                    tgt_lines = picked.get("translated_lines") or []
-                    if src_lines or tgt_lines:
-                        src_text = (
-                            "\n".join(src_lines) if src_lines else "（未识别到文字）"
-                        )
-                        tgt_text = (
-                            "\n".join(tgt_lines) if tgt_lines else "（未生成翻译）"
-                        )
-                        with st.expander("文本对照", expanded=False):
-                            st.text_area(
-                                "识别文字 / 翻译结果",
-                                f"原文:\n{src_text}\n\n译文:\n{tgt_text}",
-                                height=140,
-                                key="img_trans_text_preview",
-                            )
-
-        st.markdown("---")
-        st.markdown("### 批量下载")
-        scope = st.radio(
-            "下载范围",
-            ["仅勾选", "全部译后图"],
-            horizontal=True,
-            key="img_trans_dl_scope",
-        )
-        pack_items = selected_results if scope == "仅勾选" else translated_only
-        zip_name = f"translated_images_{date.today()}.zip"
-
-        if pack_items:
-            pack_indices = sorted(
-                [r.get("index", 0) for r in pack_items if r.get("translated")]
-            )
-            results_signature = "|".join(
-                [
-                    f"{r.get('index', 0)}:{1 if r.get('translated') else 0}"
-                    for r in results
-                ]
-            )
-            zip_cache_key = (
-                f"{results_signature}__{','.join([str(i) for i in pack_indices])}"
-            )
-            zip_cache = st.session_state.get("img_trans_zip_cache", {})
-            if zip_cache.get("key") != zip_cache_key:
-                with st.spinner("正在打包 ZIP..."):
-                    zip_cache = {
-                        "key": zip_cache_key,
-                        "bytes": create_translate_zip(pack_items),
-                    }
-                    st.session_state.img_trans_zip_cache = zip_cache
-            zip_bytes = st.session_state.get("img_trans_zip_cache", {}).get(
-                "bytes", b""
-            )
-            if zip_bytes:
-                st.download_button(
-                    "下载 ZIP",
-                    data=zip_bytes,
-                    file_name=zip_name,
-                    mime="application/zip",
-                    type="primary",
-                    use_container_width=True,
-                )
-        else:
-            st.caption("未选择任何译后图")
-
-        if text_blocks:
-            st.download_button(
-                "下载翻译文本 (TXT)",
-                data="\n\n".join(text_blocks).encode("utf-8"),
-                file_name=f"translations_{date.today()}.txt",
-                mime="text/plain",
-                use_container_width=True,
-            )
-
-        st.markdown(
-            f'<div class="token-badge">🎯 消耗: {st.session_state.get("img_trans_tokens_used", 0):,} tokens</div>',
-            unsafe_allow_html=True,
-        )
-
-        opts = st.session_state.get("img_trans_last_options", {})
-        source_items = st.session_state.get("img_trans_source_items", [])
-        need_text_last = opts.get("need_text", False)
-        need_image_last = opts.get("need_image", False)
-        failed_indices = []
-        for r in results:
-            fail = False
-            if need_image_last and not r.get("translated"):
-                fail = True
-            if need_text_last and not r.get("translated_lines"):
-                fail = True
-            if fail:
-                failed_indices.append(r.get("index"))
-        failed_indices = list(dict.fromkeys([i for i in failed_indices if i]))
-
-        if failed_indices and st.button("重试失败项", use_container_width=True):
-            retry_items = []
-            for idx in failed_indices:
-                if idx and idx - 1 < len(source_items):
-                    item = source_items[idx - 1]
-                    if item.get("image") is not None:
-                        retry_items.append(item)
-            if retry_items:
-                retried_results, _retry_errors, retry_tokens = (
-                    execute_image_translate_workload(
-                        api_key,
-                        retry_items,
-                        opts,
-                    )
-                )
-                retry_map = {item.get("index"): item for item in retried_results}
-                for i, r in enumerate(results):
-                    idx = r.get("index")
-                    if idx in retry_map:
-                        results[i] = retry_map[idx]
-            st.session_state.img_trans_results = results
-            st.session_state.img_trans_zip_cache = {"key": "", "bytes": b""}
-            st.session_state.img_trans_tokens_used += retry_tokens
-            st.session_state.session_tokens += retry_tokens
-            st.rerun()
-
-        if st.button("开始新任务", type="primary", use_container_width=True):
-            st.session_state.img_trans_results = []
-            st.session_state.img_trans_errors = []
-            st.session_state.img_trans_done = False
-            st.session_state.img_trans_tokens_used = 0
-            st.session_state.img_trans_zip_cache = {"key": "", "bytes": b""}
-            st.rerun()
-
-        show_footer()
-        return
-
-    with st.expander("使用说明"):
-        st.markdown("支持电商主图/详情图翻译。可仅翻译文本，或生成翻译后图片。")
-        batch_hint = batch_size if batch_size > 0 else "自动"
-        st.caption(
-            f"单次最多 {max_input} 张（安全限制），系统自动分批（每批 {batch_hint} 张）。单张大小上限 {max_file_mb:g} MB，允许格式：{', '.join(allowed_formats) if allowed_formats else '未配置'}"
-        )
-
-    st.markdown('<div class="form-card">', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="section-title">上传图片 <span class="section-chip">批量</span></div>',
-        unsafe_allow_html=True,
-    )
-    files = st.file_uploader(
-        "上传图片",
-        type=allowed_formats
-        if allowed_formats
-        else ["png", "jpg", "jpeg", "webp", "heic", "heif"],
-        accept_multiple_files=True,
-        label_visibility="collapsed",
-        key="img_translate_upload",
-    )
-    upload_items = []
-    invalid_msgs = []
-    if files:
-        if max_input > 0 and len(files) > max_input:
-            invalid_msgs.append(
-                f"超过最大上传数量 {max_input} 张，仅处理前 {max_input} 张"
-            )
-            files = files[:max_input]
-        for f in files:
-            ext = Path(f.name).suffix.lower().lstrip(".")
-            size_mb = (f.size / (1024 * 1024)) if hasattr(f, "size") else 0
-            if allowed_formats and ext not in allowed_formats:
-                invalid_msgs.append(f"{f.name}: 不支持的格式 ({ext})")
-                continue
-            if max_file_mb and size_mb > max_file_mb:
-                invalid_msgs.append(
-                    f"{f.name}: 文件过大 {size_mb:.2f}MB > {max_file_mb:g}MB"
-                )
-                continue
-            try:
-                img = Image.open(f).convert("RGB")
-            except Exception:
-                invalid_msgs.append(f"{f.name}: 无法读取图片")
-                continue
-            upload_items.append(
-                {
-                    "image": img,
-                    "name": Path(f.name).stem,
-                    "raw_name": f.name,
-                    "ext": ext,
-                }
-            )
-
-        if batch_size > 0 and len(upload_items) > batch_size:
-            batches = (len(upload_items) + batch_size - 1) // batch_size
-            st.info(
-                f"已加入 {len(upload_items)} 张，将自动分 {batches} 批处理（每批 {batch_size} 张）"
-            )
-
-        if upload_items:
-            render_thumbnail_gallery(
-                [item["image"] for item in upload_items], "translate"
-            )
-            st.success(f"✅ 已加载 {len(upload_items)} 张图片")
-
-        if invalid_msgs:
-            with st.expander(f"⚠️ {len(invalid_msgs)} 个文件未进入队列", expanded=False):
-                for msg in invalid_msgs:
-                    st.error(msg)
-
-    images = [item["image"] for item in upload_items]
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    st.markdown('<div class="form-card">', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="section-title">基础设置 <span class="section-chip">语言 & 风格</span></div>',
-        unsafe_allow_html=True,
-    )
-    c1, c2 = st.columns(2)
-    lang_keys = list(LANGUAGE_OPTIONS.keys())
-    target_keys = [k for k in lang_keys if k != "auto"]
-    with c1:
-        source_lang = st.selectbox(
-            "源语言",
-            lang_keys,
-            format_func=lambda x: LANGUAGE_OPTIONS[x],
-            index=0,
-            key="img_trans_source",
-        )
-    with c2:
-        default_target = target_keys.index("en") if "en" in target_keys else 0
-        target_lang = st.selectbox(
-            "目标语言",
-            target_keys,
-            format_func=lambda x: LANGUAGE_OPTIONS[x],
-            index=default_target,
-            key="img_trans_target",
-        )
-
-    output_options = ["仅文本翻译", "生成翻译图片", "文本+翻译图片"]
-    if active_provider == "relay":
-        if not model_supports("relay", relay_text_model, "text_generation"):
-            st.warning(
-                f"⚠️ 当前 relay 分析模型 `{relay_text_model}` 不支持文本提取/翻译。"
-            )
-            return
-        if not model_supports("relay", active_model, "image_translate"):
-            output_options = ["仅文本翻译"]
-            st.warning(get_translation_provider_message("relay", active_model))
-    default_output = s.get("translate_default_output_mode", "生成翻译图片")
-    output_mode = st.radio(
-        "输出模式",
-        output_options,
-        index=output_options.index(default_output)
-        if default_output in output_options
-        else 0,
-        horizontal=True,
-        key="img_trans_mode",
-    )
-    fast_text_mode = st.checkbox(
-        "极速文本链路（OCR+翻译合并）",
-        value=bool(s.get("translate_fast_text_mode", True)),
-        help="仅文本或文本+出图时，优先用单次请求完成提取+翻译，通常更快。",
-        key="img_trans_fast_text_mode",
-    )
-    style_choice = st.radio(
-        "翻译风格",
-        ["北美电商英文（标准）", "北美电商英文（偏营销）"],
-        horizontal=True,
-        key="img_trans_style",
-    )
-    keep_layout = st.checkbox(
-        "严格保持版式/字体/配色", value=True, key="img_trans_layout"
-    )
-    cleanup_cn_overlay_default = bool(s.get("translate_cleanup_chinese_overlay", True))
-    cleanup_cn_overlay = st.checkbox(
-        "清理中文覆盖文案/角标（默认开启）",
-        value=cleanup_cn_overlay_default,
-        help="清理非产品主体的中文叠字、角标、印章样式覆盖文字；品牌/商标 Logo 会保留。",
-        key="img_trans_cleanup_cn_overlay",
-    )
-    target_is_english = target_lang == "en"
-    force_english_default = bool(s.get("translate_force_english_output", True))
-    retries_default = int(s.get("translate_english_max_retries", 2))
-    retries_default = max(1, min(5, retries_default))
-    force_english_output = st.checkbox(
-        "强制英文规范输出（Amazon/TEMU）",
-        value=force_english_default if target_is_english else False,
-        disabled=not target_is_english,
-        help="目标语言为 English 时，自动校验中文残留并触发重试。",
-        key="img_trans_force_english",
-    )
-    english_retry_max = st.number_input(
-        "英文校验重试次数",
-        min_value=1,
-        max_value=5,
-        value=retries_default,
-        disabled=not target_is_english,
-        key="img_trans_english_retries",
-    )
-    if not target_is_english:
-        force_english_output = False
-        english_retry_max = 1
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    need_text = output_mode in ["仅文本翻译", "文本+翻译图片"]
-    need_image = output_mode in ["生成翻译图片", "文本+翻译图片"]
-
-    size_strategy = s.get("translate_default_size_strategy", "保留原比例")
-    ratio_method = s.get("translate_default_ratio_method", "补边(白色)")
-    target_ratio = s.get("translate_default_ratio", "1:1")
-    force_1k = False
-
-    text_model_key = (
-        get_relay_analysis_model()
-        if active_provider == "relay"
-        else s.get("translate_text_model", PRIMARY_IMAGE_MODEL)
-    )
-    if active_provider != "relay" and text_model_key not in MODELS:
-        text_model_key = PRIMARY_IMAGE_MODEL
-    text_workers = int(s.get("translate_text_workers", 2))
-    text_workers = max(1, min(6, text_workers))
-
-    if need_image:
-        st.markdown('<div class="form-card">', unsafe_allow_html=True)
-        st.markdown(
-            '<div class="section-title">尺寸/比例策略 <span class="section-chip">输出</span></div>',
-            unsafe_allow_html=True,
-        )
-        strategy_options = ["保留原比例", "强制1:1", "自定义比例"]
-        size_strategy = st.radio(
-            "尺寸策略",
-            strategy_options,
-            index=strategy_options.index(size_strategy)
-            if size_strategy in strategy_options
-            else 0,
-            horizontal=True,
-            key="img_trans_ratio_strategy",
-        )
-        ratio_method = st.selectbox(
-            "处理方式",
-            ["居中裁切", "补边(白色)", "补边(边缘取色)"],
-            index=["居中裁切", "补边(白色)", "补边(边缘取色)"].index(ratio_method)
-            if ratio_method in ["居中裁切", "补边(白色)", "补边(边缘取色)"]
-            else 1,
-            key="img_trans_ratio_method",
-        )
-        if size_strategy == "自定义比例":
-            target_ratio = st.selectbox(
-                "目标比例",
-                ASPECT_RATIOS,
-                index=ASPECT_RATIOS.index(target_ratio)
-                if target_ratio in ASPECT_RATIOS
-                else 0,
-                key="img_trans_ratio",
-            )
-        elif size_strategy == "强制1:1":
-            target_ratio = "1:1"
-            force_1k = st.checkbox(
-                "强制 1K (1024×1024)", value=True, key="img_trans_force_1k"
-            )
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    model_key = None
-    size = "1K"
-    thinking_level = "minimal"
-    if need_image:
-        st.markdown('<div class="form-card">', unsafe_allow_html=True)
-        st.markdown(
-            '<div class="section-title">翻译出图模型 <span class="section-chip">模型</span></div>',
-            unsafe_allow_html=True,
-        )
-        s = get_settings()
-        if active_provider == "relay":
-            model_key = active_model
-            st.caption(f"当前 relay 出图模型：{model_key}")
-            size = "1K"
-            thinking_level = "minimal"
-            st.caption(f"文本分析模型: {text_model_key}")
-        else:
-            model_key = PRIMARY_IMAGE_MODEL
-            st.caption(f"当前固定模型：{MODELS[model_key]['name']}")
-            size, thinking_level = render_image_translate_settings(
-                "img_trans", model_key, s.get("translate_default_resolution", "1K")
-            )
-            st.caption(
-                f"文本链路模型: {MODELS.get(text_model_key, {}).get('name', text_model_key)}"
-            )
-        st.markdown("</div>", unsafe_allow_html=True)
-    else:
-        st.markdown('<div class="form-card">', unsafe_allow_html=True)
-        st.markdown(
-            '<div class="section-title">文本翻译模型 <span class="section-chip">速度优先</span></div>',
-            unsafe_allow_html=True,
-        )
-        if active_provider == "relay":
-            st.caption(f"当前 relay 文本分析模型：{text_model_key}")
-        else:
-            text_model_key = PRIMARY_IMAGE_MODEL
-            st.caption(f"当前固定模型：{MODELS[text_model_key]['name']}")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    st.markdown('<div class="form-card">', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="section-title">合规词策略 <span class="section-chip">风险控制</span></div>',
-        unsafe_allow_html=True,
-    )
-    enable_comp = st.checkbox("启用合规词处理", value=True, key="img_trans_comp_enable")
-    comp_strategy = st.radio(
-        "合规词策略",
-        ["保留", "追加", "模板"],
-        horizontal=True,
-        key="img_trans_comp_strategy",
-    )
-
-    all_tpls, enabled_tpls = get_translate_compliance_templates()
-    tpl_keys = list(enabled_tpls.keys()) if enabled_tpls else ["default"]
-    default_tpl = s.get("translate_default_compliance_template", "default")
-    if default_tpl not in tpl_keys:
-        default_tpl = tpl_keys[0]
-    selected_tpl = default_tpl
-    user_words_text = ""
-    if comp_strategy == "模板":
-        selected_tpl = st.selectbox(
-            "选择模板",
-            tpl_keys,
-            format_func=lambda x: enabled_tpls.get(x, all_tpls.get(x, {})).get(
-                "name", x
-            ),
-            index=tpl_keys.index(default_tpl),
-            key="img_trans_comp_tpl",
-        )
-        user_words_text = st.text_area(
-            "追加合规词 (可选)", height=80, key="img_trans_comp_user_words_tpl"
-        )
-    elif comp_strategy == "追加":
-        user_words_text = st.text_area(
-            "追加合规词", height=80, key="img_trans_comp_user_words"
-        )
-
-    user_words = parse_compliance_words(user_words_text)
-    base_words = []
-    if comp_strategy in ("保留", "追加"):
-        base_words = all_tpls.get(default_tpl, {}).get("words", [])
-    elif comp_strategy == "模板":
-        base_words = all_tpls.get(selected_tpl, {}).get("words", [])
-    effective_words = list(dict.fromkeys(base_words + user_words))
-
-    if enable_comp:
-        with st.expander("当前生效合规词", expanded=False):
-            if effective_words:
-                st.write("、".join(effective_words))
-            else:
-                st.caption("暂无合规词")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    run_mode = st.radio(
-        "执行方式",
-        ["前台处理（当前页等待）", "后台排队（可并发）"],
-        index=0,
-        horizontal=True,
-        key="img_trans_run_mode",
-    )
-    st.caption(
-        f"当前后台并发上限：{int(s.get('translate_bg_max_concurrent', 2))}（管理员可调整）"
-    )
-
-    can_run = bool(upload_items)
-    start_label = "提交后台任务" if run_mode.startswith("后台") else "开始处理"
-    render_action_reasons(
-        "处理前检查",
-        translate_generate_reasons(
-            upload_count=len(upload_items),
-            need_text=need_text,
-            need_image=need_image,
-            provider=active_provider,
-            text_supported=(
-                True
-                if active_provider != "relay"
-                else model_supports("relay", text_model_key, "text_generation")
-            ),
-            image_supported=(
-                True
-                if active_provider != "relay"
-                else (
-                    model_key is not None
-                    and model_supports("relay", model_key, "image_translate")
-                )
-            ),
-        ),
-        success_note="当前 provider 支持所选任务，可以开始处理。",
-    )
-    if active_provider == "relay":
-        required_caps = []
-        if need_text:
-            required_caps.append("text_generation")
-        if need_image:
-            required_caps.append("image_translate")
-        render_action_reasons(
-            "模型能力检查",
-            describe_capability_reasons(
-                provider="relay",
-                image_model=active_model,
-                analysis_model=relay_text_model,
-                required_capabilities=required_caps,
-            ),
-        )
-    if st.button(
-        start_label, type="primary", use_container_width=True, disabled=not can_run
-    ):
-        if not upload_items:
-            st.warning("请先上传图片")
-            return
-
-        try:
-            required_caps = []
-            if need_text:
-                required_caps.append("text_generation")
-            if need_image:
-                required_caps.append("image_translate")
-            ensure_provider_route_ready(
-                provider=active_provider,
-                relay_base=runtime_credentials.get("base_url") or RELAY_API_BASE,
-                relay_key=runtime_credentials.get("api_key", ""),
-                image_model=active_model,
-                analysis_model=relay_text_model,
-                required_capabilities=required_caps,
-            )
-        except Exception as e:
-            st.error(format_runtime_error_message(e, 220))
-            return
-
-        if not st.session_state.use_own_key:
-            allowed, used, limit = check_user_limit(uid)
-            if not allowed or (limit > 0 and used + len(upload_items) > limit):
-                st.error(f"⚠️ 今日额度不足 (已用 {used}/{limit})")
-                return
-
-        avoid_terms = effective_words if enable_comp else []
-        enforce_english_output = bool(force_english_output) and (target_lang == "en")
-        english_retry_max = max(1, min(5, int(english_retry_max)))
-
-        last_options = {
-            "provider": active_provider,
-            "relay_base": runtime_credentials.get("base_url") or RELAY_API_BASE,
-            "source_lang": source_lang,
-            "target_lang": target_lang,
-            "style_choice": style_choice,
-            "keep_layout": keep_layout,
-            "fast_text_mode": fast_text_mode,
-            "text_model_key": text_model_key,
-            "text_workers": text_workers,
-            "need_text": need_text,
-            "need_image": need_image,
-            "size_strategy": size_strategy,
-            "ratio_method": ratio_method,
-            "target_ratio": target_ratio,
-            "force_1k": force_1k,
-            "model_key": model_key or PRIMARY_IMAGE_MODEL,
-            "size": size,
-            "thinking_level": thinking_level,
-            "enable_comp": enable_comp,
-            "avoid_terms": avoid_terms,
-            "force_english_output": enforce_english_output,
-            "english_retry_max": english_retry_max,
-            "cleanup_cn_overlay": cleanup_cn_overlay,
-        }
-        job_options = {**last_options, "batch_size": batch_size}
-
-        if run_mode.startswith("后台"):
-            try:
-                bg_task_id = submit_task_center_task(
-                    owner_id=uid,
-                    task_type="image_translate",
-                    payload={
-                        "owner_id": uid,
-                        "api_key": api_key,
-                        "upload_items": upload_items,
-                        "options": job_options,
-                        "last_options": last_options,
-                        "charge_usage": not st.session_state.use_own_key,
-                        "total": len(upload_items),
-                    },
-                    max_concurrent=int(s.get("translate_bg_max_concurrent", 2)),
-                )
-                st.success(f"✅ 已提交后台任务：{bg_task_id}")
-                st.info("你可以继续提交下一批任务，完成后在“后台任务”里加载结果。")
-                st.rerun()
-            except Exception as e:
-                st.error(format_runtime_error_message(e, 220))
-            return
-
-        progress = st.progress(0)
-        status = st.empty()
-        log_container = st.empty()
-        total = len(upload_items)
-        status.info(format_translate_status(0, max(1, total), "处理中"))
-
-        def progress_cb(current, task_total, phase):
-            safe_total = max(1, int(task_total or 1))
-            safe_current = max(0, int(current or 0))
-            progress.progress(min(1.0, safe_current / safe_total))
-            status.info(format_translate_status(safe_current, safe_total, phase))
-
-        def log_cb(msg):
-            if msg:
-                log_container.info(msg)
-
-        results, errors, tokens_used = execute_image_translate_workload(
-            api_key, upload_items, job_options, progress_cb=progress_cb, log_cb=log_cb
-        )
-
-        st.session_state.session_tokens += tokens_used
-        st.session_state.img_trans_results = results
-        st.session_state.img_trans_errors = errors
-        st.session_state.img_trans_tokens_used = tokens_used
-        st.session_state.img_trans_done = True
-        st.session_state.img_trans_zip_cache = {"key": "", "bytes": b""}
-        st.session_state.img_trans_source_items = upload_items
-        st.session_state.img_trans_last_options = last_options
-
-        if results and not st.session_state.use_own_key:
-            update_user_usage(uid, len(results), tokens_used)
-            update_stats(
-                len(results), tokens_used, image_count=count_generated_images(results)
-            )
-
-        if results:
-            record_platform_usage_event_safe(
-                feature="image_translate",
-                provider="中转站" if active_provider == "relay" else "Gemini",
-                model=model_key or PRIMARY_IMAGE_MODEL,
-                request_count=len(upload_items),
-                output_images=count_generated_images(results),
-                tokens_used=tokens_used,
-                charge_source="own_key"
-                if st.session_state.use_own_key
-                else "system_pool",
-                actor_label=uid,
-                operation_key=f"fg-image-translate:{uid}:{int(time.time() * 1000)}",
-                metadata_json={"mode": "foreground", "errors": len(errors)},
-            )
-
-        status.success(f"✅ 完成！成功 {len(results) - len(errors)}/{len(results)} 张")
-        st.rerun()
-
-    show_footer()
-
-
-# ==================== 管理后台 ====================
-def show_admin():
-    if not st.session_state.get("is_admin"):
-        st.error("仅管理员可访问后台")
-        return
-
-    st.markdown('<div class="page-title">⚙️ 管理后台</div>', unsafe_allow_html=True)
-
-    s = get_settings()
-    runtime_mode = current_runtime_mode()
-    tab_labels = [
-        "📊 基础设置",
-        "🔐 密码配额",
-        "🔑 API Keys",
-        "🛡️ 合规设置",
-        "📝 提示词",
-        "🏷️ 标题模板",
-        "🎨 组图模板",
-    ]
-    if should_show_team_features(runtime_mode):
-        tab_labels.extend(
-            ["👥 用户管理", "🏢 团队工作区", "💳 定价规则", "🏦 钱包账本", "🎟️ 兑换码"]
-        )
-    tabs = st.tabs(tab_labels)
-
-    with tabs[0]:
-        st.markdown("### 📊 系统统计")
-        stats = get_stats()
-        users = get_users()
-        c1, c2, c3, c4, c5, c6 = st.columns(6)
-        with c1:
-            st.metric("总生成次数", stats.get("total", 0))
-        with c2:
-            st.metric(
-                "今日生成", stats.get("daily", {}).get(date.today().isoformat(), 0)
-            )
-        with c3:
-            st.metric("Token消耗", f"{stats.get('tokens_total', 0):,}")
-        with c4:
-            st.metric("用户数", len(users))
-        with c5:
-            st.metric("累计出图张数", stats.get("images_total", 0))
-        with c6:
-            st.metric(
-                "今日出图张数",
-                stats.get("daily_images", {}).get(date.today().isoformat(), 0),
-            )
-
-        st.markdown("---")
-        st.markdown("### 🗄️ 文件存储")
-        st.selectbox(
-            "存储类型",
-            ["local", "s3"],
-            index=0 if s.get("file_storage_type", "local") == "local" else 1,
-            key="storage_type",
-        )
-        s["file_storage_type"] = st.session_state.get("storage_type", "local")
-        s["file_retention_days"] = st.number_input(
-            "保留天数", 1, 365, s.get("file_retention_days", 7)
-        )
-        s["file_storage_path"] = st.text_input(
-            "存储路径", s.get("file_storage_path", "/app/data/files")
-        )
-
-        if s["file_storage_type"] == "s3":
-            with st.expander("S3配置"):
-                s["s3_endpoint"] = st.text_input("Endpoint", s.get("s3_endpoint", ""))
-                s["s3_bucket"] = st.text_input("Bucket", s.get("s3_bucket", ""))
-                s["s3_region"] = st.text_input("Region", s.get("s3_region", ""))
-                s["s3_access_key"] = st.text_input(
-                    "Access Key", s.get("s3_access_key", ""), type="password"
-                )
-                s["s3_secret_key"] = st.text_input(
-                    "Secret Key", s.get("s3_secret_key", ""), type="password"
-                )
-
-        if st.button("💾 保存", type="primary", key="save_basic"):
-            save_settings(s)
-            st.success("✅ 已保存")
-
-    with tabs[1]:
-        if current_runtime_mode() == "team_mode":
-            st.info(
-                "团队数据库已启用时，普通用户通过注册账号登录；这里保留的是管理员密码和旧版回退设置。"
-            )
-        c1, c2 = st.columns(2)
-        with c1:
-            s["admin_password"] = st.text_input(
-                "管理员密码", s.get("admin_password"), type="password"
-            )
-        with c2:
-            s["daily_limit_user"] = st.number_input(
-                "管理员工具模式默认日限额", 1, 1000, s.get("daily_limit_user", 30)
-            )
-        if current_runtime_mode() == "team_mode":
-            s["allow_user_passwordless_login"] = st.checkbox(
-                "允许旧版系统服务用户免密登录（仅数据库未就绪时回退使用）",
-                value=bool(s.get("allow_user_passwordless_login", False)),
-            )
-            if _parse_env_bool("ALLOW_PASSWORDLESS_USER_LOGIN") is not None:
-                st.info(
-                    "检测到环境变量 `ALLOW_PASSWORDLESS_USER_LOGIN`，重启后会按环境变量值覆盖。"
-                )
-        else:
-            st.caption(
-                "当前为管理员工具模式，普通系统服务用户入口与团队注册入口已隐藏。"
-            )
-        if (os.getenv("ADMIN_PASSWORD_FIXED") or "").strip() or (
-            os.getenv("USER_PASSWORD_FIXED") or ""
-        ).strip():
-            st.info("检测到固定密码环境变量，重启后会自动注入。")
-
-        st.markdown("---")
-        st.markdown("### 🤖 默认设置")
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            s["default_model"] = PRIMARY_IMAGE_MODEL
-            st.text_input(
-                "默认模型",
-                MODELS[PRIMARY_IMAGE_MODEL]["name"],
-                disabled=True,
-                key="admin_default_model_locked",
-            )
-        with c2:
-            s["default_resolution"] = "1K"
-            st.selectbox(
-                "默认分辨率", ["1K"], index=0, key="admin_default_resolution_locked"
-            )
-        with c3:
-            s["default_aspect"] = st.selectbox(
-                "默认宽高比",
-                ASPECT_RATIOS,
-                index=ASPECT_RATIOS.index(s.get("default_aspect", "1:1")),
-            )
-        s["default_image_provider"] = st.selectbox(
-            "默认出图引擎",
-            ["Gemini", "中转站"],
-            index=0 if s.get("default_image_provider", "Gemini") == "Gemini" else 1,
-        )
-        if s["default_image_provider"] == "中转站":
-            s["relay_default_image_model"] = st.selectbox(
-                "默认中转站模型",
-                list(RELAY_IMAGE_MODELS.keys()),
-                index=list(RELAY_IMAGE_MODELS.keys()).index(
-                    s.get("relay_default_image_model", "imagine_x_1")
-                )
-                if s.get("relay_default_image_model", "imagine_x_1")
-                in RELAY_IMAGE_MODELS
-                else 0,
-            )
-        st.caption("当前官方出图模型为 Gemini 2.5 Flash Image。")
-        st.markdown("---")
-        s["enforce_english_text"] = st.checkbox(
-            "强制英文文本校验（自动重试）", value=s.get("enforce_english_text", False)
-        )
-        s["english_text_max_retries"] = st.number_input(
-            "英文校验最大重试次数", 1, 5, int(s.get("english_text_max_retries", 1))
-        )
-        st.caption("关闭可减少 Token 消耗并提升速度；建议通过提示词约束英文输出。")
-
-        if st.button("💾 保存", type="primary", key="save_pwd"):
-            save_settings(s)
-            st.success("✅ 已保存")
-
-        st.markdown("---")
-        st.markdown("### 🈯 图片翻译默认设置")
-        t_c1, t_c2, t_c3 = st.columns(3)
-        with t_c1:
-            s["translate_max_input"] = st.number_input(
-                "单次最大上传量（硬限制）", 1, 900, s.get("translate_max_input", 200)
-            )
-            s["translate_batch_size"] = st.number_input(
-                "自动分批大小（非限制）", 1, 200, s.get("translate_batch_size", 20)
-            )
-            s["translate_max_file_mb"] = st.number_input(
-                "单张大小上限 (MB)", 1, 30, s.get("translate_max_file_mb", 7)
-            )
-            st.caption("超过最大上传量会被截断；超过分批大小将自动拆批处理。")
-        with t_c2:
-            s["translate_allowed_formats"] = st.text_input(
-                "允许格式 (逗号分隔)",
-                s.get("translate_allowed_formats", "png,jpg,jpeg,webp,heic,heif"),
-            )
-            s["translate_default_output_mode"] = st.selectbox(
-                "默认导出模式",
-                ["仅文本翻译", "生成翻译图片", "文本+翻译图片"],
-                index=["仅文本翻译", "生成翻译图片", "文本+翻译图片"].index(
-                    s.get("translate_default_output_mode", "生成翻译图片")
-                ),
-            )
-            s["translate_text_model"] = PRIMARY_IMAGE_MODEL
-            st.text_input(
-                "文本链路模型（OCR/文本翻译）",
-                MODELS[PRIMARY_IMAGE_MODEL]["name"],
-                disabled=True,
-                key="admin_translate_text_model_locked",
-            )
-            s["translate_fast_text_mode"] = st.checkbox(
-                "启用极速文本链路（单次OCR+翻译）",
-                value=bool(s.get("translate_fast_text_mode", True)),
-            )
-            s["translate_force_english_output"] = st.checkbox(
-                "英文目标启用强制英文校验",
-                value=bool(s.get("translate_force_english_output", True)),
-            )
-            s["translate_english_max_retries"] = st.number_input(
-                "翻译英文校验最大重试次数",
-                1,
-                5,
-                int(s.get("translate_english_max_retries", 2)),
-            )
-            s["translate_cleanup_chinese_overlay"] = st.checkbox(
-                "默认清理中文覆盖文案/角标",
-                value=bool(s.get("translate_cleanup_chinese_overlay", True)),
-            )
-            s["translate_bg_max_concurrent"] = st.number_input(
-                "后台并发任务上限（同时运行任务数）",
-                1,
-                6,
-                int(s.get("translate_bg_max_concurrent", 2)),
-            )
-        with t_c3:
-            s["translate_default_size_strategy"] = st.selectbox(
-                "默认尺寸策略",
-                ["保留原比例", "强制1:1", "自定义比例"],
-                index=["保留原比例", "强制1:1", "自定义比例"].index(
-                    s.get("translate_default_size_strategy", "保留原比例")
-                ),
-            )
-            s["translate_default_ratio"] = st.selectbox(
-                "默认目标比例",
-                ASPECT_RATIOS,
-                index=ASPECT_RATIOS.index(s.get("translate_default_ratio", "1:1")),
-            )
-            s["translate_default_ratio_method"] = st.selectbox(
-                "默认比例处理方式",
-                ["居中裁切", "补边(白色)", "补边(边缘取色)"],
-                index=["居中裁切", "补边(白色)", "补边(边缘取色)"].index(
-                    s.get("translate_default_ratio_method", "补边(白色)")
-                ),
-            )
-            s["translate_default_model"] = PRIMARY_IMAGE_MODEL
-            st.text_input(
-                "默认翻译模型",
-                MODELS[PRIMARY_IMAGE_MODEL]["name"],
-                disabled=True,
-                key="admin_translate_default_model_locked",
-            )
-            s["translate_default_resolution"] = "1K"
-            st.selectbox(
-                "默认翻译出图分辨率",
-                ["1K"],
-                index=0,
-                key="admin_translate_default_resolution_locked",
-            )
-            s["translate_text_workers"] = st.number_input(
-                "文本并发线程数（仅文本模式）",
-                min_value=1,
-                max_value=6,
-                value=int(s.get("translate_text_workers", 2)),
-            )
-            all_tpls, enabled_tpls = get_translate_compliance_templates()
-            tpl_keys = list(enabled_tpls.keys()) if enabled_tpls else ["default"]
-            if s.get("translate_default_compliance_template") not in tpl_keys:
-                s["translate_default_compliance_template"] = tpl_keys[0]
-            s["translate_default_compliance_template"] = st.selectbox(
-                "默认合规词模板",
-                tpl_keys,
-                format_func=lambda x: enabled_tpls.get(x, all_tpls.get(x, {})).get(
-                    "name", x
-                ),
-                index=tpl_keys.index(
-                    s.get("translate_default_compliance_template", tpl_keys[0])
-                ),
-            )
-        if st.button(
-            "💾 保存翻译默认设置", type="primary", key="save_translate_defaults"
-        ):
-            save_settings(s)
-            st.success("✅ 已保存")
-
-    with tabs[2]:
-        settings_sections = build_settings_sections()
-        st.markdown("### 🔑 API Key管理")
-        st.markdown(
-            f'<div class="info-card"><strong>{settings_sections["system"]["gemini"]["title"]}</strong><br><span style="font-size:13px;color:#64748b">{settings_sections["system"]["gemini"]["desc"]}</span></div>',
-            unsafe_allow_html=True,
-        )
-        if platform_database_enabled() and platform_encryption_available():
-            st.success("系统 API Key 将加密保存在 PostgreSQL，不会以明文展示。")
-        elif platform_database_enabled():
-            st.warning(
-                "当前未配置 `PLATFORM_ENCRYPTION_KEY`，新保存的系统 API Key 将退回本地文件存储。上线前建议补齐加密密钥。"
-            )
-        fixed_keys_env = (os.getenv("SYSTEM_API_KEYS_FIXED") or "").strip()
-        if fixed_keys_env:
-            sync_mode = (
-                (os.getenv("SYSTEM_API_KEYS_SYNC_MODE") or "if_empty").strip().lower()
-            )
-            st.info(
-                f"检测到环境变量 `SYSTEM_API_KEYS_FIXED`，同步模式：`{sync_mode}`。"
-            )
-        with st.expander("➕ 添加新Key"):
-            new_key = st.text_input("API Key", type="password", key="new_key_input")
-            new_name = st.text_input("备注", key="new_key_name")
-            if st.button("添加", type="primary"):
-                if new_key:
-                    keys_data = get_api_keys()
-                    keys_data["keys"].append(
-                        {
-                            "key": new_key.strip(),
-                            "name": new_name or f"Key-{len(keys_data['keys']) + 1}",
-                            "enabled": True,
-                        }
-                    )
-                    save_api_keys(keys_data)
-                    st.success("✅ 已添加")
-                    st.rerun()
-
-        keys_data = get_api_keys()
-        secure_previews = []
-        if platform_database_enabled():
-            try:
-                with session_scope() as session:
-                    secure_previews = list_secure_api_key_previews(session)
-            except Exception:
-                secure_previews = []
-        for i, k in enumerate(keys_data.get("keys", [])):
-            key_val = k.get("key", "")
-            preview_data = secure_previews[i] if i < len(secure_previews) else {}
-            key_display = preview_data.get("preview") or mask_api_key(key_val)
-            c1, c2, c3, c4 = st.columns([3, 1.5, 1, 1])
-            with c1:
-                st.text(f"{k.get('name', '')}: {key_display}")
-            with c2:
-                st.text(k.get("expires", "永久")[:10] if k.get("expires") else "永久")
-            with c3:
-                keys_data["keys"][i]["enabled"] = st.checkbox(
-                    "启用", k.get("enabled", True), key=f"key_en_{i}"
-                )
-            with c4:
-                if st.button("删除", key=f"key_del_{i}"):
-                    keys_data["keys"].pop(i)
-                    save_api_keys(keys_data)
-                    st.rerun()
-        if st.button("💾 保存Key设置"):
-            save_api_keys(keys_data)
-            st.success("✅ 已保存")
-
-        st.markdown("---")
-        st.markdown("### 🛰️ 系统中转站配置")
-        st.markdown(
-            f'<div class="info-card"><strong>{settings_sections["system"]["relay"]["title"]}</strong><br><span style="font-size:13px;color:#64748b">{settings_sections["system"]["relay"]["desc"]}</span></div>',
-            unsafe_allow_html=True,
-        )
-        relay_key_preview = (
-            mask_api_key(s.get("relay_api_key", ""))
-            if s.get("relay_api_key")
-            else "未保存"
-        )
-        st.caption(f"当前系统中转站 Key: {relay_key_preview}")
-        relay_base_value = st.text_input(
-            "系统中转站 API 地址",
-            value=s.get("relay_api_base", RELAY_API_BASE),
-            key="admin_relay_api_base",
-        )
-        relay_model_value = st.selectbox(
-            "系统中转站默认模型",
-            list(RELAY_IMAGE_MODELS.keys()),
-            index=list(RELAY_IMAGE_MODELS.keys()).index(
-                s.get("relay_default_image_model", "gemini-3.1-flash-image-preview")
-            )
-            if s.get("relay_default_image_model", "gemini-3.1-flash-image-preview")
-            in RELAY_IMAGE_MODELS
-            else 0,
-            key="admin_relay_default_model",
-        )
-        relay_analysis_model_value = st.selectbox(
-            "系统中转站分析/标题模型",
-            list(RELAY_ANALYSIS_MODELS.keys()),
-            index=list(RELAY_ANALYSIS_MODELS.keys()).index(
-                s.get("relay_analysis_model", "gemini-3.1-flash-lite-preview")
-            )
-            if s.get("relay_analysis_model", "gemini-3.1-flash-lite-preview")
-            in RELAY_ANALYSIS_MODELS
-            else 0,
-            key="admin_relay_analysis_model",
-        )
-        relay_key_input = st.text_input(
-            "系统中转站 API Key",
-            type="password",
-            key="admin_relay_api_key",
-            placeholder="留空则保留当前已保存的 Key",
-        )
-        c_relay_1, c_relay_2 = st.columns(2)
-        with c_relay_1:
-            if st.button(
-                "💾 保存系统中转站配置",
-                key="save_system_relay",
-                use_container_width=True,
-            ):
-                s["relay_api_base"] = (
-                    str(relay_base_value or RELAY_API_BASE).strip().rstrip("/")
-                )
-                s["relay_default_image_model"] = relay_model_value
-                s["relay_analysis_model"] = relay_analysis_model_value
-                if relay_key_input.strip():
-                    s["relay_api_key"] = relay_key_input.strip()
-                save_settings(s)
-                st.success("✅ 已保存系统中转站配置")
-                st.rerun()
-        with c_relay_2:
-            if st.button(
-                "🗑️ 清空系统中转站 Key",
-                key="clear_system_relay",
-                use_container_width=True,
-            ):
-                s["relay_api_key"] = ""
-                save_settings(s)
-                st.success("✅ 已清空系统中转站 Key")
-                st.rerun()
-        st.caption("前台中转站输入框留空时，会自动回退使用这里保存的系统 Key 和 URL。")
-
-    with tabs[3]:
-        comp = get_compliance()
-        for mode, preset in comp["presets"].items():
-            with st.expander(f"{preset['name']}"):
-                preset["enabled"] = st.checkbox(
-                    "启用", preset.get("enabled", True), key=f"comp_en_{mode}"
-                )
-                blacklist_str = st.text_area(
-                    "黑名单(逗号分隔)",
-                    ", ".join(preset.get("blacklist", [])),
-                    key=f"comp_bl_{mode}",
-                )
-                preset["blacklist"] = [
-                    w.strip() for w in blacklist_str.split(",") if w.strip()
-                ]
-        if st.button("💾 保存合规设置", type="primary"):
-            save_compliance(comp)
-            st.success("✅ 已保存")
-
-        st.markdown("---")
-        st.markdown("### 🈯 图片翻译合规词模板")
-        templates = comp.get("translate_templates", {})
-
-        with st.expander("➕ 添加模板"):
-            new_tpl_id = st.text_input("模板ID (英文)", key="new_tr_tpl_id")
-            new_tpl_name = st.text_input("模板名称", key="new_tr_tpl_name")
-            new_tpl_words = st.text_area(
-                "合规词 (逗号或换行分隔)", height=120, key="new_tr_tpl_words"
-            )
-            if st.button("添加模板", type="primary", key="add_tr_tpl"):
-                if new_tpl_id and new_tpl_name:
-                    templates[new_tpl_id] = {
-                        "name": new_tpl_name,
-                        "words": parse_compliance_words(new_tpl_words),
-                        "enabled": True,
-                    }
-                    comp["translate_templates"] = templates
-                    save_compliance(comp)
-                    st.success("✅ 已添加")
-                    st.rerun()
-
-        for tpl_id, tpl in templates.items():
-            with st.expander(f"{tpl.get('name', tpl_id)}"):
-                tpl["name"] = st.text_input(
-                    "名称", tpl.get("name", ""), key=f"tr_tpl_name_{tpl_id}"
-                )
-                tpl["enabled"] = st.checkbox(
-                    "启用", tpl.get("enabled", True), key=f"tr_tpl_en_{tpl_id}"
-                )
-                words_text = "\n".join(tpl.get("words", []))
-                words_text = st.text_area(
-                    "合规词 (逗号或换行分隔)",
-                    words_text,
-                    height=120,
-                    key=f"tr_tpl_words_{tpl_id}",
-                )
-                tpl["words"] = parse_compliance_words(words_text)
-                if tpl_id != "default":
-                    if st.button("删除模板", key=f"tr_tpl_del_{tpl_id}"):
-                        del templates[tpl_id]
-                        comp["translate_templates"] = templates
-                        save_compliance(comp)
-                        st.rerun()
-
-        if st.button("💾 保存翻译合规模板", type="primary", key="save_tr_tpls"):
-            comp["translate_templates"] = templates
-            save_compliance(comp)
-            st.success("✅ 已保存")
-
-    with tabs[4]:
-        prompts = get_prompts()
-        prompt_names = {
-            "anchor_analysis": "商品分析",
-            "requirements_gen": "图需生成",
-            "en_copy_gen": "英文文案",
-            "image_prompt": "图片生成",
-            "size_image_prompt": "尺寸图",
-            "image_text_extract": "图片文字提取",
-            "image_text_translate": "图片文本翻译",
-            "image_text_extract_translate": "图片文字提取+翻译",
-            "image_translate_prompt": "图片翻译出图",
-        }
-        for key, name in prompt_names.items():
-            with st.expander(f"📝 {name}"):
-                prompts[key] = st.text_area(
-                    "内容",
-                    prompts.get(key, ""),
-                    height=200,
-                    key=f"prompt_{key}",
-                    label_visibility="collapsed",
-                )
-                if st.button("恢复默认", key=f"reset_{key}"):
-                    prompts[key] = DEFAULT_PROMPTS.get(key, "")
-                    st.rerun()
-        if st.button("💾 保存提示词", type="primary"):
-            save_prompts(prompts)
-            st.success("✅ 已保存")
-
-    with tabs[5]:
-        title_tpls = get_title_templates()
-        st.markdown("### 🏷️ 标题模板管理 (全局生效)")
-        st.info("修改后对所有用户生效")
-
-        with st.expander("➕ 添加新模板"):
-            new_tpl_id = st.text_input("模板ID (英文)", key="new_tpl_id")
-            new_tpl_name = st.text_input("模板名称", key="new_tpl_name")
-            new_tpl_desc = st.text_input("描述", key="new_tpl_desc")
-            new_tpl_prompt = st.text_area(
-                "提示词 ({product_info}为占位符)", height=300, key="new_tpl_prompt"
-            )
-            if st.button("添加模板", type="primary"):
-                if new_tpl_id and new_tpl_name and new_tpl_prompt:
-                    title_tpls[new_tpl_id] = {
-                        "name": new_tpl_name,
-                        "desc": new_tpl_desc,
-                        "prompt": new_tpl_prompt,
-                        "enabled": True,
-                    }
-                    save_title_templates(title_tpls)
-                    st.success("✅ 已添加")
-                    st.rerun()
-
-        for tpl_id, tpl in title_tpls.items():
-            with st.expander(f"{tpl.get('name', tpl_id)}"):
-                tpl["name"] = st.text_input(
-                    "名称", tpl.get("name", ""), key=f"tpl_name_{tpl_id}"
-                )
-                tpl["desc"] = st.text_input(
-                    "描述", tpl.get("desc", ""), key=f"tpl_desc_{tpl_id}"
-                )
-                tpl["enabled"] = st.checkbox(
-                    "启用", tpl.get("enabled", True), key=f"tpl_en_{tpl_id}"
-                )
-                tpl["prompt"] = st.text_area(
-                    "提示词",
-                    tpl.get("prompt", ""),
-                    height=300,
-                    key=f"tpl_prompt_{tpl_id}",
-                )
-                c1, c2 = st.columns(2)
-                with c1:
-                    if st.button("恢复默认", key=f"tpl_reset_{tpl_id}"):
-                        if tpl_id in DEFAULT_TITLE_TEMPLATES:
-                            title_tpls[tpl_id] = DEFAULT_TITLE_TEMPLATES[tpl_id].copy()
-                            save_title_templates(title_tpls)
-                            st.rerun()
-                with c2:
-                    if tpl_id not in DEFAULT_TITLE_TEMPLATES:
-                        if st.button("删除", key=f"tpl_del_{tpl_id}"):
-                            del title_tpls[tpl_id]
-                            save_title_templates(title_tpls)
-                            st.rerun()
-        if st.button("💾 保存标题模板", type="primary"):
-            save_title_templates(title_tpls)
-            st.success("✅ 已保存 (全局生效)")
-
-    with tabs[6]:
-        templates = get_templates()
-        st.markdown("### 组图类型")
-        for tk, info in templates["combo_types"].items():
-            with st.expander(f"{info['icon']} {info['name']}"):
-                c1, c2 = st.columns(2)
-                with c1:
-                    info["name"] = st.text_input(
-                        "名称", info["name"], key=f"ct_name_{tk}"
-                    )
-                    info["icon"] = st.text_input(
-                        "图标", info["icon"], key=f"ct_icon_{tk}"
-                    )
-                    info["enabled"] = st.checkbox(
-                        "启用", info.get("enabled", True), key=f"ct_en_{tk}"
-                    )
-                with c2:
-                    info["desc"] = st.text_input(
-                        "描述", info["desc"], key=f"ct_desc_{tk}"
-                    )
-                    info["hint"] = st.text_area(
-                        "提示词", info.get("hint", ""), height=80, key=f"ct_hint_{tk}"
-                    )
-                    info["order"] = st.number_input(
-                        "排序", 1, 20, info.get("order", 10), key=f"ct_order_{tk}"
-                    )
-        if st.button("💾 保存模板", type="primary"):
-            save_templates(templates)
-            st.success("✅ 已保存")
-
-    if should_show_team_features(runtime_mode):
-        with tabs[7]:
-            st.markdown("### 注册用户管理")
-            st.caption("管理员可以一键停用注册、重置密码、备份并删除用户。")
-            render_user_admin_tab()
-
-        with tabs[8]:
-            st.markdown("### Workspace Foundation")
-            st.caption(
-                "Projects and members are provisioned in PostgreSQL while the legacy session auth remains untouched to avoid conflicts."
-            )
-            render_workspace_admin_tab()
-
-        with tabs[9]:
-            st.markdown("### Pricing Foundation")
-            st.caption(
-                "Shared-wallet debits use these pricing rules. BYOK traffic records usage but skips wallet debits."
-            )
-            render_pricing_admin_tab()
-
-        with tabs[10]:
-            st.markdown("### Team Wallet Foundation")
-            st.caption(
-                "This tab uses the new PostgreSQL billing foundation and is ready for Zeabur managed databases."
-            )
-            render_billing_admin_tab()
-
-        with tabs[11]:
-            st.markdown("### Redeem Code Foundation")
-            st.caption(
-                "Use batches for admin-issued recharge codes, offline transfer fulfillment, and future channel distribution."
-            )
-            render_redeem_code_admin_tab()
-
-    st.markdown("---")
-    if st.button("← 返回", use_container_width=True):
-        st.session_state.show_admin = False
-        st.rerun()
 
 
 # ==================== 主应用 ====================
 def main_app():
-    runtime_mode = current_runtime_mode()
-    feature_catalog = build_feature_catalog()
-    page_options = [item["nav"] for item in feature_catalog]
-    current_page = st.session_state.get("current_page") or "工作台"
-    if current_page not in page_options:
-        current_page = "工作台"
-        st.session_state.current_page = current_page
+    schedule_task_workers()
+    st.session_state["_footer_rendered"] = False
+    current_page = get_nav_page()
     with st.sidebar:
-        render_brand_mark(width=58)
-        st.markdown(
-            f"""<div class="sidebar-brand">
-            <div class="sidebar-kicker">{APP_EN_NAME}</div>
-            <div class="sidebar-title">{APP_NAME}</div>
-            <div class="sidebar-subtitle">{APP_LAST_UPDATED}<br>{APP_TAGLINE}</div>
-            </div>""",
-            unsafe_allow_html=True,
-        )
+        st.markdown(f"### 🍌 {APP_NAME}")
         st.markdown("---")
-        st.markdown(
-            '<div class="sidebar-section-title">核心功能</div>', unsafe_allow_html=True
-        )
-        render_sidebar_primary_nav(current_page)
-        page = st.session_state.get("current_page") or current_page
+        provider = get_active_provider()
+        if provider:
+            st.caption(f"当前提供商: {provider.get('name', '')}")
+        current_page = render_sidebar_nav_section("功能区", MAIN_NAV_ITEMS, current_page)
         st.markdown("---")
-
-        if st.session_state.use_own_key:
-            st.success("🔑 无限额度")
-        else:
-            uid = get_user_id()
-            _, used, limit = check_user_limit(uid)
-            st.info(f"今日: {used}/{limit}")
-
-        session_mode = describe_session_mode(
-            is_admin=bool(st.session_state.get("is_admin")),
-            use_own_key=bool(st.session_state.get("use_own_key")),
-            has_auth_user_id=bool(st.session_state.get("auth_user_id")),
-        )
-
-        if should_show_team_features(runtime_mode):
-            st.markdown(
-                '<div class="sidebar-section-title">工作区状态</div>',
-                unsafe_allow_html=True,
-            )
-            render_platform_workspace_sidebar()
-        else:
-            st.markdown(
-                '<div class="sidebar-section-title">当前模式</div>',
-                unsafe_allow_html=True,
-            )
-            st.caption(session_mode)
-            if session_mode == "个人模式":
-                st.caption("使用自己的凭据直接运行 1/2/3/4。")
-            elif session_mode == "管理员模式":
-                st.caption("使用系统配置运行，团队功能已隐藏。")
-            else:
-                st.caption("请先选择个人模式或管理员入口登录。")
-
-        bg_tasks = list_task_center_tasks(get_user_id())
-        if bg_tasks:
-            st.markdown("---")
-            st.markdown(
-                '<div class="sidebar-section-title">后台任务</div>',
-                unsafe_allow_html=True,
-            )
-            st.caption(
-                f"当前共有 {len(bg_tasks)} 个任务，其中 {count_pending_tasks(bg_tasks)} 个正在排队/执行"
-            )
-            if st.button(
-                "打开任务中心", key="nav_bg_translate", use_container_width=True
-            ):
-                st.session_state.show_task_center = True
-                st.rerun()
-
-        if st.session_state.use_own_key or st.session_state.is_admin:
-            st.markdown("---")
-            st.markdown(
-                '<div class="sidebar-section-title">安全与规则</div>',
-                unsafe_allow_html=True,
-            )
-            with st.expander("🛡️ 自定义合规词"):
-                show_user_compliance()
+        current_page = render_sidebar_nav_section("管理与配置", MANAGEMENT_NAV_ITEMS, current_page)
         st.markdown("---")
-        st.markdown(
-            '<div class="sidebar-section-title">当前凭据</div>', unsafe_allow_html=True
-        )
-        runtime_credentials = get_runtime_credentials()
-        provider_label = (
-            "中转站" if runtime_credentials.get("provider") == "relay" else "Gemini"
-        )
-        scope_label = (
-            "我的凭据" if runtime_credentials.get("scope") == "user" else "系统配置"
-        )
-        st.caption(f"Provider: {provider_label}")
-        st.caption(f"来源: {scope_label}")
-        if runtime_credentials.get("provider") == "relay":
-            st.caption(
-                f"模型: {runtime_credentials.get('model') or get_settings().get('relay_default_image_model', 'gemini-3.1-flash-image-preview')}"
-            )
-
-        if st.session_state.is_admin:
-            st.markdown("---")
-            if st.button("⚙️ 管理后台", use_container_width=True):
-                st.session_state.show_admin = True
-                st.rerun()
-
-        if st.button("🧹 清理会话缓存", use_container_width=True):
-            reset_working_session()
-            st.rerun()
+        render_task_center()
 
         if st.button("🚪 退出", use_container_width=True):
             for k in list(st.session_state.keys()):
                 del st.session_state[k]
             st.rerun()
 
-    owner_id = get_user_id()
-    task_center_tasks = list_task_center_tasks(owner_id)
-    task_badge = build_task_badge(count_pending_tasks(task_center_tasks))
-    header_cols = st.columns([8, 2])
-    with header_cols[1]:
-        if task_badge["show"]:
-            if st.button(
-                task_badge["label"], key="global_task_badge", use_container_width=True
-            ):
-                st.session_state.show_task_center = not st.session_state.get(
-                    "show_task_center", False
-                )
-    if st.session_state.get("show_task_center"):
-        render_task_center_panel(owner_id)
+    set_nav_page(current_page)
+    render_global_toolbar(current_page)
 
-    if page == "工作台":
-        render_workspace_dashboard()
-        show_footer()
-    elif page == "批量出图":
+    if current_page == "🚀 智能组图":
         show_combo_page()
-    elif page == "快速出图":
+    elif current_page == "🎨 快速出图 / 图片翻译":
         show_smart_page()
-    elif page == "标题优化":
+    elif current_page == "🏷️ 标题生成":
         show_title_page()
+    elif current_page == PROJECT_CENTER_PAGE:
+        show_project_center()
+    elif current_page == "🧩 模板库":
+        show_template_library()
+    elif current_page == "⚙️ 提供商设置":
+        show_provider_settings()
     else:
-        show_image_translate_page()
+        show_settings_center()
+
+    show_footer()
 
 
 # ==================== 主入口 ====================
 def main():
     st.set_page_config(
-        page_title=f"{APP_NAME} · {APP_LAST_UPDATED}",
+        page_title=APP_NAME,
         page_icon="🍌",
         layout="wide",
         initial_sidebar_state="expanded",
     )
     apply_style()
+    apply_proxy_settings()
     init_session()
-    bootstrap_runtime_config()
-    bootstrap_platform_runtime()
-    inject_browser_key_persistence()
-
-    if not st.session_state.authenticated:
-        show_login()
-        return
-
-    runtime_mode = current_runtime_mode()
-
-    if runtime_mode == "team_mode" and st.session_state.get("auth_user_id"):
-        if not validate_active_registered_session():
-            for key in list(st.session_state.keys()):
-                if key not in {"remember_login", "remember_role", "remember_until"}:
-                    st.session_state.pop(key, None)
-            st.warning("当前账号已被停用或删除，请联系管理员。")
-            show_login()
-            return
-
-    if should_force_registered_login(
-        runtime_mode=runtime_mode,
-        is_admin=bool(st.session_state.get("is_admin")),
-        use_own_key=bool(st.session_state.get("use_own_key")),
-        has_auth_user_id=bool(st.session_state.get("auth_user_id")),
-    ):
-        for key in list(st.session_state.keys()):
-            if key not in {"remember_login", "remember_role", "remember_until"}:
-                st.session_state.pop(key, None)
-        st.warning("团队模式已启用，请先使用注册账号登录系统服务。")
-        show_login()
-        return
-
-    if runtime_mode == "team_mode":
-        sync_platform_session_context()
-
-    if st.session_state.get("show_admin") and st.session_state.is_admin:
-        show_admin()
-        return
 
     main_app()
 

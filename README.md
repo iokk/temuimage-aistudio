@@ -1,84 +1,126 @@
-# XiaoBaiTu Rebuild v1.0.0
+# 电商出图工作台
 
-XiaoBaiTu Rebuild is the official release path for the product. The formal `rebuild-v1.0.0` release ships a multi-service stack with `web`, `api`, `worker`, `postgresql`, and `redis`, and uses Casdoor as the only formal identity entrypoint.
+个人 self-hosted 主线版本，面向两种运行形态：
 
-## Official stack
+1. `desktop/mac`
+2. `server/web`
 
-- `apps/web` - Next.js 15 frontend
-- `apps/api` - FastAPI application API
-- `apps/worker` - Celery worker
-- `packages/db` - Prisma schema and migrations
-- `template.yaml` - Zeabur multi-service template
+两种模式共用同一套模板库、任务队列、项目中心、提供商配置和核心生成流程，但文件能力按运行环境分流：
 
-## Release defaults
+- `desktop/mac` 可以打开本地文件、打开本地文件夹、选择本地保存目录
+- `server/web` 只走浏览器上传和下载，结果先保存在服务器项目中心，不直接操作访问者电脑文件系统
 
-- Title model: `gemini-3.1-pro`
-- Translate image model: `gemini-3.1-flash-image-preview`
-- Translate analysis model: `gemini-3.1-pro`
-- Quick image model: `gemini-3.1-flash-image-preview`
-- Batch image model: `gemini-3.1-flash-image-preview`
-- Release tag: `rebuild-v1.0.0`
+## 当前主线
 
-## Identity
+仓库当前只保留个人部署版主线：
 
-- Formal sign-in path: Casdoor OIDC only
-- Web keeps `Auth.js` as the session layer
-- API verifies Casdoor bearer tokens directly
-- Team admin access is controlled by `TEAM_ADMIN_EMAILS`
-- Team membership is controlled by `TEAM_ALLOWED_EMAIL_DOMAINS`
+- `app.py`：Streamlit 主应用
+- `desktop/`：Mac 本地桌面壳辅助代码
+- `desktop-app/`：桌面端实验壳
+- `docs/superpowers/`：设计、维护规范和演进文档
 
-## Zeabur deploy
+旧的 `rebuild` 多服务架构已经从主工作树移除，不再作为正式部署路径。
 
-Use the template-first path.
+## 运行模式
 
-Do not deploy the repository root `Dockerfile` for `rebuild-v1.0.0`. That file starts the archived Streamlit stack; the official rebuild release path is `template.yaml` or the per-service Dockerfiles under `apps/`.
-
-1. Deploy `template.yaml`
-2. Fill Casdoor, team, and secret variables
-3. Wait for `postgresql`, `redis`, `api`, `worker`, and `web`
-4. Sign in through Casdoor
-5. Verify `/admin` shows the runtime as ready
-
-### Deploy Button placeholder
-
-After you publish `template.yaml` as a Zeabur Template and copy the button from `Account -> Template -> Share`, replace the placeholder below with the real template code:
-
-```md
-[![Deploy on Zeabur](https://zeabur.com/button.svg)](https://zeabur.com/templates/<template-code>)
-```
-
-`<template-code>` must come from the published Zeabur Template URL, not from the GitHub repository URL. The full publishing flow lives in `docs/zeabur-auto-deploy.md`.
-
-Primary docs:
-
-- `docs/zeabur-rebuild-v1.md`
-- `docs/zeabur-auto-deploy.md`
-- `docs/rebuild-v1-release-checklist.md`
-- `docs/rebuild-v1-deploy-runbook.md`
-- `docs/admin-manual.md`
-
-## Local validation
+通过环境变量切换：
 
 ```bash
-pnpm build:web
-pnpm prisma:validate
-python3 -m py_compile apps/api/core/auth.py apps/api/job_repository.py apps/api/routers/jobs.py apps/api/routers/system.py apps/api/routers/title.py apps/api/routers/quick.py apps/api/routers/batch.py apps/api/routers/translate.py apps/api/task_processor.py apps/api/bootstrap_db.py apps/api/db/models.py apps/api/core/config.py
+APP_RUNTIME=desktop
+APP_RUNTIME=server
 ```
 
-## Legacy archive
+默认规则：
 
-The old Streamlit stack is preserved as project history and backup only. It is no longer the official release or deployment path.
+- 本地直接运行时默认 `desktop`
+- Docker / Linux 服务器部署时默认 `server`
 
-Archive-era files include:
+## 功能结构
 
-- `app.py`
-- `temu_core/`
-- `Dockerfile`
-- `docker-compose.yml`
-- `.env.example`
-- `scripts/deploy-zeabur.sh`
-- `scripts/deploy-debian.sh`
+- `🚀 智能组图`
+- `🎨 快速出图 / 图片翻译`
+- `🏷️ 标题生成`
+- `📚 项目中心`
+- `🧩 模板库`
+- `⚙️ 提供商设置`
+- `🛠️ 系统设置`
 
-## Repository
+## Linux self-hosted 快速部署
 
-`https://github.com/iokk/temuimage-aistudio`
+```bash
+git clone https://github.com/iokk/xiaobaitu.git
+cd xiaobaitu
+cp .env.example .env
+./deploy.sh install
+```
+
+默认访问地址：
+
+- [http://localhost:8501](http://localhost:8501)
+
+## 本地开发启动
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+streamlit run app.py
+```
+
+如果你要强制本地以桌面模式运行：
+
+```bash
+APP_RUNTIME=desktop streamlit run app.py
+```
+
+如果你要在本机模拟服务器模式：
+
+```bash
+APP_RUNTIME=server streamlit run app.py
+```
+
+## 数据目录
+
+默认数据目录：
+
+- 本地开发：`./data`
+- Docker / 服务器：`/app/data`
+
+重要文件：
+
+- `data/providers.json`
+- `data/settings.json`
+- `data/templates.json`
+- `data/title_templates.json`
+- `data/tasks.json`
+- `data/history.json`
+
+项目结果默认目录：
+
+- `desktop/mac`：`~/Downloads/电商出图工作台`
+- `server/web`：`/app/data/projects`
+
+## 提供商与密钥
+
+- 如果 `.env` 中提供了 `GOOGLE_API_KEY` 或 `GEMINI_API_KEY`，并且本地没有 provider 配置，应用会自动创建默认 Gemini 提供商
+- `desktop/mac` 优先使用 macOS Keychain 保存 provider 密钥
+- `server/web` 不依赖 Keychain，provider 密钥按服务器运行方式保存
+
+## 服务器模式的文件规则
+
+这是这版最重要的边界：
+
+- 用户通过浏览器上传素材
+- 生成结果先落到服务器项目中心
+- 用户从项目中心下载 ZIP 或结果文件
+- 服务器版不显示“打开本地文件夹”
+- 服务器版不允许把访问者电脑路径当作保存目录
+
+## 文档
+
+- [部署说明](/tmp/xiaobaitu/DEPLOYMENT.md)
+- [系统细节设计](/tmp/xiaobaitu/docs/superpowers/specs/2026-04-21-system-detail-design.md)
+- [模板管理设计](/tmp/xiaobaitu/docs/superpowers/specs/2026-04-21-template-management-design.md)
+- [双运行模式设计](/tmp/xiaobaitu/docs/superpowers/specs/2026-04-23-self-hosted-runtime-design.md)
+

@@ -3,19 +3,18 @@ port = 8501
 address = "0.0.0.0"
 headless = true
 enableCORS = false
-enableXsrfProtection = true
+enableXsrfProtection = false
 maxUploadSize = 50
 runOnSave = false
 
 [browser]
 gatherUsageStats = false
-serverAddress = "localhost"
 
 [theme]
 primaryColor = "#0f766e"
-backgroundColor = "#f4f7fb"
-secondaryBackgroundColor = "#ffffff"
-textColor = "#0f172a"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f5f7f7"
+textColor = "#1f2937"
 font = "sans serif"
 
 [client]
@@ -25,3 +24,4 @@ toolbarMode = "minimal"
 [runner]
 magicEnabled = false
 fastReruns = true
+
