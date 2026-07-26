@@ -4,7 +4,7 @@
 """
 
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageDraw
 import io
 import json
 import os
@@ -21,6 +21,9 @@ import tempfile
 import shutil
 import urllib.request
 import urllib.error
+import logging
+import logging.handlers
+import uuid
 from datetime import datetime, date
 from pathlib import Path
 from google import genai
@@ -31,6 +34,27 @@ APP_VERSION = "V15.2.1"
 APP_AUTHOR = "企鹅 & 小明"
 APP_COMMERCIAL = "企鹅 & Jerry"
 APP_NAME = "电商出图工作台"
+DEMO_PROVIDER_ID = "local-demo-admin"
+DEMO_PROVIDER_KEY = "DEMO-ADMIN-KEY"
+DEMO_PROVIDER_NAME = "本地演示管理员"
+
+
+def demo_mode_enabled() -> bool:
+    return os.getenv("XIAOBAITU_DEMO_MODE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+        "demo",
+    }
+
+
+def is_demo_api_key(api_key: str) -> bool:
+    return (api_key or "").strip() == DEMO_PROVIDER_KEY
+
+
+def is_demo_provider(provider: dict) -> bool:
+    return bool(provider and is_demo_api_key(resolve_provider_api_key(provider)))
 
 
 def _detect_runtime_mode() -> str:
@@ -90,6 +114,26 @@ def _default_file_storage_path() -> str:
 DATA_DIR = _default_data_dir()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+LOG_DIR = DATA_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / "app.log"
+
+logger = logging.getLogger("xiaobaitu")
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    _log_formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+    _file_handler = logging.handlers.RotatingFileHandler(
+        str(LOG_FILE), maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
+    _file_handler.setFormatter(_log_formatter)
+    logger.addHandler(_file_handler)
+    _stream_handler = logging.StreamHandler()
+    _stream_handler.setFormatter(_log_formatter)
+    logger.addHandler(_stream_handler)
+    logger.propagate = False
+
 SETTINGS_FILE = DATA_DIR / "settings.json"
 PROVIDERS_FILE = DATA_DIR / "providers.json"
 PROMPTS_FILE = DATA_DIR / "prompts.json"
@@ -112,6 +156,11 @@ GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS = int(
 GEMINI_IMAGE_REQUEST_TIMEOUT_SECONDS = int(
     os.getenv("GEMINI_IMAGE_REQUEST_TIMEOUT_SECONDS", "120")
 )
+
+# OpenAI 兼容协议（GPT Image 2 等）的默认配置
+OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
+OPENAI_DEFAULT_TEXT_MODEL = os.getenv("OPENAI_DEFAULT_TEXT_MODEL", "gpt-4o-mini")
+OPENAI_DEFAULT_IMAGE_MODEL = os.getenv("OPENAI_DEFAULT_IMAGE_MODEL", "gpt-image-2")
 
 # ==================== 硬性限制 ====================
 MAX_IMAGES = 14
@@ -188,6 +237,70 @@ TARGET_LANGUAGES = [
         "flag": "🇪🇸",
         "copy_tag": "ES",
     },
+    {
+        "code": "de",
+        "label": "德语",
+        "english_name": "German",
+        "native_name": "Deutsch",
+        "flag": "🇩🇪",
+        "copy_tag": "DE",
+    },
+    {
+        "code": "it",
+        "label": "意大利语",
+        "english_name": "Italian",
+        "native_name": "Italiano",
+        "flag": "🇮🇹",
+        "copy_tag": "IT",
+    },
+    {
+        "code": "pt",
+        "label": "葡萄牙语",
+        "english_name": "Portuguese",
+        "native_name": "Português",
+        "flag": "🇵🇹",
+        "copy_tag": "PT",
+    },
+    {
+        "code": "ko",
+        "label": "韩语",
+        "english_name": "Korean",
+        "native_name": "한국어",
+        "flag": "🇰🇷",
+        "copy_tag": "KO",
+    },
+    {
+        "code": "id",
+        "label": "印尼语",
+        "english_name": "Indonesian",
+        "native_name": "Bahasa Indonesia",
+        "flag": "🇮🇩",
+        "copy_tag": "ID",
+    },
+    {
+        "code": "ms",
+        "label": "马来语",
+        "english_name": "Malay",
+        "native_name": "Bahasa Melayu",
+        "flag": "🇲🇾",
+        "copy_tag": "MS",
+    },
+    {
+        "code": "ar",
+        "label": "阿拉伯语",
+        "english_name": "Arabic",
+        "native_name": "العربية",
+        "flag": "🇸🇦",
+        "copy_tag": "AR",
+    },
+    {
+        "code": "tr",
+        "label": "土耳其语",
+        "english_name": "Turkish",
+        "native_name": "Türkçe",
+        "flag": "🇹🇷",
+        "copy_tag": "TR",
+    },
 ]
 TARGET_LANGUAGE_MAP = {item["code"]: item for item in TARGET_LANGUAGES}
 TITLE_LINE_PREFIXES = [
@@ -204,6 +317,22 @@ TITLE_LINE_PREFIXES = [
     "法语",
     "Spanish",
     "西班牙语",
+    "German",
+    "德语",
+    "Italian",
+    "意大利语",
+    "Portuguese",
+    "葡萄牙语",
+    "Korean",
+    "韩语",
+    "Indonesian",
+    "印尼语",
+    "Malay",
+    "马来语",
+    "Arabic",
+    "阿拉伯语",
+    "Turkish",
+    "土耳其语",
     "Target Language",
     "Translation",
 ]
@@ -242,7 +371,98 @@ MODELS = {
         "default_thinking": None,
         "supports_thinking": False,  # 不支持thinking_level
     },
+    "gpt-image-2": {
+        "name": "🎯 GPT Image 2",
+        "resolutions": ["1K", "2K"],
+        "max_refs": 10,
+        "thinking_levels": [],
+        "default_thinking": None,
+        "supports_thinking": False,
+        "api_format": "openai",
+    },
+    "gpt-image-2-x": {
+        "name": "🎯 GPT Image 2 X",
+        "resolutions": ["1K", "2K"],
+        "max_refs": 10,
+        "thinking_levels": [],
+        "default_thinking": None,
+        "supports_thinking": False,
+        "api_format": "openai",
+    },
+    "gpt-image-2-auto": {
+        "name": "🎯 GPT Image 2 Auto",
+        "resolutions": ["1K", "2K"],
+        "max_refs": 10,
+        "thinking_levels": [],
+        "default_thinking": None,
+        "supports_thinking": False,
+        "api_format": "openai",
+    },
+    "gpt-image-1.5": {
+        "name": "🖼️ GPT Image 1.5",
+        "resolutions": ["1K", "2K"],
+        "max_refs": 10,
+        "thinking_levels": [],
+        "default_thinking": None,
+        "supports_thinking": False,
+        "api_format": "openai",
+    },
 }
+
+# ==================== 标题/视觉理解模型目录 ====================
+# 说明：family 字段仅用于下拉框展示分组图标，不参与协议判断。
+# 实际请求协议永远由 provider 的 provider_type（gemini/openai）决定；
+# 选择了协议不匹配的模型名会在调用时报错（已经过 sanitize_task_error 处理为中文提示）。
+TITLE_VISION_MODELS = {
+    "gpt-4o": {"name": "🔵 GPT-4o", "family": "openai"},
+    "gpt-4o-mini": {"name": "🔵 GPT-4o Mini", "family": "openai"},
+    "gpt-5.4": {"name": "🔵 GPT-5.4", "family": "openai"},
+    "gpt-5.4-mini": {"name": "🔵 GPT-5.4 Mini", "family": "openai"},
+    "gemini-2.5-flash": {"name": "🟢 Gemini 2.5 Flash", "family": "gemini"},
+    "gemini-3.1-flash-lite-preview": {
+        "name": "🟢 Gemini 3.1 Flash Lite Preview",
+        "family": "gemini",
+    },
+    "gemini-3-pro-preview": {"name": "🟢 Gemini 3 Pro Preview", "family": "gemini"},
+    "grok-2-vision-1212": {"name": "⚫ Grok-2 Vision 1212", "family": "grok"},
+    "grok-4": {"name": "⚫ Grok-4", "family": "grok"},
+}
+
+TITLE_VISION_MODEL_ORDER = list(TITLE_VISION_MODELS.keys())
+
+
+def format_title_vision_model(model_id: str) -> str:
+    """下拉框 format_func：按 family 图标展示模型名。"""
+    info = TITLE_VISION_MODELS.get(model_id)
+    if info:
+        return info["name"]
+    return model_id
+
+
+def resolve_default_title_vision_model(current_value: str) -> str:
+    """根据当前 provider 配置的值，在目录里找一个合理的默认选中项。
+
+    命中目录直接用；找不到时尝试按 provider_type 猜测的 family 退回该家族第一个；
+    实在找不到就用目录第一项，不抛异常。
+    """
+    value = (current_value or "").strip()
+    if value in TITLE_VISION_MODELS:
+        return value
+    # 尝试根据关键字猜测家族，退回该家族第一个模型
+    lowered = value.lower()
+    family_guess = None
+    if "gpt" in lowered or "openai" in lowered:
+        family_guess = "openai"
+    elif "gemini" in lowered:
+        family_guess = "gemini"
+    elif "grok" in lowered:
+        family_guess = "grok"
+    if family_guess:
+        for mid, info in TITLE_VISION_MODELS.items():
+            if info["family"] == family_guess:
+                return mid
+    return TITLE_VISION_MODEL_ORDER[0]
+
 
 ASPECT_RATIOS = [
     "1:1",
@@ -265,8 +485,8 @@ THINKING_LEVEL_DESC = {
 }
 
 MAIN_NAV_ITEMS = ["🚀 智能组图", "🎨 快速出图 / 图片翻译", "🏷️ 标题生成"]
-MANAGEMENT_NAV_ITEMS = ["🧩 模板库", "⚙️ 提供商设置", "🛠️ 系统设置"]
 PROJECT_CENTER_PAGE = "📚 项目中心"
+MANAGEMENT_NAV_ITEMS = ["🧩 模板库", PROJECT_CENTER_PAGE, "⚙️ 提供商设置", "🛠️ 系统设置"]
 
 # ==================== 默认配置 ====================
 DEFAULT_SETTINGS = {
@@ -554,6 +774,18 @@ Rules:
 - Respect these compliance constraints:
 {compliance_rules}
 Aspect ratio: {aspect_ratio}""",
+    "image_language_instruction": "If the image contains any text, ALL text MUST be in {output_language_name} ({output_language_native}) only. Do not mix multiple languages.",
+    "title_language_rules_en": """TARGET LANGUAGE RULES
+- Output English only.
+- Generate exactly 3 English titles with no translation lines.
+- Every English title must be {min_title_en_chars}-{max_title_en_chars} characters.
+- Output exactly 3 lines total with no labels or commentary.""",
+    "title_language_rules_bilingual": """TARGET LANGUAGE RULES
+- Keep English as the fixed source language for every first line.
+- The second line of each title must be in {target_language_name} ({target_language_native}).
+- {translation_language_rule}
+- Output exactly 6 lines total with no labels or commentary.
+- Line order must be English line then {target_language_name} line, repeated 3 times.""",
 }
 
 DEFAULT_TEMPLATES = {
@@ -866,6 +1098,73 @@ def keychain_available():
     return DESKTOP_MODE and os.name == "posix" and Path("/usr/bin/security").exists()
 
 
+SECRET_KEY_FILE = DATA_DIR / ".secret_key"
+
+
+def _get_or_create_local_secret_key() -> bytes:
+    """Local symmetric encryption key used as a fallback for storing provider
+    API keys when the macOS Keychain isn't available (e.g. Linux server/
+    container deployments). Generated once and reused thereafter."""
+    try:
+        from cryptography.fernet import Fernet
+    except ImportError:
+        return b""
+    try:
+        if SECRET_KEY_FILE.exists():
+            key = SECRET_KEY_FILE.read_bytes().strip()
+            if key:
+                return key
+        key = Fernet.generate_key()
+        SECRET_KEY_FILE.write_bytes(key)
+        try:
+            os.chmod(str(SECRET_KEY_FILE), 0o600)
+        except OSError:
+            pass
+        return key
+    except Exception:
+        logger.exception("failed to load/create local secret key for encrypted provider storage")
+        return b""
+
+
+def encrypt_secret(plain_text: str) -> str:
+    if not plain_text:
+        return ""
+    try:
+        from cryptography.fernet import Fernet
+
+        key = _get_or_create_local_secret_key()
+        if not key:
+            return ""
+        return Fernet(key).encrypt(plain_text.encode("utf-8")).decode("utf-8")
+    except Exception:
+        logger.exception("failed to encrypt provider secret")
+        return ""
+
+
+def decrypt_secret(cipher_text: str) -> str:
+    if not cipher_text:
+        return ""
+    try:
+        from cryptography.fernet import Fernet
+
+        key = _get_or_create_local_secret_key()
+        if not key:
+            return ""
+        return Fernet(key).decrypt(cipher_text.encode("utf-8")).decode("utf-8")
+    except Exception:
+        logger.exception("failed to decrypt provider secret")
+        return ""
+
+
+def encrypted_storage_available() -> bool:
+    try:
+        import cryptography  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
 def _keychain_account(provider_id: str) -> str:
     return f"provider-{provider_id}"
 
@@ -1011,8 +1310,12 @@ def save_providers(data):
 def resolve_provider_api_key(provider: dict) -> str:
     if not provider:
         return ""
-    if provider.get("secret_storage") == "keychain":
+    storage = provider.get("secret_storage")
+    if storage == "keychain":
         return get_keychain_secret(provider.get("keychain_account"))
+    if storage == "encrypted":
+        return decrypt_secret(provider.get("api_key") or "")
+    # "plain" (legacy) or unset: read raw value as-is for backward compat.
     return (provider.get("api_key") or "").strip()
 
 
@@ -1032,6 +1335,12 @@ def persist_provider_secret(provider: dict, api_key: str):
                 "keychain_account"
             ) or _keychain_account(provider.get("id", ""))
             provider["api_key"] = ""
+            return provider, True
+    if api_key and encrypted_storage_available():
+        cipher_text = encrypt_secret(api_key)
+        if cipher_text:
+            provider["secret_storage"] = "encrypted"
+            provider["api_key"] = cipher_text
             return provider, True
     provider["secret_storage"] = "plain"
     provider["api_key"] = api_key
@@ -1078,11 +1387,49 @@ def _bootstrap_env_provider(data):
     return data
 
 
+def build_demo_provider() -> dict:
+    s = get_settings()
+    return {
+        "id": DEMO_PROVIDER_ID,
+        "name": DEMO_PROVIDER_NAME,
+        "provider_type": "gemini",
+        "api_key": DEMO_PROVIDER_KEY,
+        "base_url": "",
+        "title_model": s.get("default_title_model", "gemini-3.1-flash-lite-preview"),
+        "vision_model": s.get("default_vision_model", "gemini-3.1-flash-lite-preview"),
+        "image_model": s.get("default_model", "gemini-3.1-flash-image-preview"),
+        "enabled": True,
+        "is_default": True,
+        "secret_storage": "plain",
+        "keychain_account": _keychain_account(DEMO_PROVIDER_ID),
+    }
+
+
+def ensure_demo_provider(data: dict, set_current: bool = False) -> dict:
+    data = _normalize_providers_data(data)
+    providers = data.get("providers", [])
+    demo_provider = build_demo_provider()
+    existing = next((p for p in providers if p.get("id") == DEMO_PROVIDER_ID), None)
+    if existing:
+        existing.update(demo_provider)
+    else:
+        providers.insert(0, demo_provider)
+    if set_current or not data.get("current_id"):
+        data["current_id"] = DEMO_PROVIDER_ID
+        for provider in providers:
+            provider["is_default"] = provider.get("id") == DEMO_PROVIDER_ID
+    data["providers"] = providers
+    save_providers(data)
+    return data
+
+
 def get_providers():
     data = load_json(PROVIDERS_FILE, DEFAULT_PROVIDERS_DATA)
     data = _normalize_providers_data(data)
     if not data.get("providers"):
         data = _bootstrap_env_provider(data)
+    if demo_mode_enabled():
+        data = ensure_demo_provider(data, set_current=not data.get("current_id"))
     data = migrate_provider_secrets(data)
     save_providers(data)
     return data
@@ -1139,8 +1486,8 @@ def validate_provider_config(
         errors.append("请填写 API Key。")
     normalized_type = (provider_type or "gemini").strip().lower()
     normalized_base = (base_url or "").strip()
-    if normalized_type == "relay" and not normalized_base:
-        errors.append("Relay 类型必须填写 Base URL。")
+    if normalized_type in ("relay", "openai") and not normalized_base:
+        errors.append("Relay/OpenAI 类型必须填写 Base URL。")
     if normalized_base and not re.match(r"^https?://", normalized_base):
         errors.append("Base URL 必须以 http:// 或 https:// 开头。")
     return errors
@@ -1179,13 +1526,27 @@ def _new_task_id():
     ).hexdigest()[:12]
 
 
+def get_session_owner_id() -> str:
+    """Stable per-browser-session identifier used to scope task *visibility*.
+
+    The task execution engine (thread pool / TASK_LOCK / MAX_ACTIVE_TASKS) stays
+    process-global and shared across sessions; only which tasks a session is
+    allowed to *see* is scoped by this id.
+    """
+    owner_id = st.session_state.get("session_owner_id")
+    if not owner_id:
+        owner_id = str(uuid.uuid4())
+        st.session_state["session_owner_id"] = owner_id
+    return owner_id
+
+
 @st.cache_resource(show_spinner=False)
 def get_task_runtime():
     try:
         TASKS_FILE.unlink()
     except (FileNotFoundError, OSError):
         pass
-    return {"tasks": [], "threads": {}}
+    return {"tasks": [], "threads": {}, "last_cleanup_ts": 0.0}
 
 
 def get_task_store():
@@ -2150,6 +2511,22 @@ def list_tasks():
     )
 
 
+def list_tasks_for_display():
+    """list_tasks() filtered to the current session's own tasks.
+
+    Tasks without an owner_id (created before this change) remain visible to
+    everyone for backward compatibility. Use this instead of list_tasks() in
+    any UI that renders tasks to the user; keep list_tasks() (unfiltered) for
+    the shared execution engine (scheduling, cancellation lookups, counts).
+    """
+    owner_id = get_session_owner_id()
+    return [
+        task
+        for task in list_tasks()
+        if not task.get("owner_id") or task.get("owner_id") == owner_id
+    ]
+
+
 def clear_terminal_tasks():
     with TASK_LOCK:
         data = get_tasks_data()
@@ -2207,6 +2584,7 @@ def create_task(task_type: str, payload: dict):
             "id": _new_task_id(),
             "type": task_type,
             "status": "queued",
+            "owner_id": get_session_owner_id(),
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
             "payload": payload,
@@ -2321,6 +2699,102 @@ def _run_with_timeout(func, timeout_seconds: int):
     if "value" in error:
         raise error["value"]
     return result.get("value")
+
+
+def _demo_title_lines(product_info: str, target_language: str) -> list:
+    base = re.sub(r"\s+", " ", (product_info or "Premium ecommerce product").strip())
+    base = base[:80] or "Premium ecommerce product"
+    english_titles = [
+        f"{base} for Daily Use with Durable Build, Clean Modern Style, Easy Handling, Practical Storage, Gift Ready Packaging, and Reliable Value for Home, Office, Travel, and Online Marketplace Display",
+        f"{base} Featuring Thoughtful Details, Smooth Finish, Versatile Everyday Performance, Clear Product Benefits, Lightweight Convenience, and Customer Friendly Presentation for Strong Listing Conversion",
+        f"{base} Designed for Practical Shopping Needs with Organized Features, Attractive Visual Appeal, Simple Maintenance, Dependable Materials, and Marketplace Ready Descriptions for Ecommerce Growth",
+    ]
+    if target_language == "en":
+        return english_titles
+    language_info = get_target_language(target_language)
+    localized = [
+        f"{language_info['native_name']}演示标题：突出耐用材质、清晰卖点和日常使用场景，适合电商详情页展示。",
+        f"{language_info['native_name']}演示标题：强调便捷体验、现代外观和高转化视觉信息，便于快速上架。",
+        f"{language_info['native_name']}演示标题：覆盖规格、功能和礼品化包装，适合面试演示与内部评审。",
+    ]
+    lines = []
+    for english, local in zip(english_titles, localized):
+        lines.extend([english, local])
+    return lines
+
+
+def _demo_anchor(name: str = "", detail: str = "") -> dict:
+    product_name = (name or detail or "Demo Product").strip()[:80] or "Demo Product"
+    return {
+        "product_name_en": product_name,
+        "product_name_zh": product_name,
+        "primary_category": "Demo Ecommerce Category",
+        "visual_attrs": ["durable", "modern", "marketplace ready"],
+        "confidence": 0.96,
+    }
+
+
+def _demo_requirements(anchor: dict, types_counts: dict, target_language: str) -> list:
+    templates = get_template_group("combo_types")
+    language_info = get_target_language(target_language)
+    requirements = []
+    for type_key, count in (types_counts or {}).items():
+        info = templates.get(type_key, {})
+        for index in range(int(count or 0)):
+            requirements.append(
+                {
+                    "type_key": type_key,
+                    "type_name": info.get("name", type_key),
+                    "index": index + 1,
+                    "topic": f"{info.get('name', type_key)}演示",
+                    "scene": f"{anchor.get('product_name_zh', '商品')}的{info.get('desc', '电商展示')}场景",
+                    "headline": f"{language_info['native_name']} Demo Highlight",
+                    "subline": "Local admin demo output",
+                    "badge": "DEMO",
+                }
+            )
+    return requirements
+
+
+def _demo_image(label: str, subtitle: str = "", aspect: str = "1:1") -> Image.Image:
+    aspect_map = {
+        "1:1": (960, 960),
+        "4:3": (1024, 768),
+        "3:4": (768, 1024),
+        "16:9": (1280, 720),
+        "9:16": (720, 1280),
+        "3:2": (1080, 720),
+        "2:3": (720, 1080),
+        "4:5": (864, 1080),
+        "5:4": (1080, 864),
+        "21:9": (1344, 576),
+    }
+    width, height = aspect_map.get(aspect, (960, 960))
+    image = Image.new("RGB", (width, height), "#f8fafc")
+    draw = ImageDraw.Draw(image)
+    accent = "#6366f1"
+    draw.rectangle([0, 0, width, int(height * 0.16)], fill=accent)
+    draw.rectangle(
+        [int(width * 0.08), int(height * 0.24), int(width * 0.92), int(height * 0.78)],
+        fill="#ffffff",
+        outline="#cbd5e1",
+        width=4,
+    )
+    draw.ellipse(
+        [int(width * 0.34), int(height * 0.34), int(width * 0.66), int(height * 0.66)],
+        fill="#e0e7ff",
+        outline=accent,
+        width=5,
+    )
+    draw.text((int(width * 0.08), int(height * 0.055)), "Xiaobaitu Local Demo", fill="#ffffff")
+    draw.text((int(width * 0.13), int(height * 0.42)), label[:42] or "Demo Output", fill="#0f172a")
+    draw.text(
+        (int(width * 0.13), int(height * 0.50)),
+        (subtitle or "Generated without external API calls")[:58],
+        fill="#475569",
+    )
+    draw.text((int(width * 0.13), int(height * 0.70)), "DEMO ADMIN MODE", fill=accent)
+    return image
 
 
 def get_compliance():
@@ -2582,17 +3056,28 @@ def render_target_language_selector(
     label: str,
     help_text: str,
 ):
+    """语言选择器：跨页面共享 global_image_language / global_title_language，
+    避免同一款语言在 smart/combo/title 三个页面各自为政。"""
     s = get_settings()
     options = [item["code"] for item in TARGET_LANGUAGES]
-    default_code = (
-        s.get("default_image_language", DEFAULT_TARGET_LANGUAGE)
-        if "image" in key_suffix
-        else s.get("default_title_language", DEFAULT_TARGET_LANGUAGE)
-    )
-    if default_code not in options:
-        default_code = DEFAULT_TARGET_LANGUAGE
-    default_index = options.index(default_code)
-    return st.selectbox(
+    is_image_lang = "image" in key_suffix
+    global_key = "global_image_language" if is_image_lang else "global_title_language"
+
+    if global_key not in st.session_state:
+        default_code = s.get(
+            "default_image_language" if is_image_lang else "default_title_language",
+            DEFAULT_TARGET_LANGUAGE,
+        )
+        if default_code not in options:
+            default_code = DEFAULT_TARGET_LANGUAGE
+        st.session_state[global_key] = default_code
+
+    current_code = st.session_state[global_key]
+    if current_code not in options:
+        current_code = DEFAULT_TARGET_LANGUAGE
+    default_index = options.index(current_code)
+
+    selected = st.selectbox(
         label,
         options=options,
         index=default_index,
@@ -2600,6 +3085,8 @@ def render_target_language_selector(
         key=f"{prefix}_{key_suffix}",
         help=help_text,
     )
+    st.session_state[global_key] = selected
+    return selected
 
 
 def fill_prompt_template(template: str, **values) -> str:
@@ -2625,37 +3112,48 @@ def build_title_prompt(
         target_language_native=lang["native_name"],
         target_language_label=lang["label"],
     )
+    prompts = get_prompts()
     if target_language == "en":
-        return (
-            f"{prompt}\n\n"
-            "TARGET LANGUAGE RULES\n"
-            "- Output English only.\n"
-            "- Generate exactly 3 English titles with no translation lines.\n"
-            f"- Every English title must be {MIN_TITLE_EN_CHARS}-{MAX_TITLE_EN_CHARS} characters.\n"
-            "- Output exactly 3 lines total with no labels or commentary."
+        rules_template = (
+            prompts.get("title_language_rules_en")
+            or DEFAULT_PROMPTS["title_language_rules_en"]
         )
+        rules = fill_prompt_template(
+            rules_template,
+            min_title_en_chars=MIN_TITLE_EN_CHARS,
+            max_title_en_chars=MAX_TITLE_EN_CHARS,
+        )
+        return f"{prompt}\n\n{rules}"
 
     extra_rule = (
         "Use Simplified Chinese for every translation line."
         if target_language == "zh"
         else f"Do not output Chinese. Use {lang['english_name']} only for every translation line."
     )
-    return (
-        f"{prompt}\n\n"
-        "TARGET LANGUAGE RULES\n"
-        "- Keep English as the fixed source language for every first line.\n"
-        f"- The second line of each title must be in {lang['english_name']} ({lang['native_name']}).\n"
-        f"- {extra_rule}\n"
-        "- Output exactly 6 lines total with no labels or commentary.\n"
-        f"- Line order must be English line then {lang['english_name']} line, repeated 3 times."
+    rules_template = (
+        prompts.get("title_language_rules_bilingual")
+        or DEFAULT_PROMPTS["title_language_rules_bilingual"]
     )
+    rules = fill_prompt_template(
+        rules_template,
+        target_language_name=lang["english_name"],
+        target_language_native=lang["native_name"],
+        translation_language_rule=extra_rule,
+    )
+    return f"{prompt}\n\n{rules}"
 
 
 def get_image_language_instruction(target_language: str) -> str:
     lang = get_target_language(target_language)
-    return (
-        f"If the image contains any text, ALL text MUST be in {lang['english_name']} "
-        f"({lang['native_name']}) only. Do not mix multiple languages."
+    template = (
+        get_prompts().get("image_language_instruction")
+        or DEFAULT_PROMPTS["image_language_instruction"]
+    )
+    return fill_prompt_template(
+        template,
+        output_language_name=lang["english_name"],
+        output_language_native=lang["native_name"],
+        output_language_label=lang["label"],
     )
 
 
@@ -2982,6 +3480,8 @@ def _build_title_result(
 
 def _classify_title_error(error_message: str) -> tuple:
     msg = (error_message or "").lower()
+    if "insufficient" in msg and ("balance" in msg or "quota" in msg or "余额" in msg):
+        return "provider_error", False
     if "api key" in msg or "apikey" in msg or "unauthorized" in msg:
         return "missing_api_key", False
     if "failed_precondition" in msg or "user location is not supported" in msg:
@@ -3038,6 +3538,16 @@ def sanitize_task_error(message: str, fallback: str = "任务执行失败") -> s
     if not msg:
         return fallback
     low = msg.lower()
+    if (
+        "insufficient_balance" in low
+        or "insufficient account balance" in low
+        or ("insufficient" in low and ("balance" in low or "quota" in low))
+    ):
+        return "提供商账户余额不足，请充值后重试。"
+    if "content_policy" in low or "content policy" in low or "moderation" in low:
+        return "内容触发上游安全策略，请调整提示词或图片后重试。"
+    if "too many requests" in low or "rate limit" in low:
+        return "请求过于频繁，请稍后重试或降低并发任务数。"
     if "failed_precondition" in low or "user location is not supported" in low:
         return "Google API 当前账号或地区不支持该调用。"
     if "resource has been exhausted" in low or "proxy_config_error" in low:
@@ -3142,7 +3652,7 @@ class GeminiClient:
             buf = io.BytesIO()
             ic = img.copy()
             if max(ic.size) > 1024:
-                ic.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+                limit_image_size(ic, (1024, 1024))
             ic.save(buf, format="PNG", optimize=True)
             parts.append(
                 types.Part.from_bytes(data=buf.getvalue(), mime_type="image/png")
@@ -3155,7 +3665,7 @@ class GeminiClient:
             buf = io.BytesIO()
             ic = img.copy()
             if max(ic.size) > 1024:
-                ic.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+                limit_image_size(ic, (1024, 1024))
             ic.save(buf, format="PNG", optimize=True)
             parts.append(
                 {
@@ -3303,6 +3813,54 @@ class GeminiClient:
     def get_last_error(self):
         return sanitize_task_error(self.last_error)
 
+    def _text_request(
+        self, prompt_text, timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS
+    ):
+        """纯文本生成（标题/图需/文案），子类可覆写为其他协议。"""
+        resp = self._call(
+            lambda: self.client.models.generate_content(
+                model=self.title_model,
+                contents=[prompt_text],
+                config=types.GenerateContentConfig(response_modalities=["TEXT"]),
+            ),
+            timeout_seconds=timeout_seconds,
+        )
+        self._count_tokens(resp)
+        return (resp.text or "").strip()
+
+    def _vision_request(
+        self,
+        images,
+        prompt_text,
+        max_images=5,
+        timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS,
+    ):
+        """图片+文本理解（商品分析/图片标题），子类可覆写为其他协议。"""
+        if self.base_url:
+            response_data = self._manual_generate_content(
+                self.vision_model,
+                self._prep_inline_image_parts(images, max_images)
+                + [{"text": prompt_text}],
+                ["TEXT"],
+                timeout_seconds=timeout_seconds,
+            )
+            self._count_manual_tokens(response_data)
+            return self._extract_text_from_manual_response(response_data)
+        resp = self._call(
+            lambda: self.client.models.generate_content(
+                model=self.vision_model,
+                contents=self._prep_images(images, max_images) + [prompt_text],
+                config=types.GenerateContentConfig(response_modalities=["TEXT"]),
+            ),
+            timeout_seconds=timeout_seconds,
+        )
+        self._count_tokens(resp)
+        return (resp.text or "").strip()
+
+    def test_connection(self):
+        """连通性测试：返回上游模型的简短回复。"""
+        return self._text_request("Return exactly OK.")
+
     def analyze_product(self, images, name="", detail=""):
         default_result = {
             "product_name_en": name or "Product",
@@ -3312,10 +3870,11 @@ class GeminiClient:
             "confidence": 0.5,
         }
 
+        if is_demo_api_key(self.api_key):
+            return _demo_anchor(name, detail)
+
         if not images:
             return default_result
-
-        parts = self._prep_images(images, 5)
 
         prompt_template = self.prompts.get(
             "anchor_analysis", DEFAULT_PROMPTS["anchor_analysis"]
@@ -3331,31 +3890,8 @@ Product name: {name or "N/A"}
 Product detail: {detail or "N/A"}
 Return valid JSON only."""
 
-        parts.append(prompt)
-
         try:
-            if self.base_url:
-                response_data = self._manual_generate_content(
-                    self.vision_model,
-                    self._prep_inline_image_parts(images, 5) + [{"text": prompt}],
-                    ["TEXT"],
-                    timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS,
-                )
-                self._count_manual_tokens(response_data)
-                text = self._extract_text_from_manual_response(response_data)
-            else:
-                resp = self._call(
-                    lambda: self.client.models.generate_content(
-                        model=self.vision_model,
-                        contents=parts,
-                        config=types.GenerateContentConfig(
-                            response_modalities=["TEXT"]
-                        ),
-                    ),
-                    timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS,
-                )
-                self._count_tokens(resp)
-                text = resp.text if resp.text else ""
+            text = self._vision_request(images, prompt, 5)
 
             if text:
                 result = self._parse_json_response(text, default_result)
@@ -3371,6 +3907,9 @@ Return valid JSON only."""
     def generate_requirements(
         self, anchor, types_counts, tags=None, target_language="zh"
     ):
+        if is_demo_api_key(self.api_key):
+            return _demo_requirements(anchor, types_counts, target_language)
+
         templates = get_template_group("combo_types")
         types_str = ", ".join(
             [f"{templates[k]['name']}x{v}" for k, v in types_counts.items()]
@@ -3396,22 +3935,22 @@ Return valid JSON only."""
             return []
 
         try:
-            resp = self._call(
-                lambda: self.client.models.generate_content(
-                    model=self.title_model,
-                    contents=[prompt],
-                    config=types.GenerateContentConfig(response_modalities=["TEXT"]),
-                ),
-                timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS,
-            )
-            self._count_tokens(resp)
-            result = self._parse_json_response(resp.text if resp.text else "[]", [])
+            text = self._text_request(prompt)
+            result = self._parse_json_response(text or "[]", [])
             return result if isinstance(result, list) else []
         except Exception as e:
             self.last_error = str(e)
             return []
 
     def generate_en_copy(self, anchor, requirements, target_language="zh"):
+        if is_demo_api_key(self.api_key):
+            language_info = get_target_language(target_language)
+            for req in requirements or []:
+                req.setdefault("headline", f"{language_info['native_name']} Demo Highlight")
+                req.setdefault("subline", "Local admin demo output")
+                req.setdefault("badge", "DEMO")
+            return requirements
+
         if not requirements:
             return requirements
 
@@ -3437,17 +3976,9 @@ Return valid JSON only."""
             return requirements
 
         try:
-            resp = self._call(
-                lambda: self.client.models.generate_content(
-                    model=self.title_model,
-                    contents=[prompt],
-                    config=types.GenerateContentConfig(response_modalities=["TEXT"]),
-                ),
-                timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS,
-            )
-            self._count_tokens(resp)
+            text = self._text_request(prompt)
 
-            copies = self._parse_json_response(resp.text if resp.text else "[]", [])
+            copies = self._parse_json_response(text or "[]", [])
             if not isinstance(copies, list):
                 return requirements
 
@@ -3529,6 +4060,14 @@ Return valid JSON only."""
         text_language="zh",
     ):
         """生成图片 - V15.2修复版，增加详细错误信息"""
+        if is_demo_api_key(self.api_key):
+            label = "演示生成图"
+            prompt_text = re.sub(r"\s+", " ", (prompt or "").strip())
+            if prompt_text:
+                label = prompt_text[:42]
+            self.total_tokens += 128
+            return _demo_image(label, get_image_language_instruction(text_language), aspect)
+
         max_refs = MODELS.get(self.model, {}).get("max_refs", 3)
         parts = self._prep_images(refs, min(len(refs), max_refs))
 
@@ -3598,6 +4137,17 @@ Return valid JSON only."""
             raise e
 
     def generate_titles(self, product_info, template_prompt, target_language="zh"):
+        if is_demo_api_key(self.api_key):
+            titles = _demo_title_lines(product_info, target_language)
+            return _build_title_result(
+                True,
+                titles=titles,
+                raw_text="\n".join(titles),
+                attempt_count=1,
+                input_mode="text",
+                details={"target_language": target_language, "demo": True},
+            )
+
         if not self.api_key:
             return _build_title_result(
                 False,
@@ -3620,18 +4170,7 @@ Return valid JSON only."""
                         f"{prompt}\n\nSTRICT OUTPUT: Return exactly 6 lines, "
                         f"English then {language_info['english_name']} for each title, no extra lines."
                     )
-                resp = self._call(
-                    lambda: self.client.models.generate_content(
-                        model=self.title_model,
-                        contents=[prompt_text],
-                        config=types.GenerateContentConfig(
-                            response_modalities=["TEXT"]
-                        ),
-                    ),
-                    timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS,
-                )
-                self._count_tokens(resp)
-                text = resp.text.strip() if resp.text else ""
+                text = self._text_request(prompt_text)
                 lines = _parse_title_lines(text)
                 valid, reason, details = _validate_title_output(lines, target_language)
                 details["target_language"] = target_language
@@ -3696,6 +4235,17 @@ Return valid JSON only."""
         target_language="zh",
     ):
         """从图片分析生成商品标题"""
+        if is_demo_api_key(self.api_key):
+            titles = _demo_title_lines(product_info or "Image based product", target_language)
+            return _build_title_result(
+                True,
+                titles=titles,
+                raw_text="\n".join(titles),
+                attempt_count=1,
+                input_mode="image",
+                details={"target_language": target_language, "demo": True},
+            )
+
         if not self.api_key:
             return _build_title_result(
                 False,
@@ -3714,8 +4264,6 @@ Return valid JSON only."""
                 attempt_count=0,
                 input_mode="image",
             )
-
-        parts = self._prep_images(images, 5)
 
         if template_prompt is None:
             template_prompt = DEFAULT_TITLE_TEMPLATES.get("image_analysis", {}).get(
@@ -3739,30 +4287,7 @@ Return valid JSON only."""
                         f"{prompt}\n\nSTRICT OUTPUT: Return exactly 6 lines, "
                         f"English then {language_info['english_name']} for each title, no extra lines."
                     )
-                if self.base_url:
-                    response_data = self._manual_generate_content(
-                        self.vision_model,
-                        self._prep_inline_image_parts(images, 5)
-                        + [{"text": prompt_text}],
-                        ["TEXT"],
-                        timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS,
-                    )
-                    self._count_manual_tokens(response_data)
-                    text = self._extract_text_from_manual_response(response_data)
-                else:
-                    parts_with_prompt = parts + [prompt_text]
-                    resp = self._call(
-                        lambda: self.client.models.generate_content(
-                            model=self.vision_model,
-                            contents=parts_with_prompt,
-                            config=types.GenerateContentConfig(
-                                response_modalities=["TEXT"]
-                            ),
-                        ),
-                        timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS,
-                    )
-                    self._count_tokens(resp)
-                    text = resp.text.strip() if resp.text else ""
+                text = self._vision_request(images, prompt_text, 5)
                 lines = _parse_title_lines(text)
                 valid, reason, details = _validate_title_output(lines, target_language)
                 details["target_language"] = target_language
@@ -3818,6 +4343,362 @@ Return valid JSON only."""
             input_mode="image",
             details={"line_count": len(last_lines)},
         )
+
+
+
+# ==================== OpenAI 兼容客户端 (GPT Image 2) ====================
+class OpenAIClient(GeminiClient):
+    """OpenAI 兼容协议客户端：
+    出图走 /v1/images/generations 与 /v1/images/edits（GPT Image 2 等），
+    标题/视觉走 /v1/chat/completions。"""
+
+    def __init__(
+        self,
+        api_key,
+        model="",
+        base_url="",
+        title_model="",
+        vision_model="",
+    ):
+        self.api_key = api_key
+        self.model = (model or "").strip() or OPENAI_DEFAULT_IMAGE_MODEL
+        self.base_url = (
+            (base_url or "").strip() or OPENAI_DEFAULT_BASE_URL
+        ).rstrip("/")
+        self.title_model = (title_model or "").strip() or OPENAI_DEFAULT_TEXT_MODEL
+        self.vision_model = (vision_model or "").strip() or self.title_model
+        self.client = None
+        self.prompts = self._load_prompts_safe()
+        self.total_tokens = 0
+        self.last_error = None
+
+    # ---- 基础 HTTP ----
+    @staticmethod
+    def _extract_error_message(body: str) -> str:
+        try:
+            data = json.loads(body)
+        except Exception:
+            data = None
+        if isinstance(data, dict):
+            err = data.get("error")
+            if isinstance(err, dict):
+                return str(err.get("message") or err.get("code") or "")[:300]
+            if isinstance(err, str) and err:
+                return err[:300]
+            msg = data.get("message") or data.get("code")
+            if msg:
+                return str(msg)[:300]
+        return (body or "")[:300]
+
+    def _openai_call(
+        self,
+        path,
+        payload=None,
+        multipart=None,
+        timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS,
+        retries=3,
+    ):
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        if multipart is not None:
+            body, content_type = multipart
+            headers["Content-Type"] = content_type
+        else:
+            body = json.dumps(payload or {}).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        delay = 2
+        for attempt in range(max(1, retries)):
+            req = urllib.request.Request(
+                f"{self.base_url}{path}", data=body, headers=headers
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+                    return json.loads(resp.read().decode("utf-8", "ignore"))
+            except urllib.error.HTTPError as e:
+                detail = self._extract_error_message(
+                    e.read().decode("utf-8", "ignore")
+                )
+                low = (detail or "").lower()
+                self.last_error = detail or f"HTTP {e.code}"
+                if e.code in (401, 403):
+                    raise Exception("API Key 无效或没有访问权限")
+                if e.code == 402 or (
+                    "insufficient" in low and ("balance" in low or "quota" in low)
+                ):
+                    raise Exception("提供商账户余额不足，请充值后重试")
+                if (
+                    "content_policy" in low
+                    or "content policy" in low
+                    or "moderation" in low
+                ):
+                    raise Exception(f"内容触发上游安全策略：{detail[:120]}")
+                if (e.code == 429 or e.code >= 500) and attempt < retries - 1:
+                    time.sleep(delay)
+                    delay = min(delay * 2, 30)
+                    continue
+                raise Exception(sanitize_task_error(detail or f"HTTP {e.code}"))
+            except Exception as e:
+                err_text = str(e)
+                self.last_error = err_text
+                low = err_text.lower()
+                retryable = (
+                    "timed out" in low
+                    or "timeout" in low
+                    or "connection" in low
+                    or "unreachable" in low
+                    or "reset" in low
+                )
+                if retryable and attempt < retries - 1:
+                    time.sleep(delay)
+                    delay = min(delay * 2, 30)
+                    continue
+                if "timed out" in low or "timeout" in low:
+                    raise Exception(f"请求超时（{timeout_seconds}s），请稍后重试")
+                raise
+        raise Exception(sanitize_task_error(self.last_error or "请求失败"))
+
+    # ---- 文本 / 视觉 ----
+    def _chat(
+        self, model, messages, timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS
+    ):
+        data = self._openai_call(
+            "/chat/completions",
+            {"model": model, "messages": messages},
+            timeout_seconds=timeout_seconds,
+        )
+        usage = (data or {}).get("usage") or {}
+        try:
+            self.total_tokens += int(usage.get("total_tokens") or 0)
+        except Exception:
+            pass
+        try:
+            content = (data.get("choices") or [])[0].get("message", {}).get(
+                "content", ""
+            )
+        except Exception:
+            content = ""
+        if isinstance(content, list):
+            content = "".join(
+                str(part.get("text", ""))
+                for part in content
+                if isinstance(part, dict)
+            )
+        return (content or "").strip()
+
+    def _image_data_urls(self, images, max_count=5):
+        urls = []
+        for img in images[:max_count]:
+            buf = io.BytesIO()
+            ic = img.copy()
+            if max(ic.size) > 1024:
+                limit_image_size(ic, (1024, 1024))
+            ic.save(buf, format="PNG", optimize=True)
+            urls.append(
+                "data:image/png;base64,"
+                + base64.b64encode(buf.getvalue()).decode()
+            )
+        return urls
+
+    def _text_request(
+        self, prompt_text, timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS
+    ):
+        return self._chat(
+            self.title_model,
+            [{"role": "user", "content": prompt_text}],
+            timeout_seconds=timeout_seconds,
+        )
+
+    def _vision_request(
+        self,
+        images,
+        prompt_text,
+        max_images=5,
+        timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS,
+    ):
+        content = [{"type": "text", "text": prompt_text}]
+        for url in self._image_data_urls(images, max_images):
+            content.append({"type": "image_url", "image_url": {"url": url}})
+        return self._chat(
+            self.vision_model,
+            [{"role": "user", "content": content}],
+            timeout_seconds=timeout_seconds,
+        )
+
+    # ---- 出图 ----
+    @staticmethod
+    def _map_openai_size(aspect):
+        try:
+            w, h = str(aspect).split(":")
+            ratio = float(w) / float(h)
+        except Exception:
+            ratio = 1.0
+        if ratio >= 1.15:
+            return "1536x1024"
+        if ratio <= 0.87:
+            return "1024x1536"
+        return "1024x1024"
+
+    @staticmethod
+    def _encode_ref_png(img, limit=2048):
+        buf = io.BytesIO()
+        ic = img.copy()
+        if max(ic.size) > limit:
+            limit_image_size(ic, (limit, limit))
+        ic.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def _images_edits(self, prompt, refs, size, quality):
+        boundary = "----xiaobaitu" + hashlib.md5(
+            f"{time.time()}{random.random()}".encode()
+        ).hexdigest()[:16]
+        chunks = []
+
+        def add_field(name, value):
+            chunks.append(
+                (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                    f"{value}\r\n"
+                ).encode("utf-8")
+            )
+
+        add_field("model", self.model)
+        add_field("prompt", prompt)
+        add_field("size", size)
+        add_field("quality", quality)
+        add_field("n", "1")
+        for i, img in enumerate(refs):
+            payload = self._encode_ref_png(img)
+            chunks.append(
+                (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="image[]"; '
+                    f'filename="ref_{i}.png"\r\n'
+                    "Content-Type: image/png\r\n\r\n"
+                ).encode("utf-8")
+                + payload
+                + b"\r\n"
+            )
+        chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
+        return self._openai_call(
+            "/images/edits",
+            multipart=(
+                b"".join(chunks),
+                f"multipart/form-data; boundary={boundary}",
+            ),
+            timeout_seconds=GEMINI_IMAGE_REQUEST_TIMEOUT_SECONDS,
+        )
+
+    def _extract_openai_image(self, data):
+        for item in (data or {}).get("data") or []:
+            if not isinstance(item, dict):
+                continue
+            b64 = item.get("b64_json")
+            if b64:
+                try:
+                    return Image.open(io.BytesIO(base64.b64decode(b64)))
+                except Exception:
+                    continue
+            url = item.get("url")
+            if url:
+                try:
+                    with urllib.request.urlopen(url, timeout=60) as resp:
+                        return Image.open(io.BytesIO(resp.read()))
+                except Exception:
+                    continue
+        return None
+
+    def generate_image(
+        self,
+        refs,
+        prompt,
+        aspect="1:1",
+        size="1K",
+        thinking_level="high",
+        text_language="zh",
+    ):
+        if is_demo_api_key(self.api_key):
+            label = "演示生成图"
+            prompt_text = re.sub(r"\s+", " ", (prompt or "").strip())
+            if prompt_text:
+                label = prompt_text[:42]
+            self.total_tokens += 128
+            return _demo_image(
+                label, get_image_language_instruction(text_language), aspect
+            )
+
+        full_prompt = (
+            f"CRITICAL: {get_image_language_instruction(text_language)}\n\n"
+            f"Target aspect ratio: {aspect}.\n\n"
+            f"{prompt}"
+        )
+        quality = {"1K": "medium", "2K": "high", "4K": "high"}.get(size, "medium")
+        target_size = self._map_openai_size(aspect)
+        max_refs = MODELS.get(self.model, {}).get("max_refs", 10)
+        try:
+            if refs:
+                data = self._images_edits(
+                    full_prompt, refs[:max_refs], target_size, quality
+                )
+            else:
+                data = self._openai_call(
+                    "/images/generations",
+                    {
+                        "model": self.model,
+                        "prompt": full_prompt,
+                        "size": target_size,
+                        "quality": quality,
+                        "n": 1,
+                    },
+                    timeout_seconds=GEMINI_IMAGE_REQUEST_TIMEOUT_SECONDS,
+                )
+            usage = (data or {}).get("usage") or {}
+            try:
+                self.total_tokens += int(usage.get("total_tokens") or 0)
+            except Exception:
+                pass
+            image = self._extract_openai_image(data)
+            if image:
+                return image
+            self.last_error = "API返回无图片数据"
+            return None
+        except Exception as e:
+            self.last_error = str(e)
+            raise
+
+
+def create_ai_client(provider, model="", title_model=None, vision_model=None):
+    """按提供商类型构建客户端：gemini/relay → Gemini 协议，openai → OpenAI 协议。
+
+    title_model/vision_model 为可选覆盖参数：不传（None）时沿用 provider 自身配置的值，
+    传入非 None 值（例如用户在标题模型选择器里选中的模型名）时覆盖 provider 默认值。
+    """
+    provider = provider or {}
+    provider_type = (provider.get("provider_type") or "gemini").strip().lower()
+    image_model = (model or provider.get("image_model") or "").strip()
+    resolved_title_model = (
+        title_model if title_model is not None else provider.get("title_model", "")
+    )
+    resolved_vision_model = (
+        vision_model if vision_model is not None else provider.get("vision_model", "")
+    )
+    common = dict(
+        base_url=provider.get("base_url", ""),
+        title_model=resolved_title_model,
+        vision_model=resolved_vision_model,
+    )
+    if provider_type == "openai":
+        return OpenAIClient(provider.get("api_key", ""), image_model, **common)
+    return GeminiClient(provider.get("api_key", ""), image_model, **common)
+
+
+# ==================== 图片尺寸限制工具 ====================
+def limit_image_size(img: Image.Image, max_size=(1024, 1024), resample=Image.Resampling.LANCZOS) -> Image.Image:
+    """Resize `img` in place (mutating and returning it) so neither dimension
+    exceeds max_size, using .thumbnail() (preserves aspect ratio, no-op if
+    already within bounds). Single consolidated entry point for the various
+    ad-hoc `.thumbnail()` call sites in this file."""
+    img.thumbnail(max_size, resample)
+    return img
 
 
 # ==================== 图片转Base64工具 ====================
@@ -3911,6 +4792,11 @@ def apply_style():
     .template-preview-mini.disabled { opacity: 0.45; }
     .template-preview-mini-name { font-size: 13px; font-weight: 700; color: #0f172a; margin-top: 0.3rem; }
     .template-preview-mini-meta { font-size: 11px; color: #64748b; margin-top: 0.25rem; }
+    .settings-panel { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 16px; padding: 1.25rem 1.35rem; margin: 1rem 0 1.35rem 0; }
+    .settings-panel h4, .settings-panel .stMarkdown h4 { margin-top: 0; }
+    .settings-panel [data-testid="stVerticalBlock"] { gap: 0.5rem; }
+    .settings-hint-ok { color: var(--success); font-size: 12px; }
+    .settings-hint-warn { color: var(--warning); font-size: 12px; }
     </style>""",
         unsafe_allow_html=True,
     )
@@ -4010,6 +4896,22 @@ def show_user_compliance():
         st.success("✅ 已保存")
 
 
+def render_demo_admin_panel():
+    if not demo_mode_enabled():
+        return
+    st.markdown("#### 本地演示")
+    st.caption("管理员 Demo 已开放，测试密钥不会访问外部 API。")
+    if st.button("一键输入测试密钥", key="demo_seed_provider", use_container_width=True):
+        ensure_demo_provider(load_json(PROVIDERS_FILE, DEFAULT_PROVIDERS_DATA), set_current=True)
+        st.session_state["demo_notice"] = "已启用本地演示管理员提供商。"
+        st.rerun()
+    if st.button("进入管理员入口", key="demo_open_admin", use_container_width=True):
+        set_nav_page("⚙️ 提供商设置")
+        st.rerun()
+    if notice := st.session_state.pop("demo_notice", ""):
+        st.success(notice)
+
+
 def show_provider_settings():
     s = get_settings()
     st.markdown(
@@ -4027,11 +4929,30 @@ def show_provider_settings():
     if current:
         st.info(f"当前提供商: {current.get('name', '')}")
 
+    if demo_mode_enabled():
+        st.success("本地演示模式已开启。可直接使用测试密钥管理全部功能。")
+        if st.button("一键写入测试密钥并设为当前", type="primary"):
+            data = ensure_demo_provider(data, set_current=True)
+            providers = data.get("providers", [])
+            current_id = data.get("current_id")
+            st.success("✅ 已启用本地演示管理员")
+            st.rerun()
+
     with st.expander("➕ 添加提供商"):
         new_name = st.text_input("名称", key="prov_new_name")
-        new_type = st.selectbox("类型", ["gemini", "relay"], key="prov_new_type")
+        new_type = st.selectbox(
+            "类型",
+            ["gemini", "relay", "openai"],
+            key="prov_new_type",
+            help="gemini=官方SDK；relay=Gemini协议中转；openai=OpenAI协议(GPT Image 2等)",
+        )
         new_key = st.text_input("API Key", type="password", key="prov_new_key")
-        new_base = st.text_input("Base URL (可选)", key="prov_new_base")
+        new_base = st.text_input(
+            "Base URL ("
+            + ("openai/relay 类型必填" if new_type in ("relay", "openai") else "可选")
+            + ")",
+            key="prov_new_base",
+        )
         new_title_model = st.text_input(
             "标题模型 (可选)",
             value=s.get("default_title_model", "gemini-3.1-flash-lite-preview"),
@@ -4095,11 +5016,14 @@ def show_provider_settings():
             )
             p["provider_type"] = st.selectbox(
                 "类型",
-                ["gemini", "relay"],
-                index=["gemini", "relay"].index(p.get("provider_type", "gemini"))
-                if p.get("provider_type") in ["gemini", "relay"]
+                ["gemini", "relay", "openai"],
+                index=["gemini", "relay", "openai"].index(
+                    p.get("provider_type", "gemini")
+                )
+                if p.get("provider_type") in ["gemini", "relay", "openai"]
                 else 0,
                 key=f"prov_type_{p['id']}",
+                help="gemini=官方SDK；relay=Gemini协议中转；openai=OpenAI协议(GPT Image 2等)",
             )
             p["api_key"] = st.text_input(
                 "API Key",
@@ -4151,27 +5075,9 @@ def show_provider_settings():
                         st.error("；".join(provider_errors))
                     else:
                         try:
-                            client = GeminiClient(
-                                current_secret,
-                                base_url=p.get("base_url", ""),
-                                title_model=p.get("title_model", ""),
-                                vision_model=p.get("vision_model", ""),
-                            )
-                            resp = client._call(
-                                lambda: client.client.models.generate_content(
-                                    model=p.get("title_model")
-                                    or s.get(
-                                        "default_title_model",
-                                        "gemini-3.1-flash-lite-preview",
-                                    ),
-                                    contents=["Return exactly OK."],
-                                    config=types.GenerateContentConfig(
-                                        response_modalities=["TEXT"]
-                                    ),
-                                ),
-                                timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS,
-                            )
-                            st.success(f"✅ 连接成功: {(resp.text or '').strip()[:60]}")
+                            client = create_ai_client(p)
+                            reply = client.test_connection()
+                            st.success(f"✅ 连接成功: {(reply or '').strip()[:60]}")
                         except Exception as e:
                             st.error(sanitize_task_error(str(e)))
             with c3:
@@ -4276,7 +5182,7 @@ def show_settings_center():
 
 
 # ==================== 标题生成选项组件 ====================
-def render_title_gen_option(prefix: str):
+def render_title_gen_option(prefix: str, provider: dict = None):
     enabled_templates, template_options, template_names = (
         build_title_template_selector_options(include_custom=False)
     )
@@ -4328,15 +5234,45 @@ def render_title_gen_option(prefix: str):
         char_count = len(title_info) if title_info else 0
         st.caption(f"已输入 {char_count}/{MAX_TITLE_INFO_CHARS} 字符")
 
+        provider = provider or {}
+        provider_default_model = provider.get("title_model") or provider.get(
+            "vision_model", ""
+        )
+        default_title_vision_model = resolve_default_title_vision_model(
+            provider_default_model
+        )
+        with st.expander("⚙️ 高级：标题生成模型（默认沿用提供商配置，一般无需修改）"):
+            title_vision_model = st.selectbox(
+                "标题生成模型",
+                options=TITLE_VISION_MODEL_ORDER,
+                index=TITLE_VISION_MODEL_ORDER.index(default_title_vision_model),
+                format_func=format_title_vision_model,
+                key=f"{prefix}_title_vision_model",
+                help="标题一般用能识图的模型即可，GPT/Gemini/Grok 均可选择。"
+                "注意需与当前提供商协议匹配，选错会在生成时报错。",
+                label_visibility="collapsed",
+            )
+
         st.markdown("</div>", unsafe_allow_html=True)
 
-        return enable_title, title_info, selected_template, target_language
+        return (
+            enable_title,
+            title_info,
+            selected_template,
+            target_language,
+            title_vision_model,
+        )
 
+    provider = provider or {}
+    fallback_model = resolve_default_title_vision_model(
+        provider.get("title_model") or provider.get("vision_model", "")
+    )
     return (
         False,
         "",
         "default",
         st.session_state.get(f"{prefix}_title_language", DEFAULT_TARGET_LANGUAGE),
+        fallback_model,
     )
 
 
@@ -4650,6 +5586,36 @@ def render_settings_defaults_tab():
             value=s.get("default_vision_model", "gemini-3.1-flash-lite-preview"),
             key="settings_default_vision_model",
         )
+        _model_info_for_default = MODELS.get(default_model, {})
+        _default_res_options = _model_info_for_default.get("resolutions", ["1K"])
+        default_resolution = st.selectbox(
+            "默认分辨率",
+            _default_res_options,
+            index=_default_res_options.index(s.get("default_resolution", "1K"))
+            if s.get("default_resolution", "1K") in _default_res_options
+            else 0,
+            key="settings_default_resolution",
+            help="出图页面打开时默认选中的分辨率，具体可选项仍取决于所选模型。",
+        )
+        default_aspect = st.selectbox(
+            "默认宽高比",
+            ASPECT_RATIOS,
+            index=ASPECT_RATIOS.index(s.get("default_aspect", "1:1"))
+            if s.get("default_aspect", "1:1") in ASPECT_RATIOS
+            else 0,
+            key="settings_default_aspect",
+        )
+        _default_thinking_options = ["low", "high"]
+        default_thinking_level = st.selectbox(
+            "默认推理深度",
+            _default_thinking_options,
+            index=_default_thinking_options.index(s.get("default_thinking_level", "high"))
+            if s.get("default_thinking_level", "high") in _default_thinking_options
+            else 0,
+            format_func=lambda x: THINKING_LEVEL_DESC.get(x, x),
+            key="settings_default_thinking_level",
+            help="仅对支持推理深度的模型（如 Nano Banana Pro）生效。",
+        )
         current_output_dir = s.get("project_output_dir", _default_project_output_dir())
         if runtime_supports_output_dir_editing():
             project_output_dir = st.text_input(
@@ -4683,6 +5649,9 @@ def render_settings_defaults_tab():
         s["default_image_language"] = default_image_language
         s["compliance_mode"] = compliance_mode
         s["default_model"] = default_model
+        s["default_resolution"] = default_resolution
+        s["default_aspect"] = default_aspect
+        s["default_thinking_level"] = default_thinking_level
         s["default_title_model"] = default_title_model.strip()
         s["default_vision_model"] = default_vision_model.strip()
         s["project_output_dir"] = project_output_dir.strip()
@@ -4701,26 +5670,9 @@ def render_settings_defaults_tab():
             st.warning("请先配置可用 Provider/K。")
         else:
             try:
-                client = GeminiClient(
-                    provider.get("api_key"),
-                    base_url=provider.get("base_url", ""),
-                    title_model=provider.get("title_model", ""),
-                    vision_model=provider.get("vision_model", ""),
-                )
-                resp = client._call(
-                    lambda: client.client.models.generate_content(
-                        model=provider.get("title_model")
-                        or s.get(
-                            "default_title_model", "gemini-3.1-flash-lite-preview"
-                        ),
-                        contents=["Return exactly OK."],
-                        config=types.GenerateContentConfig(
-                            response_modalities=["TEXT"]
-                        ),
-                    ),
-                    timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS,
-                )
-                st.success(f"✅ 连接成功: {(resp.text or '').strip()[:60]}")
+                client = create_ai_client(provider)
+                reply = client.test_connection()
+                st.success(f"✅ 连接成功: {(reply or '').strip()[:60]}")
             except Exception as e:
                 msg = str(e)
                 if (
@@ -4879,8 +5831,70 @@ def render_image_template_management():
         st.success("✅ 图片模板已保存")
 
 
+# ==================== 出图设置统一面板 ====================
+def render_output_settings_panel(prefix: str, provider: dict, s: dict) -> dict:
+    """把模型、合规模式、宽高比、分辨率、推理深度这些"这次怎么出图"的参数
+    统一渲染在一个卡片区域里，smart 页和 combo 页共用，避免设置分散在侧边栏/多个 Tab。"""
+    provider = provider or {}
+    st.markdown('<div class="settings-panel">', unsafe_allow_html=True)
+    st.markdown("#### 🎛️ 这次出图设置")
+
+    model_keys = list(MODELS.keys())
+    provider_model = (provider.get("image_model") or "").strip()
+    fallback_default = provider_model or s.get("default_model", "nano-banana")
+    if fallback_default not in MODELS:
+        fallback_default = model_keys[0] if model_keys else fallback_default
+        st.warning("当前提供商配置的模型名未识别，已使用默认模型")
+
+    model_select_key = f"{prefix}_output_model"
+    if model_select_key not in st.session_state or st.session_state[model_select_key] not in model_keys:
+        st.session_state[model_select_key] = fallback_default
+
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        model = st.selectbox(
+            "🤖 出图模型",
+            model_keys,
+            index=model_keys.index(st.session_state[model_select_key]),
+            format_func=lambda x: MODELS[x]["name"],
+            key=model_select_key,
+            help="默认取当前提供商配置的模型，也可以在这里临时切换。",
+        )
+    with c2:
+        comp = get_compliance()
+        mode_options = {
+            k: v["name"] for k, v in comp["presets"].items() if v.get("enabled", True)
+        }
+        mode_keys = list(mode_options.keys()) or ["strict"]
+        current_mode = st.session_state.get("user_compliance_mode", s.get("compliance_mode", "strict"))
+        if current_mode not in mode_keys:
+            current_mode = mode_keys[0]
+        compliance_mode = st.selectbox(
+            "🛡️ 合规模式",
+            mode_keys,
+            index=mode_keys.index(current_mode),
+            format_func=lambda x: mode_options.get(x, x),
+            key=f"{prefix}_output_compliance_mode",
+            help="控制文案/图需的合规检测严格程度。",
+        )
+        st.session_state.user_compliance_mode = compliance_mode
+
+    aspect, size, thinking_level = render_gemini3_settings(prefix, model)
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    return {
+        "model": model,
+        "aspect": aspect,
+        "resolution": size,
+        "thinking_level": thinking_level,
+        "compliance_mode": compliance_mode,
+    }
+
+
 # ==================== Gemini 3 高级设置 ====================
 def render_gemini3_settings(prefix: str, model_key: str):
+    s = get_settings()
     model_info = MODELS.get(
         model_key,
         {
@@ -4896,24 +5910,38 @@ def render_gemini3_settings(prefix: str, model_key: str):
 
     st.markdown("#### ⚙️ 高级设置")
 
-    if supports_thinking:
-        c1, c2, c3 = st.columns(3)
-    else:
-        c1, c2 = st.columns(2)
+    # 固定使用3列布局，避免不同模型能力导致页面跳变
+    c1, c2, c3 = st.columns(3)
 
     with c1:
-        aspect = st.selectbox("📐 宽高比", ASPECT_RATIOS, key=f"{prefix}_aspect")
+        default_aspect = s.get("default_aspect", "1:1")
+        aspect_index = (
+            ASPECT_RATIOS.index(default_aspect) if default_aspect in ASPECT_RATIOS else 0
+        )
+        aspect = st.selectbox(
+            "📐 宽高比", ASPECT_RATIOS, index=aspect_index, key=f"{prefix}_aspect"
+        )
 
     with c2:
         available_res = model_info.get("resolutions", ["1K"])
-        size = st.selectbox("🖼️ 分辨率", available_res, key=f"{prefix}_size")
+        default_resolution = s.get("default_resolution", "1K")
+        res_index = (
+            available_res.index(default_resolution)
+            if default_resolution in available_res
+            else 0
+        )
+        size = st.selectbox(
+            "🖼️ 分辨率", available_res, index=res_index, key=f"{prefix}_size"
+        )
 
     thinking_level = "high"  # 默认值
 
-    if supports_thinking:
-        with c3:
+    with c3:
+        if supports_thinking:
             thinking_levels = model_info.get("thinking_levels", ["low", "high"])
-            default_thinking = model_info.get("default_thinking", "high")
+            default_thinking = s.get(
+                "default_thinking_level", model_info.get("default_thinking", "high")
+            )
             default_idx = (
                 thinking_levels.index(default_thinking)
                 if default_thinking in thinking_levels
@@ -4926,11 +5954,11 @@ def render_gemini3_settings(prefix: str, model_key: str):
                 index=default_idx,
                 format_func=lambda x: THINKING_LEVEL_DESC.get(x, x),
                 key=f"{prefix}_thinking_level",
-                help="仅 Nano Banana Pro 支持此功能",
+                help="仅部分模型（如 Nano Banana Pro）支持此功能",
             )
-    else:
-        # Flash模型不支持thinking_level，显示提示
-        st.caption("💡 Nano Banana Flash 不支持推理深度调节")
+        else:
+            st.markdown("🧠 推理深度")
+            st.caption(f"💡 {model_info.get('name', model_key)} 不支持推理深度调节")
 
     return aspect, size, thinking_level
 
@@ -5057,11 +6085,10 @@ def _execute_title_task(task: dict):
     )
     if not provider or not provider.get("api_key"):
         raise Exception("未配置可用的提供商")
-    client = GeminiClient(
-        provider.get("api_key"),
-        base_url=provider.get("base_url", ""),
-        title_model=provider.get("title_model", ""),
-        vision_model=provider.get("vision_model", ""),
+    client = create_ai_client(
+        provider,
+        title_model=payload.get("title_model"),
+        vision_model=payload.get("vision_model"),
     )
     images = load_image_paths(payload.get("image_paths", []))
     if images:
@@ -5098,12 +6125,11 @@ def _execute_smart_task(task: dict):
     if not images:
         raise Exception("任务图片已丢失，请重新上传")
     templates = get_template_group("smart_types")
-    client = GeminiClient(
-        provider.get("api_key"),
-        payload.get("model", provider.get("image_model", "")),
-        base_url=provider.get("base_url", ""),
-        title_model=provider.get("title_model", ""),
-        vision_model=provider.get("vision_model", ""),
+    client = create_ai_client(
+        provider,
+        model=payload.get("model", provider.get("image_model", "")),
+        title_model=payload.get("title_model"),
+        vision_model=payload.get("vision_model"),
     )
     anchor = client.analyze_product(
         images, payload.get("name", ""), payload.get("material", "")
@@ -5146,6 +6172,7 @@ def _execute_smart_task(task: dict):
                     image_language,
                 )
             except Exception as e:
+                logger.exception("task image generation failed (task_id=%s)", task.get("id"))
                 client.last_error = str(e)
                 img = None
             if img:
@@ -5184,12 +6211,8 @@ def _execute_translate_task(task: dict):
     images = load_image_paths(payload.get("image_paths", []))
     if not images:
         raise Exception("任务图片已丢失，请重新上传")
-    client = GeminiClient(
-        provider.get("api_key"),
-        payload.get("model", provider.get("image_model", "")),
-        base_url=provider.get("base_url", ""),
-        title_model=provider.get("title_model", ""),
-        vision_model=provider.get("vision_model", ""),
+    client = create_ai_client(
+        provider, model=payload.get("model", provider.get("image_model", ""))
     )
     image_language = payload.get("image_language", DEFAULT_TARGET_LANGUAGE)
     compliance_mode = payload.get("compliance_mode", "strict")
@@ -5215,6 +6238,7 @@ def _execute_translate_task(task: dict):
                 image_language,
             )
         except Exception as e:
+            logger.exception("task image translation failed (task_id=%s)", task.get("id"))
             client.last_error = str(e)
             translated = None
         if translated:
@@ -5244,12 +6268,11 @@ def _execute_combo_task(task: dict):
         raise Exception("任务参考图已丢失，请重新上传")
     reqs = payload.get("reqs", [])
     anchor = payload.get("anchor", {})
-    client = GeminiClient(
-        provider.get("api_key"),
-        payload.get("model", provider.get("image_model", "")),
-        base_url=provider.get("base_url", ""),
-        title_model=provider.get("title_model", ""),
-        vision_model=provider.get("vision_model", ""),
+    client = create_ai_client(
+        provider,
+        model=payload.get("model", provider.get("image_model", "")),
+        title_model=payload.get("title_model"),
+        vision_model=payload.get("vision_model"),
     )
     results = []
     errors = []
@@ -5333,6 +6356,7 @@ def run_task_worker(task_id: str):
         )
         record_task_history(completed_task or task, result)
     except Exception as e:
+        logger.exception("task %s failed (type=%s)", task_id, task.get("type"))
         if is_task_cancelled(task_id):
             return
         failed_task = update_task(
@@ -5354,7 +6378,26 @@ def run_task_worker(task_id: str):
         schedule_task_workers()
 
 
+CLEANUP_INTERVAL_SECONDS = 60 * 60  # 1 hour
+
+
+def maybe_run_periodic_cleanup():
+    """Piggyback on task scheduling (which runs on every rerun/poll) to run
+    the trashed-records cleanup on a schedule, not just at session start."""
+    runtime = get_task_runtime()
+    last_ts = runtime.get("last_cleanup_ts", 0.0) or 0.0
+    now_ts = time.time()
+    if now_ts - last_ts < CLEANUP_INTERVAL_SECONDS:
+        return
+    runtime["last_cleanup_ts"] = now_ts
+    try:
+        cleanup_expired_trashed_records()
+    except Exception:
+        logger.exception("periodic cleanup_expired_trashed_records() failed")
+
+
 def schedule_task_workers():
+    maybe_run_periodic_cleanup()
     normalize_running_tasks()
     task_threads = get_task_threads()
     running_threads = {tid: th for tid, th in task_threads.items() if th.is_alive()}
@@ -5377,7 +6420,7 @@ def schedule_task_workers():
 
 
 def render_task_center():
-    tasks = list_tasks()
+    tasks = list_tasks_for_display()
     records = list_active_history_records()
     trashed_records = list_trashed_history_records()
     st.markdown("#### 📚 项目中心概览")
@@ -5428,7 +6471,7 @@ def render_sidebar_nav_section(title: str, items: list, current_page: str):
 
 
 def render_status_center_content():
-    tasks = list_tasks()
+    tasks = list_tasks_for_display()
     active_tasks = [task for task in tasks if task.get("status") in {"queued", "running"}]
     active_records = list_active_history_records()
     recent_done = [record for record in active_records if record.get("status") == "done"][:3]
@@ -5753,7 +6796,7 @@ def show_project_center():
         else "统一管理进行中任务、历史项目、回收站和本地文件。"
     )
 
-    tasks = list_tasks()
+    tasks = list_tasks_for_display()
     active_records = list_active_history_records()
     trashed_records = list_trashed_history_records()
     active_tasks = [t for t in tasks if t.get("status") in {"queued", "running"}]
@@ -5892,7 +6935,8 @@ def show_combo_page():
     vision_model = provider.get("vision_model", "")
     provider_image_model = provider.get("image_model", "")
 
-    # 侧边栏
+    # 侧边栏：只保留只读的任务状态/用量信息，可交互的出图参数已移到主区域「这次出图设置」卡片
+    model_key = provider_image_model or s.get("default_model", "nano-banana")
     with st.sidebar:
         st.markdown("#### 📊 任务状态")
         if st.session_state.combo_anchor:
@@ -5903,31 +6947,6 @@ def show_combo_page():
             )
         else:
             st.info("📤 请先上传并分析商品")
-
-        st.markdown("---")
-        st.markdown("#### 🛡️ 合规模式")
-        comp = get_compliance()
-        mode_options = {
-            k: v["name"] for k, v in comp["presets"].items() if v.get("enabled", True)
-        }
-        current_mode = st.session_state.get("user_compliance_mode", "strict")
-        selected_mode = st.selectbox(
-            "合规级别",
-            list(mode_options.keys()),
-            format_func=lambda x: mode_options[x],
-            index=list(mode_options.keys()).index(current_mode)
-            if current_mode in mode_options
-            else 0,
-            label_visibility="collapsed",
-        )
-        st.session_state.user_compliance_mode = selected_mode
-
-        st.markdown("---")
-        st.markdown("#### 🤖 出图模型")
-        model_key = provider_image_model or s.get("default_model", "nano-banana")
-        st.caption(
-            f"当前按提供商配置使用：{MODELS.get(model_key, {'name': model_key}).get('name', model_key)}"
-        )
 
         if st.session_state.session_tokens > 0:
             st.markdown(
@@ -6034,13 +7053,7 @@ def show_combo_page():
         ):
             with st.spinner("🤖 AI正在分析..."):
                 try:
-                    client = GeminiClient(
-                        api_key,
-                        model_key,
-                        base_url=base_url,
-                        title_model=title_model,
-                        vision_model=vision_model,
-                    )
+                    client = create_ai_client(provider, model=model_key)
                     anchor = client.analyze_product(
                         st.session_state.combo_images, name, detail
                     )
@@ -6069,8 +7082,8 @@ def show_combo_page():
             if total_count > MAX_TOTAL_IMAGES:
                 st.error(f"❌ 超出最大限制 ({MAX_TOTAL_IMAGES}张)")
 
-            enable_title, title_info, title_template, title_language = (
-                render_title_gen_option("combo")
+            enable_title, title_info, title_template, title_language, title_vision_model = (
+                render_title_gen_option("combo", provider)
             )
 
             image_language = render_target_language_selector(
@@ -6084,7 +7097,8 @@ def show_combo_page():
             )
 
             st.markdown("---")
-            aspect, size, thinking_level = render_gemini3_settings("combo", model_key)
+            output_settings = render_output_settings_panel("combo", provider, s)
+            model_key = output_settings["model"]
 
             can_generate = total_count > 0 and total_count <= MAX_TOTAL_IMAGES
 
@@ -6096,13 +7110,7 @@ def show_combo_page():
             ):
                 with st.spinner("🤖 生成中..."):
                     try:
-                        client = GeminiClient(
-                            api_key,
-                            model_key,
-                            base_url=base_url,
-                            title_model=title_model,
-                            vision_model=vision_model,
-                        )
+                        client = create_ai_client(provider, model=model_key)
                         reqs = client.generate_requirements(
                             st.session_state.combo_anchor,
                             selected_types,
@@ -6261,7 +7269,7 @@ def show_combo_page():
                         "image_language": st.session_state.get(
                             "combo_image_language", DEFAULT_TARGET_LANGUAGE
                         ),
-                        "model": model_key,
+                        "model": st.session_state.get("combo_output_model", model_key),
                         "aspect": st.session_state.get("combo_aspect", "1:1"),
                         "size": st.session_state.get("combo_size", "1K"),
                         "thinking_level": st.session_state.get(
@@ -6274,6 +7282,20 @@ def show_combo_page():
                         "template_prompt": template_prompt,
                         "title_language": st.session_state.get(
                             "combo_title_language", DEFAULT_TARGET_LANGUAGE
+                        ),
+                        "title_model": st.session_state.get(
+                            "combo_title_vision_model",
+                            resolve_default_title_vision_model(
+                                provider.get("title_model")
+                                or provider.get("vision_model", "")
+                            ),
+                        ),
+                        "vision_model": st.session_state.get(
+                            "combo_title_vision_model",
+                            resolve_default_title_vision_model(
+                                provider.get("title_model")
+                                or provider.get("vision_model", "")
+                            ),
                         ),
                         "summary": f"智能组图任务 · {len(reqs)}张",
                     },
@@ -6388,8 +7410,8 @@ def show_smart_page():
         selected_types, total_count = render_type_selector(
             templates, prefix="smart", max_per_type=5, max_total=20
         )
-        enable_title, title_info, title_template, title_language = (
-            render_title_gen_option("smart")
+        enable_title, title_info, title_template, title_language, title_vision_model = (
+            render_title_gen_option("smart", provider)
         )
         translation_template = "preserve_layout"
     else:
@@ -6399,6 +7421,9 @@ def show_smart_page():
             "",
             "default",
             DEFAULT_TARGET_LANGUAGE,
+        )
+        title_vision_model = resolve_default_title_vision_model(
+            title_model or vision_model
         )
         (
             enabled_translation_templates,
@@ -6431,11 +7456,12 @@ def show_smart_page():
 
     st.markdown("---")
 
-    model = provider_image_model or s.get("default_model", "nano-banana")
-    st.caption(
-        f"当前按提供商配置使用出图模型：{MODELS.get(model, {'name': model}).get('name', model)}"
-    )
-    aspect, size, thinking_level = render_gemini3_settings("smart", model)
+    output_settings = render_output_settings_panel("smart", provider, s)
+    model = output_settings["model"]
+    aspect = output_settings["aspect"]
+    size = output_settings["resolution"]
+    thinking_level = output_settings["thinking_level"]
+    compliance_mode = output_settings["compliance_mode"]
 
     can_gen = bool(images) and (
         workflow_mode == "translate" or (name and total_count > 0)
@@ -6468,10 +7494,10 @@ def show_smart_page():
                 "title_template": title_template,
                 "template_prompt": template_prompt,
                 "title_language": title_language,
+                "title_model": title_vision_model,
+                "vision_model": title_vision_model,
                 "translation_template": translation_template,
-                "compliance_mode": st.session_state.get(
-                    "user_compliance_mode", "strict"
-                ),
+                "compliance_mode": compliance_mode,
                 "summary": (
                     f"组图翻译任务 · {name or '未命名项目'} · {len(images)}张"
                     if workflow_mode == "translate"
@@ -6525,8 +7551,25 @@ def show_title_page():
         "🌐 标题目标语言",
         "标题默认优先英文；若选择英语，则输出纯英文标题。",
     )
-    st.caption(f"当前标题模型：{title_model or '未配置'}")
-    st.caption(f"当前视觉模型：{vision_model or '未配置'}")
+
+    st.markdown("### 🧠 标题生成模型")
+    default_title_vision_model = resolve_default_title_vision_model(
+        title_model or vision_model
+    )
+    selected_title_vision_model = st.selectbox(
+        "选择用于识图/生成标题的模型",
+        options=TITLE_VISION_MODEL_ORDER,
+        index=TITLE_VISION_MODEL_ORDER.index(default_title_vision_model),
+        format_func=format_title_vision_model,
+        key="standalone_title_vision_model",
+        help="标题生成一般用能识图的模型即可，GPT/Gemini/Grok 均可选择。"
+        "注意：模型需与当前提供商的协议匹配（OpenAI 协议提供商选 GPT/Grok 系列，"
+        "Gemini 协议提供商选 Gemini 系列），选错会在生成时报错。",
+    )
+    st.caption(
+        f"ℹ️ 当前提供商协议：{provider.get('provider_type', 'gemini')}；"
+        f"提供商默认配置：文字生成模型 {title_model or '未配置'} · 图片理解模型 {vision_model or '未配置'}"
+    )
     if title_language == "en":
         st.caption("当前输出: 🇺🇸 纯英文标题")
     else:
@@ -6648,6 +7691,8 @@ def show_title_page():
                 "template_prompt": final_prompt,
                 "title_language": title_language,
                 "image_paths": image_paths,
+                "title_model": selected_title_vision_model,
+                "vision_model": selected_title_vision_model,
                 "summary": f"标题任务 · {get_target_language(title_language)['label']}",
             },
         )
@@ -6668,6 +7713,9 @@ def main_app():
     with st.sidebar:
         st.markdown(f"### 🍌 {APP_NAME}")
         st.markdown("---")
+        render_demo_admin_panel()
+        if demo_mode_enabled():
+            st.markdown("---")
         provider = get_active_provider()
         if provider:
             st.caption(f"当前提供商: {provider.get('name', '')}")

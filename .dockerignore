@@ -18,6 +18,11 @@ venv/
 
 # Data (mounted as volume)
 data/
+deploy/1panel/data/
+
+# Desktop-only code is not part of the web container build context.
+desktop/
+desktop-app/
 
 # Config
 .env

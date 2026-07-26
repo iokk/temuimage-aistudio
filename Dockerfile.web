@@ -19,8 +19,10 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY app.py .
 
 ENV APP_RUNTIME=server
+ENV XIAOBAITU_DEMO_MODE=0
 ENV ECOMMERCE_WORKBENCH_DATA_DIR=/app/data
 ENV ECOMMERCE_WORKBENCH_PROJECTS_DIR=/app/data/projects
+ENV FILE_STORAGE_TYPE=local
 ENV FILE_STORAGE_PATH=/app/data/files
 
 RUN mkdir -p /app/data /app/data/files /app/data/projects

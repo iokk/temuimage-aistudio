@@ -1,24 +1,25 @@
 services:
-  workbench:
+  xiaobaitu-web:
     build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: ecommerce-workbench
+      context: ../..
+      dockerfile: Dockerfile.web
+    image: xiaobaitu-web:latest
+    container_name: xiaobaitu-web
     restart: unless-stopped
     ports:
       - "${APP_PORT:-8501}:8501"
     volumes:
       - ./data:/app/data
     environment:
-      APP_RUNTIME: ${APP_RUNTIME:-server}
+      APP_RUNTIME: server
       XIAOBAITU_DEMO_MODE: ${XIAOBAITU_DEMO_MODE:-0}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      ECOMMERCE_WORKBENCH_DATA_DIR: ${ECOMMERCE_WORKBENCH_DATA_DIR:-/app/data}
-      ECOMMERCE_WORKBENCH_PROJECTS_DIR: ${ECOMMERCE_WORKBENCH_PROJECTS_DIR:-/app/data/projects}
+      ECOMMERCE_WORKBENCH_DATA_DIR: /app/data
+      ECOMMERCE_WORKBENCH_PROJECTS_DIR: /app/data/projects
       FILE_STORAGE_TYPE: ${FILE_STORAGE_TYPE:-local}
       FILE_RETENTION_DAYS: ${FILE_RETENTION_DAYS:-7}
-      FILE_STORAGE_PATH: ${FILE_STORAGE_PATH:-/app/data/files}
+      FILE_STORAGE_PATH: /app/data/files
       S3_ENDPOINT: ${S3_ENDPOINT:-}
       S3_BUCKET: ${S3_BUCKET:-}
       S3_REGION: ${S3_REGION:-}
