@@ -1,126 +1,72 @@
-# 电商出图工作台
+# TuLite · 图 Lite
 
-个人 self-hosted 主线版本，面向两种运行形态：
+轻量级跨境电商 AI 出图工作台。单文件 Streamlit 应用，支持 Gemini / OpenAI（GPT Image）协议出图、批量组图、多语言产品标题生成，可本地跑，也可一键 Docker 私有部署。
 
-1. `desktop/mac`
-2. `server/web`
+## 功能
 
-两种模式共用同一套模板库、任务队列、项目中心、提供商配置和核心生成流程，但文件能力按运行环境分流：
+- **🚀 智能组图**：上传产品图 → AI 分析商品 → 按模板批量生成主图/场景图/细节图
+- **🎨 快速出图 / 图片翻译**：单张图快速生成、图内文字翻译改写
+- **🏷️ 标题生成**：基于产品图的多语言标题生成（支持 15 种跨境主流语言），可在 GPT / Gemini / Grok 常见视觉模型间选择
+- **📚 项目中心**：任务记录、生成结果按项目归档，支持回收站与自动过期清理
+- **🧩 模板库 / 提示词管理**：出图模板与语言规则均可在页面内直接编辑
+- **⚙️ 多提供商**：支持 `gemini`（官方/兼容中转）、`relay`（Gemini 协议中转）、`openai`（标准 OpenAI 协议，含 GPT Image 文生图与图生图）三种接入类型
 
-- `desktop/mac` 可以打开本地文件、打开本地文件夹、选择本地保存目录
-- `server/web` 只走浏览器上传和下载，结果先保存在服务器项目中心，不直接操作访问者电脑文件系统
+## 技术特点
 
-## 当前主线
+- 单文件 `app.py`，依赖极少，启动快，方便自部署和二次修改
+- 任务队列内建并发上限（默认同时 2 个任务），带 429/5xx 指数退避重试
+- 多会话使用时任务记录按浏览器会话隔离展示
+- API Key 存储：macOS 桌面版走系统 Keychain；服务器/容器部署自动降级为本地密钥加密存储（Fernet），不明文落盘
+- 文件日志（`data/logs/app.log`，滚动 5MB×3），任务失败自动记录完整堆栈
+- 过期文件每小时自动清理
 
-仓库当前只保留个人部署版主线：
-
-- `app.py`：Streamlit 主应用
-- `desktop/`：Mac 本地桌面壳辅助代码
-- `desktop-app/`：桌面端实验壳
-- `docs/superpowers/`：设计、维护规范和演进文档
-
-旧的 `rebuild` 多服务架构已经从主工作树移除，不再作为正式部署路径。
-
-## 运行模式
-
-通过环境变量切换：
+## 快速开始（本地）
 
 ```bash
-APP_RUNTIME=desktop
-APP_RUNTIME=server
-```
-
-默认规则：
-
-- 本地直接运行时默认 `desktop`
-- Docker / Linux 服务器部署时默认 `server`
-
-## 功能结构
-
-- `🚀 智能组图`
-- `🎨 快速出图 / 图片翻译`
-- `🏷️ 标题生成`
-- `📚 项目中心`
-- `🧩 模板库`
-- `⚙️ 提供商设置`
-- `🛠️ 系统设置`
-
-## Linux self-hosted 快速部署
-
-```bash
-git clone https://github.com/iokk/xiaobaitu.git
-cd xiaobaitu
-cp .env.example .env
-./deploy.sh install
-```
-
-默认访问地址：
-
-- [http://localhost:8501](http://localhost:8501)
-
-## 本地开发启动
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
+git clone https://cnb.cool/imqie/tulite.git
+cd tulite
 pip install -r requirements.txt
-cp .env.example .env
 streamlit run app.py
 ```
 
-如果你要强制本地以桌面模式运行：
+打开 http://localhost:8501 ，在「⚙️ 提供商设置」里填入你的 API Key 即可使用。
+
+## 运行模式
+
+通过环境变量 `APP_RUNTIME` 切换：
+
+- `desktop`（本地直接运行时默认）：可打开本地文件夹、自选保存目录
+- `server`（Docker/Linux 部署时默认）：只走浏览器上传下载，结果保存在服务器项目中心
+
+## 部署
+
+推荐 Docker Compose 单机部署，详见 [DEPLOYMENT.md](DEPLOYMENT.md)：
 
 ```bash
-APP_RUNTIME=desktop streamlit run app.py
+git clone https://cnb.cool/imqie/tulite.git
+cd tulite
+cp .env.example .env   # 按需修改
+docker compose up -d
 ```
 
-如果你要在本机模拟服务器模式：
+## 目录结构
 
-```bash
-APP_RUNTIME=server streamlit run app.py
+```
+app.py              # 主应用（单文件）
+requirements.txt    # 完整依赖
+requirements-web.txt# 仅 Web 部署的精简依赖
+Dockerfile / Dockerfile.web / docker-compose.yml
+deploy/1panel/      # 1Panel 面板部署专用文件
+desktop/ desktop-app/  # macOS 桌面壳（仅本地桌面版需要）
+data/               # 运行时数据（配置/任务/文件/日志），已 gitignore
 ```
 
-## 数据目录
+## 注意事项
 
-默认数据目录：
+- 当前架构为**单进程单实例**设计（本地 JSON 文件存储状态），不支持多副本/水平扩展；个人和小团队使用完全够用
+- 生产部署请勿开启 `XIAOBAITU_DEMO_MODE`
+- API Key 属于敏感信息，`.env` 与 `data/` 目录不要提交到仓库
 
-- 本地开发：`./data`
-- Docker / 服务器：`/app/data`
+## License
 
-重要文件：
-
-- `data/providers.json`
-- `data/settings.json`
-- `data/templates.json`
-- `data/title_templates.json`
-- `data/tasks.json`
-- `data/history.json`
-
-项目结果默认目录：
-
-- `desktop/mac`：`~/Downloads/电商出图工作台`
-- `server/web`：`/app/data/projects`
-
-## 提供商与密钥
-
-- 如果 `.env` 中提供了 `GOOGLE_API_KEY` 或 `GEMINI_API_KEY`，并且本地没有 provider 配置，应用会自动创建默认 Gemini 提供商
-- `desktop/mac` 优先使用 macOS Keychain 保存 provider 密钥
-- `server/web` 不依赖 Keychain，provider 密钥按服务器运行方式保存
-
-## 服务器模式的文件规则
-
-这是这版最重要的边界：
-
-- 用户通过浏览器上传素材
-- 生成结果先落到服务器项目中心
-- 用户从项目中心下载 ZIP 或结果文件
-- 服务器版不显示“打开本地文件夹”
-- 服务器版不允许把访问者电脑路径当作保存目录
-
-## 文档
-
-- [部署说明](/tmp/xiaobaitu/DEPLOYMENT.md)
-- [系统细节设计](/tmp/xiaobaitu/docs/superpowers/specs/2026-04-21-system-detail-design.md)
-- [模板管理设计](/tmp/xiaobaitu/docs/superpowers/specs/2026-04-21-template-management-design.md)
-- [双运行模式设计](/tmp/xiaobaitu/docs/superpowers/specs/2026-04-23-self-hosted-runtime-design.md)
-
+私有项目，仅供个人/团队内部使用。
