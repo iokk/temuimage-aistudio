@@ -35,7 +35,24 @@ from google.genai import types
 APP_VERSION = "V15.2.1"
 APP_AUTHOR = "企鹅 & 小明"
 APP_COMMERCIAL = "企鹅 & Jerry"
-APP_NAME = "电商出图工作台"
+APP_NAME = "电商出图工作台"  # 内部常量：用于本地目录等功能性路径，勿改
+BRAND_NAME = "TuLite"
+BRAND_TITLE = "TuLite · 跨境出图工作台"
+BRAND_CAPTION = "图 Lite · 跨境出图"
+# 品牌 Logo（内联 SVG，无外部资源）：墨蓝描边圆角方框 + 画框山形 + 橙色太阳点 + 字标
+TULITE_LOGO_HTML = """
+<div style="display:flex;align-items:center;gap:10px;height:56px;margin:2px 0 6px 0;">
+  <svg width="44" height="44" viewBox="0 0 44 44" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <rect x="3" y="3" width="38" height="38" rx="8" fill="#ffffff" stroke="#1B2A4A" stroke-width="2.5"/>
+    <circle cx="29" cy="14.5" r="3.5" fill="#FF7A45"/>
+    <path d="M9 31 L18 19 L24 26 L28 22 L35 31 Z" fill="#1B2A4A"/>
+  </svg>
+  <div style="line-height:1.15;">
+    <div style="font-size:20px;font-weight:800;color:#1B2A4A;letter-spacing:0.2px;">TuLite</div>
+    <div style="font-size:11px;color:#64748B;">图 Lite · 跨境出图</div>
+  </div>
+</div>
+"""
 DEMO_PROVIDER_ID = "local-demo-admin"
 DEMO_PROVIDER_KEY = "DEMO-ADMIN-KEY"
 DEMO_PROVIDER_NAME = "本地演示管理员"
@@ -756,7 +773,7 @@ Requirements: {requirements}
 Generate JSON array:
 [{{"type_key": "xxx", "index": 1, "headline": "max 40 chars", "subline": "max 60 chars", "badge": "max 20 chars or empty"}}]
 CRITICAL: Use concise natural {output_language_name} only. Keep each field short and readable for ecommerce images. Return valid JSON.""",
-    "image_prompt": """Professional ecommerce product image.
+    "image_prompt": """Professional commercial product photography for an ecommerce listing.
 Product: {product_name}
 Category: {category}
 Image type: {image_type}
@@ -764,12 +781,14 @@ Style: {style_hint}
 Scene: {scene}
 Text overlay ({output_language_name} ONLY):
 {text_content}
-CRITICAL: Product must match reference. If the image contains text, use {output_language_name} only. Professional ecommerce style.
+Photography: studio softbox lighting, soft natural shadow under the product, clean seamless background, sharp focus, high detail, true-to-life colors.
+Composition: product is the hero, centered, filling about 70-80% of the frame, clear visual hierarchy, uncluttered layout.
+CRITICAL: Product must exactly match the reference image in shape, color, material and logo. If the image contains text, use {output_language_name} only. Keep the image free of watermarks and of any text beyond the overlay above. Professional ecommerce style.
 Aspect ratio: {aspect_ratio}""",
-    "size_image_prompt": """Professional product dimension diagram.
+    "size_image_prompt": """Professional product dimension diagram for an ecommerce listing.
 Product: {product_name}
-Style: Clean technical illustration on white background
-REQUIRED: Clear bidirectional arrow lines. Dual unit measurements: XX.XX inch / XX.X cm. Use word "inch" NOT "in". Clean sans-serif font. Use {output_language_name} for descriptive labels and notes while keeping inch and cm for units.
+Style: Clean technical illustration on a pure white background, product rendered accurately and centered, filling about 70% of the frame, flat even lighting, no decorative props.
+REQUIRED: Clear bidirectional arrow lines aligned to each measured edge. Dual unit measurements: XX.XX inch / XX.X cm. Use word "inch" NOT "in". Clean sans-serif font, high-contrast dark labels, generous spacing so every number stays legible. Use {output_language_name} for descriptive labels and notes while keeping inch and cm for units. Keep the diagram free of watermarks and unrelated text.
 Aspect ratio: {aspect_ratio}""",
     "translation_image_prompt": """Translate this ecommerce image into {output_language_name} while preserving the original layout as much as possible.
 Goal: compliance-first translation, not creative redesign.
@@ -802,7 +821,7 @@ DEFAULT_TEMPLATES = {
             "name": "主图白底",
             "icon": "🎯",
             "desc": "纯白背景产品主图",
-            "hint": "Pure white background, centered product",
+            "hint": "Pure seamless white background, product centered filling 70-80% of frame, soft grounding shadow, no props, no text",
             "enabled": True,
             "order": 1,
         },
@@ -810,7 +829,7 @@ DEFAULT_TEMPLATES = {
             "name": "功能卖点图",
             "icon": "⭐",
             "desc": "突出商品核心卖点与优势的说明图",
-            "hint": "Feature highlights with callouts",
+            "hint": "Feature highlights with clean callout lines and short labels, product hero centered, tidy uncluttered layout",
             "enabled": True,
             "order": 2,
         },
@@ -818,7 +837,7 @@ DEFAULT_TEMPLATES = {
             "name": "场景应用图",
             "icon": "🏠",
             "desc": "展示商品在真实使用场景中的效果",
-            "hint": "Lifestyle scene, product in use",
+            "hint": "Realistic lifestyle scene, product in natural use, warm inviting light, believable environment, product clearly visible",
             "enabled": True,
             "order": 3,
         },
@@ -826,7 +845,7 @@ DEFAULT_TEMPLATES = {
             "name": "细节特写图",
             "icon": "🔍",
             "desc": "放大展示材质、工艺和细节做工",
-            "hint": "Macro close-up shot, texture details",
+            "hint": "Macro close-up shot, texture and craftsmanship details, shallow depth of field, razor-sharp focus on material",
             "enabled": True,
             "order": 4,
         },
@@ -834,7 +853,7 @@ DEFAULT_TEMPLATES = {
             "name": "尺寸规格图",
             "icon": "📐",
             "desc": "展示尺寸、规格或参数信息的说明图",
-            "hint": "Dimension diagram with inch/cm",
+            "hint": "Clean technical dimension diagram, bidirectional arrows, dual inch/cm units, pure white background",
             "enabled": True,
             "order": 5,
             "special": True,
@@ -843,7 +862,7 @@ DEFAULT_TEMPLATES = {
             "name": "对比优势图",
             "icon": "⚖️",
             "desc": "用对比方式突出商品优势与差异点",
-            "hint": "Side by side comparison",
+            "hint": "Clear side-by-side comparison layout, consistent lighting on both sides, our product's advantage clearly highlighted",
             "enabled": True,
             "order": 6,
         },
@@ -851,7 +870,7 @@ DEFAULT_TEMPLATES = {
             "name": "包装清单图",
             "icon": "📦",
             "desc": "展示包装内包含的商品与配件内容",
-            "hint": "Flat lay of package contents",
+            "hint": "Neat flat lay of all package contents on a clean background, evenly lit, every item fully visible and labeled",
             "enabled": True,
             "order": 7,
         },
@@ -859,7 +878,7 @@ DEFAULT_TEMPLATES = {
             "name": "操作引导图",
             "icon": "📋",
             "desc": "用于说明安装、使用流程或操作顺序的信息图",
-            "hint": "Step by step visual guide",
+            "hint": "Numbered step-by-step visual guide, clean infographic layout, consistent product rendering across steps",
             "enabled": True,
             "order": 8,
         },
@@ -4898,11 +4917,11 @@ def create_zip_from_results(
 def apply_style():
     st.markdown(
         """<style>
-    :root { --primary: #6366f1; --success: #10b981; --warning: #f59e0b; --danger: #ef4444; }
-    .main-title { font-size: 2.5rem; font-weight: 800; text-align: center; margin: 1rem 0; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    :root { color-scheme: light; --primary: #1B2A4A; --accent: #FF7A45; --slate: #64748B; --success: #10b981; --warning: #f59e0b; --danger: #ef4444; }
+    .main-title { font-size: 2.5rem; font-weight: 800; text-align: center; margin: 1rem 0; color: #1B2A4A; }
     .page-title { font-size: 1.75rem; font-weight: 700; margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 3px solid var(--primary); }
     .stButton>button { border-radius: 10px; font-weight: 600; transition: all 0.2s; }
-    .stButton>button:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3); }
+    .stButton>button:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(27, 42, 74, 0.25); }
     section[data-testid="stSidebar"] .stButton>button { padding: 0.38rem 0.65rem; min-height: 0; margin-bottom: 0.18rem; }
     section[data-testid="stSidebar"] h4 { margin-top: 0.15rem; margin-bottom: 0.45rem; font-size: 0.92rem; }
     section[data-testid="stSidebar"] .element-container { margin-bottom: 0.15rem; }
@@ -4923,13 +4942,13 @@ def apply_style():
     #MainMenu, footer, header { visibility: hidden; }
     .title-box { background: linear-gradient(135deg, #eff6ff 0%, #f5f3ff 100%); border: 1px solid #c7d2fe; border-radius: 12px; padding: 1rem; margin: 0.75rem 0; }
     .image-card { border: 1px solid #e2e8f0; border-radius: 12px; padding: 0.5rem; margin: 0.5rem 0; background: white; }
-    .image-label { font-size: 12px; font-weight: 600; color: #6366f1; text-align: center; margin-top: 0.25rem; }
+    .image-label { font-size: 12px; font-weight: 600; color: #1B2A4A; text-align: center; margin-top: 0.25rem; }
     .template-preview-shell { border: 1px solid #dbe4f0; border-radius: 16px; background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%); padding: 1rem; margin: 0.5rem 0 1rem 0; }
-    .template-preview-title { font-size: 13px; font-weight: 700; color: #1e3a8a; margin-bottom: 0.4rem; }
+    .template-preview-title { font-size: 13px; font-weight: 700; color: #1B2A4A; margin-bottom: 0.4rem; }
     .template-preview-subtitle { font-size: 12px; color: #64748b; margin-bottom: 0.75rem; }
     .template-preview-card { border: 1px solid #dbe4f0; border-radius: 14px; background: white; padding: 0.9rem; min-height: 128px; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05); }
     .template-preview-card.disabled { opacity: 0.55; border-style: dashed; }
-    .template-preview-badge { display: inline-block; border-radius: 999px; background: #eff6ff; color: #1d4ed8; padding: 0.16rem 0.55rem; font-size: 11px; font-weight: 600; margin-right: 0.35rem; }
+    .template-preview-badge { display: inline-block; border-radius: 999px; background: #f1f5f9; color: #1B2A4A; padding: 0.16rem 0.55rem; font-size: 11px; font-weight: 600; margin-right: 0.35rem; }
     .template-preview-badge.off { background: #f3f4f6; color: #6b7280; }
     .template-preview-name { font-size: 16px; font-weight: 700; color: #0f172a; margin: 0.55rem 0 0.3rem 0; }
     .template-preview-desc { font-size: 13px; color: #334155; line-height: 1.5; }
@@ -4956,7 +4975,7 @@ def show_footer():
     st.markdown(
         f"""
     <div class="footer">
-        <p><strong>{APP_NAME}</strong></p>
+        <p><strong>{BRAND_TITLE}</strong></p>
         <p>核心作者: {APP_AUTHOR} · 商业订阅: {APP_COMMERCIAL}</p>
         <p style="margin-top:0.45rem;font-size:10px;color:#94a3b8">© {datetime.now().year} All Rights Reserved.</p>
     </div>
@@ -5149,7 +5168,7 @@ def show_provider_settings():
                 st.rerun()
 
     if not providers:
-        st.warning("暂无提供商，请先添加。")
+        st.warning("还没有配置提供商。请在上方「添加提供商」填入 API Key 后，即可开始出图和标题生成。")
         return
 
     for idx, p in enumerate(providers):
@@ -6609,7 +6628,7 @@ def render_task_center():
     trashed_records = list_trashed_history_records(owner_id=get_session_owner_id())
     st.markdown("#### 📚 项目中心概览")
     if not tasks and not records and not trashed_records:
-        st.caption("暂无项目")
+        st.caption("还没有项目。去「🚀 智能组图」上传一张产品图试试。")
         return
     active = [t for t in tasks if t.get("status") in {"queued", "running"}]
     completed_records = [r for r in records if r.get("status") == "done"]
@@ -6626,7 +6645,7 @@ def render_task_center():
     elif completed_records:
         st.caption(f"最近已完成项目 {len(completed_records)} 个")
     else:
-        st.caption("暂无进行中的任务")
+        st.caption("当前没有进行中的任务，新的出图任务会显示在这里")
 
 
 def set_nav_page(page: str):
@@ -6892,7 +6911,7 @@ def render_file_management_tab(records: list):
     if startup_notice := st.session_state.pop("startup_maintenance_notice", ""):
         st.success(startup_notice)
     if not records:
-        st.info("暂无可管理的项目文件。")
+        st.info("还没有可管理的项目文件。完成一次出图后，结果文件会出现在这里。")
     orphan_dirs = find_orphan_project_dirs(records)
     summaries = {
         id(record): summarize_record_files(record) for record in records
@@ -7065,7 +7084,7 @@ def show_project_center():
         if notice := st.session_state.pop("project_center_notice", ""):
             st.success(notice)
         if not active_records:
-            st.info("暂无历史项目。任务完成或失败后会自动出现在这里。")
+            st.info("还没有历史项目。出图任务完成或失败后会自动出现在这里，可随时回来下载结果。")
         else:
             render_batch_record_actions(active_records, mode="history")
         for record in active_records:
@@ -7212,6 +7231,7 @@ def show_combo_page():
             label_visibility="collapsed",
             key="combo_upload_unique",
         )
+        st.caption("支持 PNG / JPG / WEBP，可多选。上传后系统会先分析商品，再按所选类型批量出图。")
 
         if files:
             images = []
@@ -7419,7 +7439,7 @@ def show_combo_page():
                 st.success("✅ 全部通过合规检测")
 
             if st.button(
-                "🚀 确认并开始生成图片", type="primary", use_container_width=True
+                "🚀 确认并开始出图", type="primary", use_container_width=True
             ):
                 st.session_state.combo_generating = True
                 st.rerun()
@@ -7580,6 +7600,7 @@ def show_smart_page():
         label_visibility="collapsed",
         key="smart_upload_unique",
     )
+    st.caption("支持 PNG / JPG / WEBP，可多选。上传后选择出图类型即可开始。")
 
     images = []
     if files:
@@ -7803,6 +7824,7 @@ def show_title_page():
             label_visibility="collapsed",
             key="title_image_upload",
         )
+        st.caption("支持 PNG / JPG / WEBP，可多选。AI 会先识别图中商品信息，再进行标题生成。")
 
         if title_files:
             cols = st.columns(min(len(title_files), 5))
@@ -7916,7 +7938,7 @@ def main_app():
     st.session_state["_footer_rendered"] = False
     current_page = get_nav_page()
     with st.sidebar:
-        st.markdown(f"### 🍌 {APP_NAME}")
+        st.markdown(TULITE_LOGO_HTML, unsafe_allow_html=True)
         st.markdown("---")
         render_demo_admin_panel()
         if demo_mode_enabled():
@@ -7974,22 +7996,40 @@ def require_access_password() -> None:
         return
     _, mid, _ = st.columns([1, 1.2, 1])
     with mid:
-        st.markdown(f"### 🍌 {APP_NAME}")
-        st.caption("请输入访问口令")
-        pwd = st.text_input("访问口令", type="password", key="_access_pwd_input")
-        if st.button("进入", use_container_width=True):
+        st.markdown(
+            """
+<div style="border:1px solid #e2e8f0;border-radius:16px;background:#f8fafc;
+            padding:22px 24px 6px 24px;margin-top:14vh;text-align:center;">
+"""
+            + TULITE_LOGO_HTML.replace(
+                'display:flex;align-items:center;', "display:flex;align-items:center;justify-content:center;"
+            )
+            + """
+  <div style="font-size:13px;color:#64748B;margin:2px 0 4px 0;">输入访问口令以继续</div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+        pwd = st.text_input(
+            "访问口令",
+            type="password",
+            key="_access_pwd_input",
+            label_visibility="collapsed",
+            placeholder="访问口令",
+        )
+        if st.button("进入 TuLite", use_container_width=True, type="primary"):
             if hmac.compare_digest(str(pwd or ""), expected):
                 st.session_state["auth_ok"] = True
                 st.rerun()
             else:
-                st.error("口令错误")
+                st.error("口令不正确，请重试。")
     st.stop()
 
 
 # ==================== 主入口 ====================
 def main():
     st.set_page_config(
-        page_title=APP_NAME,
+        page_title=BRAND_TITLE,
         page_icon="🍌",
         layout="wide",
         initial_sidebar_state="expanded",
