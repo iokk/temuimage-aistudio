@@ -813,6 +813,51 @@ Aspect ratio: {aspect_ratio}""",
 - {translation_language_rule}
 - Output exactly 6 lines total with no labels or commentary.
 - Line order must be English line then {target_language_name} line, repeated 3 times.""",
+    "temu_tri_title_prompt": """你是资深跨境电商标题专家，为 TEMU 平台同一款商品产出三条标题：中文、西班牙语（Español）、法语（Français）。
+
+商品信息：
+{product_info}
+
+{template_context}
+
+【幕后工作流程（对用户不可见，最终只交付成品）】
+1. 分别以中文、西班牙语、法语母语文案师的身份，各写一条标题；
+2. 切换为资深 TEMU 运营与合规专家身份，按下方三层合规框架逐条自查，发现问题立即改写；
+3. 只输出最终定稿结果，禁止输出思考过程、自查记录或任何解释。
+
+【三层合规框架】
+第一层 · 绝对禁用（任何情况下不得出现）：
+- 绝对化用语：最/第一/唯一/100%/保证/顶级/完美；Mejor/No.1/Único/Perfecto/100%/Garantía/Superior；Meilleur/No.1/Unique/Parfait/100%/Garantie/Supérieur
+- 虚假认证：FDA/CE/认证/Certificado/Certifié 等认证类词汇
+- 材质替换：gold→金色/Dorado/Doré；silver→银色/Plateado/Argenté；diamond→水晶·仿钻/Cristal·Estrás/Cristal·Strass
+
+第二层 · 条件禁用（仅当商品确实具备该属性、且商品信息明确支持时才可使用，否则一律省略）：
+- 防水 waterproof/Impermeable/Imperméable
+- 保温/隔热 insulated/Aislante/Isolant
+- 抗菌 antibacterial/Antibacteriano/Antibactérien
+- 环保·有机 eco·organic/Ecológico·Orgánico/Écologique·Bio
+- 儿童相关词汇（仅当商品确实属于儿童品类时可用）
+
+第三层 · 语义风险自查（看含义而非词表）：
+- 不得出现商品信息无法支撑的功效、安全、环保、医疗暗示
+- 不得用同义改写规避第一层禁用词
+- 不得暗示官方认证或针对未成年人营销
+- 命中任意一条立即改写该标题
+
+【质量原则】
+- 核心产品词放最前面；不堆砌同义词
+- 母语级自然表达，不是逐字翻译；三种语言各自贴合本地买家真实搜索习惯选长尾词
+- 宁可精准不要凑数
+- 结构公式（灵活运用）：[核心产品词]+[关键属性/材质]+[尺寸/规格]+[使用场景]+[风格/颜色]
+- 三条标题按各自语言的本地搜索表达组织，禁止三种语言互相逐字对译
+
+【硬性要求】
+- 每条标题 150-200 个字符（含空格），这是硬性区间：写完后逐条数字符，不足 150 时必须继续补充真实合规的长尾属性词（材质、规格、场景、人群、风格、颜色等）直到达标，超过 200 时删减。150-200 字符对三种语言都完全可以达到，不要轻易放弃
+- 西班牙语和法语标题必须附中文回译（back_translation_zh）
+- 例外规则（极少使用）：仅当某语言因合规原因（而非长度原因）实在无法产出干净标题时，该语言才不输出标题，改为在 issues 中用一句话说明原因。长度不足不是使用例外规则的理由
+
+【输出格式：只输出下面结构的 JSON，不要 markdown 代码块，不要任何多余文字】
+{"titles": [{"lang": "zh", "title": "..."}, {"lang": "es", "title": "...", "back_translation_zh": "..."}, {"lang": "fr", "title": "...", "back_translation_zh": "..."}], "issues": []}""",
 }
 
 DEFAULT_TEMPLATES = {
@@ -1991,7 +2036,6 @@ def _write_history_zip(
 ):
     dest_dir.mkdir(parents=True, exist_ok=True)
     zip_path = dest_dir / "download.zip"
-    language_info = get_target_language(target_language)
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
         for path in file_paths or []:
             if not path:
@@ -2000,21 +2044,7 @@ def _write_history_zip(
             if src.exists():
                 z.write(src, arcname=src.name)
         if titles:
-            if target_language == "en":
-                titles_content = "\n\n".join(
-                    [f"Title {i + 1}:\nEN: {t}" for i, t in enumerate(titles)]
-                )
-            else:
-                titles_content = "\n\n".join(
-                    [
-                        f"标题 {i // 2 + 1}:\nEN: {titles[i]}\n{language_info['copy_tag']}: {titles[i + 1]}"
-                        for i in range(0, len(titles) - 1, 2)
-                    ]
-                )
-            if not titles_content and titles:
-                titles_content = "\n".join(
-                    [f"Title {i + 1}: {t}" for i, t in enumerate(titles)]
-                )
+            titles_content = format_titles_text(titles)
             z.writestr("titles.txt", titles_content)
         if errors:
             z.writestr("errors.txt", "\n".join([str(err) for err in errors if err]))
@@ -2026,18 +2056,7 @@ def _write_project_text_files(
 ):
     dest_dir.mkdir(parents=True, exist_ok=True)
     if titles:
-        language_info = get_target_language(target_language)
-        if target_language == "en":
-            content = "\n\n".join(
-                [f"Title {i + 1}:\nEN: {t}" for i, t in enumerate(titles)]
-            )
-        else:
-            content = "\n\n".join(
-                [
-                    f"标题 {i // 2 + 1}:\nEN: {titles[i]}\n{language_info['copy_tag']}: {titles[i + 1]}"
-                    for i in range(0, len(titles) - 1, 2)
-                ]
-            )
+        content = format_titles_text(titles)
         (dest_dir / "titles.txt").write_text(content or "", encoding="utf-8")
     if errors:
         (dest_dir / "errors.txt").write_text(
@@ -3210,18 +3229,36 @@ def render_target_language_selector(
     label: str,
     help_text: str,
 ):
-    """语言选择器：跨页面共享 global_image_language / global_title_language，
-    避免同一款语言在 smart/combo/title 三个页面各自为政。"""
+    """语言选择器。
+
+    - 图片语言（key_suffix 含 image）：按页面独立（per-prefix），每次任务单独选择，
+      初始默认取设置里的 default_image_language，不回写全局。
+    - 标题语言：保持跨页面共享 global_title_language 的旧行为。"""
     s = get_settings()
     options = [item["code"] for item in TARGET_LANGUAGES]
     is_image_lang = "image" in key_suffix
-    global_key = "global_image_language" if is_image_lang else "global_title_language"
+    state_key = f"{prefix}_{key_suffix}"
 
-    if global_key not in st.session_state:
-        default_code = s.get(
-            "default_image_language" if is_image_lang else "default_title_language",
-            DEFAULT_TARGET_LANGUAGE,
+    if is_image_lang:
+        # 每个页面独立的图片语言选择，不与其他页面/全局设置联动
+        if state_key in st.session_state:
+            current_code = st.session_state[state_key]
+        else:
+            current_code = s.get("default_image_language", DEFAULT_TARGET_LANGUAGE)
+        if current_code not in options:
+            current_code = DEFAULT_TARGET_LANGUAGE
+        return st.selectbox(
+            label,
+            options=options,
+            index=options.index(current_code),
+            format_func=format_target_language_option,
+            key=state_key,
+            help=help_text,
         )
+
+    global_key = "global_title_language"
+    if global_key not in st.session_state:
+        default_code = s.get("default_title_language", DEFAULT_TARGET_LANGUAGE)
         if default_code not in options:
             default_code = DEFAULT_TARGET_LANGUAGE
         st.session_state[global_key] = default_code
@@ -3236,7 +3273,7 @@ def render_target_language_selector(
         options=options,
         index=default_index,
         format_func=format_target_language_option,
-        key=f"{prefix}_{key_suffix}",
+        key=state_key,
         help=help_text,
     )
     st.session_state[global_key] = selected
@@ -3295,6 +3332,35 @@ def build_title_prompt(
         translation_language_rule=extra_rule,
     )
     return f"{prompt}\n\n{rules}"
+
+
+def build_temu_tri_title_prompt(template_prompt: str, product_info: str) -> str:
+    """TEMU 三语标题提示词：中文/西语/法语三条标题，JSON 输出。
+
+    所选标题模板仅作为产品类目背景参考注入，输出格式以三语规范为准。"""
+    prompts = get_prompts()
+    tri_template = (
+        prompts.get("temu_tri_title_prompt")
+        or DEFAULT_PROMPTS["temu_tri_title_prompt"]
+    )
+    template_context = ""
+    if template_prompt:
+        filled = fill_prompt_template(
+            template_prompt,
+            product_info=product_info,
+            target_language_name="Spanish and French",
+            target_language_native="Español / Français",
+            target_language_label="西语/法语",
+        )
+        template_context = (
+            "【类目模板参考（仅供理解产品与选词，其中关于输出语言/行数/格式的要求一律忽略，"
+            "最终输出必须严格遵循本规范与 JSON 格式）】\n" + filled
+        )
+    return fill_prompt_template(
+        tri_template,
+        product_info=product_info or "No additional info provided",
+        template_context=template_context,
+    )
 
 
 def get_image_language_instruction(target_language: str) -> str:
@@ -3607,6 +3673,157 @@ def _validate_title_output(lines: list, target_language: str) -> tuple:
     return _validate_bilingual_titles(lines)
 
 
+# ==================== TEMU 三语标题（中/西/法）====================
+TRI_TITLE_LANGS = ("zh", "es", "fr")
+TRI_TITLE_LABELS = {"zh": "中文", "es": "Español", "fr": "Français"}
+TRI_TITLE_FLAGS = {"zh": "🇨🇳", "es": "🇪🇸", "fr": "🇫🇷"}
+TRI_TITLE_MIN_CHARS = 150
+TRI_TITLE_MAX_CHARS = 200
+
+
+def parse_tri_language_titles(text: str) -> dict:
+    """解析三语标题 JSON 输出，返回 {"entries": [...], "issues": [...]}。
+
+    - 容忍 markdown 代码块包裹与 JSON 前后杂质
+    - 字符数以 Python len() 为准，不信任模型自报数值
+    """
+    result = {"entries": [], "issues": []}
+    if not text:
+        return result
+    cleaned = _strip_code_fence(text).strip()
+    data = None
+    for candidate in (cleaned,):
+        try:
+            data = json.loads(candidate)
+            break
+        except Exception:
+            pass
+    if data is None:
+        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group(0))
+            except Exception:
+                data = None
+    if not isinstance(data, dict):
+        return result
+    for item in data.get("titles", []) or []:
+        if not isinstance(item, dict):
+            continue
+        lang = str(item.get("lang", "")).strip().lower()
+        title = str(item.get("title", "") or "").strip()
+        if lang not in TRI_TITLE_LANGS or not title:
+            continue
+        entry = {
+            "lang": lang,
+            "title": title,
+            "chars": len(title),
+        }
+        back = str(item.get("back_translation_zh", "") or "").strip()
+        if lang in ("es", "fr"):
+            entry["back_translation_zh"] = back
+        result["entries"].append(entry)
+    for issue in data.get("issues", []) or []:
+        issue_text = str(issue or "").strip()
+        if issue_text:
+            result["issues"].append(issue_text)
+    return result
+
+
+def _validate_tri_title_output(parsed: dict) -> tuple:
+    """校验三语标题结果。允许例外规则：缺某语言时须在 issues 里有说明。"""
+    entries = parsed.get("entries", []) if parsed else []
+    issues = parsed.get("issues", []) if parsed else []
+    details = {
+        "langs": [e.get("lang") for e in entries],
+        "issue_count": len(issues),
+    }
+    if not entries and not issues:
+        return False, "未解析到任何标题（JSON 格式不符合要求）", details
+    seen = set()
+    for entry in entries:
+        lang = entry.get("lang")
+        if lang in seen:
+            return False, f"语言 {lang} 出现重复标题", details
+        seen.add(lang)
+        if lang in ("es", "fr") and not entry.get("back_translation_zh"):
+            return False, f"{TRI_TITLE_LABELS.get(lang, lang)} 标题缺少中文回译", details
+    missing = [l for l in TRI_TITLE_LANGS if l not in seen]
+    if missing and not issues:
+        missing_labels = "、".join(TRI_TITLE_LABELS[l] for l in missing)
+        return False, f"缺少 {missing_labels} 标题且无 issues 说明", details
+    return True, "", details
+
+
+def normalize_title_entries(titles: list) -> list:
+    """把任务/历史里存储的标题统一为 dict 条目列表；兼容旧版纯字符串。"""
+    entries = []
+    for item in titles or []:
+        if isinstance(item, dict):
+            title = str(item.get("title", "") or "").strip()
+            if not title:
+                continue
+            entry = dict(item)
+            entry["title"] = title
+            entry["chars"] = len(title)
+            entries.append(entry)
+        elif isinstance(item, str) and item.strip():
+            entries.append({"lang": "", "title": item.strip(), "chars": len(item.strip())})
+    return entries
+
+
+def format_titles_text(titles: list, issues: list = None) -> str:
+    """标题内容的纯文本布局（用于复制区、titles.txt、历史展示）。"""
+    entries = normalize_title_entries(titles)
+    lines = []
+    idx = 0
+    issue_lines = [f"⚠️ {issue}" for issue in issues or []]
+    for entry in entries:
+        lang = entry.get("lang", "")
+        if lang == "issue":
+            issue_lines.append(f"⚠️ {entry['title']}")
+            continue
+        idx += 1
+        label = TRI_TITLE_LABELS.get(lang, lang or "标题")
+        lines.append(f"{idx}. {label} — {entry['title']} | {entry['chars']}字符")
+        back = entry.get("back_translation_zh", "")
+        if back:
+            lines.append(f"   中文回译: {back}")
+    lines.extend(issue_lines)
+    return "\n".join(lines)
+
+
+def merge_titles_and_issues(title_result: dict) -> list:
+    """把标题条目与 issues 合并成一个可持久化的列表（issues 作为特殊条目）。"""
+    merged = list(title_result.get("titles", []) or [])
+    for issue in title_result.get("issues", []) or []:
+        merged.append({"lang": "issue", "title": str(issue)})
+    return merged
+
+
+def _demo_tri_title_entries(product_info: str) -> dict:
+    base = re.sub(r"\s+", " ", (product_info or "演示商品").strip())[:40] or "演示商品"
+    filler_zh = "多功能家用收纳系列 大容量分层设计 加厚耐用材质 卧室客厅浴室通用 简约现代风格 日常整理好帮手 适合家庭办公室出租屋多场景使用 灰白色"
+    filler_es = "Organizador multifuncional para el hogar, gran capacidad con diseño de niveles, material grueso y duradero, ideal para dormitorio salón y baño, estilo moderno sencillo, color gris y blanco para uso diario"
+    filler_fr = "Organisateur multifonction pour la maison, grande capacité avec design à niveaux, matériau épais et durable, idéal pour chambre salon et salle de bain, style moderne simple, coloris gris et blanc"
+    entries = [
+        {"lang": "zh", "title": f"{base} {filler_zh}"},
+        {
+            "lang": "es",
+            "title": filler_es,
+            "back_translation_zh": "多功能家用收纳架，大容量分层设计，加厚耐用材质，适合卧室客厅浴室，现代简约风格，灰白色，日常使用。",
+        },
+        {
+            "lang": "fr",
+            "title": filler_fr,
+            "back_translation_zh": "多功能家用收纳架，大容量分层设计，加厚耐用材质，适合卧室客厅浴室，现代简约风格，灰白色。",
+        },
+    ]
+    for entry in entries:
+        entry["chars"] = len(entry["title"])
+    return {"entries": entries, "issues": []}
+
+
 def _build_title_result(
     success: bool,
     titles: list = None,
@@ -3617,10 +3834,12 @@ def _build_title_result(
     attempt_count: int = 1,
     input_mode: str = "text",
     details: dict = None,
+    issues: list = None,
 ):
     return {
         "success": success,
         "titles": titles or [],
+        "issues": issues or [],
         "raw_text": raw_text or "",
         "error_type": error_type or "",
         "error_message": error_message or "",
@@ -4297,15 +4516,17 @@ Return valid JSON only."""
             raise e
 
     def generate_titles(self, product_info, template_prompt, target_language="zh"):
+        # target_language 参数保留以兼容旧调用，三语标题固定输出 中文/西语/法语
         if is_demo_api_key(self.api_key):
-            titles = _demo_title_lines(product_info, target_language)
+            demo = _demo_tri_title_entries(product_info)
             return _build_title_result(
                 True,
-                titles=titles,
-                raw_text="\n".join(titles),
+                titles=demo["entries"],
+                raw_text=format_titles_text(demo["entries"]),
                 attempt_count=1,
                 input_mode="text",
-                details={"target_language": target_language, "demo": True},
+                details={"demo": True},
+                issues=demo["issues"],
             )
 
         if not self.api_key:
@@ -4318,39 +4539,38 @@ Return valid JSON only."""
                 input_mode="text",
             )
 
-        language_info = get_target_language(target_language)
-        prompt = build_title_prompt(template_prompt, product_info, target_language)
+        prompt = build_temu_tri_title_prompt(template_prompt, product_info)
         last_raw = ""
-        last_lines = []
+        last_parsed = {"entries": [], "issues": []}
         for attempt in range(1, 3):
             try:
                 prompt_text = prompt
                 if attempt == 2:
                     prompt_text = (
-                        f"{prompt}\n\nSTRICT OUTPUT: Return exactly 6 lines, "
-                        f"English then {language_info['english_name']} for each title, no extra lines."
+                        f"{prompt}\n\nSTRICT OUTPUT: 只输出规范中的 JSON 对象本身，"
+                        "不要 markdown 代码块，不要任何解释文字。"
                     )
                 text = self._text_request(prompt_text)
-                lines = _parse_title_lines(text)
-                valid, reason, details = _validate_title_output(lines, target_language)
-                details["target_language"] = target_language
+                parsed = parse_tri_language_titles(text)
+                valid, reason, details = _validate_tri_title_output(parsed)
                 if valid:
                     return _build_title_result(
                         True,
-                        titles=lines[:6],
+                        titles=parsed["entries"],
                         raw_text=text,
                         attempt_count=attempt,
                         input_mode="text",
                         details=details,
+                        issues=parsed["issues"],
                     )
 
                 last_raw = text
-                last_lines = lines
+                last_parsed = parsed
                 if attempt == 1:
                     continue
                 return _build_title_result(
                     False,
-                    titles=lines[:6],
+                    titles=parsed["entries"],
                     raw_text=text,
                     error_type="retry_exhausted",
                     error_message=reason or "输出格式不符合要求",
@@ -4358,6 +4578,7 @@ Return valid JSON only."""
                     attempt_count=attempt,
                     input_mode="text",
                     details=details,
+                    issues=parsed["issues"],
                 )
             except Exception as e:
                 self.last_error = str(e)
@@ -4366,7 +4587,7 @@ Return valid JSON only."""
                     error_type = "provider_error"
                 return _build_title_result(
                     False,
-                    titles=last_lines[:6],
+                    titles=last_parsed["entries"],
                     raw_text=last_raw,
                     error_type=error_type,
                     error_message=str(e),
@@ -4377,14 +4598,13 @@ Return valid JSON only."""
 
         return _build_title_result(
             False,
-            titles=last_lines[:6],
+            titles=last_parsed["entries"],
             raw_text=last_raw,
             error_type="invalid_format",
             error_message="输出格式不符合要求",
             retryable=False,
             attempt_count=2,
             input_mode="text",
-            details={"line_count": len(last_lines)},
         )
 
     def generate_titles_from_image(
@@ -4394,16 +4614,17 @@ Return valid JSON only."""
         template_prompt=None,
         target_language="zh",
     ):
-        """从图片分析生成商品标题"""
+        """从图片分析生成商品标题（三语：中文/西语/法语）"""
         if is_demo_api_key(self.api_key):
-            titles = _demo_title_lines(product_info or "Image based product", target_language)
+            demo = _demo_tri_title_entries(product_info or "Image based product")
             return _build_title_result(
                 True,
-                titles=titles,
-                raw_text="\n".join(titles),
+                titles=demo["entries"],
+                raw_text=format_titles_text(demo["entries"]),
                 attempt_count=1,
                 input_mode="image",
-                details={"target_language": target_language, "demo": True},
+                details={"demo": True},
+                issues=demo["issues"],
             )
 
         if not self.api_key:
@@ -4430,44 +4651,42 @@ Return valid JSON only."""
                 "prompt", ""
             )
 
-        language_info = get_target_language(target_language)
-        prompt = build_title_prompt(
+        prompt = build_temu_tri_title_prompt(
             template_prompt,
             product_info or "No additional info provided",
-            target_language,
         )
 
         last_raw = ""
-        last_lines = []
+        last_parsed = {"entries": [], "issues": []}
         for attempt in range(1, 3):
             try:
                 prompt_text = prompt
                 if attempt == 2:
                     prompt_text = (
-                        f"{prompt}\n\nSTRICT OUTPUT: Return exactly 6 lines, "
-                        f"English then {language_info['english_name']} for each title, no extra lines."
+                        f"{prompt}\n\nSTRICT OUTPUT: 只输出规范中的 JSON 对象本身，"
+                        "不要 markdown 代码块，不要任何解释文字。"
                     )
                 text = self._vision_request(images, prompt_text, 5)
-                lines = _parse_title_lines(text)
-                valid, reason, details = _validate_title_output(lines, target_language)
-                details["target_language"] = target_language
+                parsed = parse_tri_language_titles(text)
+                valid, reason, details = _validate_tri_title_output(parsed)
                 if valid:
                     return _build_title_result(
                         True,
-                        titles=lines[:6],
+                        titles=parsed["entries"],
                         raw_text=text,
                         attempt_count=attempt,
                         input_mode="image",
                         details=details,
+                        issues=parsed["issues"],
                     )
 
                 last_raw = text
-                last_lines = lines
+                last_parsed = parsed
                 if attempt == 1:
                     continue
                 return _build_title_result(
                     False,
-                    titles=lines[:6],
+                    titles=parsed["entries"],
                     raw_text=text,
                     error_type="retry_exhausted",
                     error_message=reason or "输出格式不符合要求",
@@ -4475,6 +4694,7 @@ Return valid JSON only."""
                     attempt_count=attempt,
                     input_mode="image",
                     details=details,
+                    issues=parsed["issues"],
                 )
             except Exception as e:
                 self.last_error = str(e)
@@ -4483,7 +4703,7 @@ Return valid JSON only."""
                     error_type = "provider_error"
                 return _build_title_result(
                     False,
-                    titles=last_lines[:6],
+                    titles=last_parsed["entries"],
                     raw_text=last_raw,
                     error_type=error_type,
                     error_message=str(e),
@@ -4494,14 +4714,13 @@ Return valid JSON only."""
 
         return _build_title_result(
             False,
-            titles=last_lines[:6],
+            titles=last_parsed["entries"],
             raw_text=last_raw,
             error_type="invalid_format",
             error_message="输出格式不符合要求",
             retryable=False,
             attempt_count=2,
             input_mode="image",
-            details={"line_count": len(last_lines)},
         )
 
 
@@ -4893,21 +5112,7 @@ def create_zip_from_results(
                 z.writestr(filename, img_buf.getvalue())
 
         if titles:
-            if target_language == "en":
-                titles_content = "\n\n".join(
-                    [f"Title {i + 1}:\nEN: {t}" for i, t in enumerate(titles)]
-                )
-            else:
-                titles_content = "\n\n".join(
-                    [
-                        f"标题 {i // 2 + 1}:\nEN: {titles[i]}\n{language_info['copy_tag']}: {titles[i + 1]}"
-                        for i in range(0, len(titles) - 1, 2)
-                    ]
-                )
-            if not titles_content and titles:
-                titles_content = "\n".join(
-                    [f"Title {i + 1}: {t}" for i, t in enumerate(titles)]
-                )
+            titles_content = format_titles_text(titles)
             z.writestr("titles.txt", titles_content)
 
     return buf.getvalue()
@@ -5373,24 +5578,14 @@ def render_title_gen_option(prefix: str, provider: dict = None):
     enable_title = st.checkbox(
         "📝 同时生成商品标题",
         key=f"{prefix}_enable_title",
-        help="勾选后将在出图完成时一并生成英文 + 目标语言标题",
+        help="勾选后将在出图完成时一并生成 TEMU 三语标题（中文 / Español / Français）",
     )
 
     if enable_title:
         st.markdown('<div class="title-box">', unsafe_allow_html=True)
 
-        target_language = render_target_language_selector(
-            prefix,
-            "title_language",
-            "🌐 标题目标语言",
-            "标题默认优先英文；若选择英语，则输出纯英文标题。",
-        )
-        if target_language == "en":
-            st.caption("当前模式: 🇺🇸 纯英文标题")
-        else:
-            st.caption(
-                f"固定首行: 🇺🇸 English · 第二行: {get_title_language_caption(target_language)}"
-            )
+        target_language = DEFAULT_TARGET_LANGUAGE  # 三语标题固定输出 zh/es/fr
+        st.caption("输出固定为 TEMU 三语标题：🇨🇳 中文 · 🇪🇸 Español · 🇫🇷 Français（西/法附中文回译）")
 
         selected_template = st.selectbox(
             "标题模板",
@@ -5459,79 +5654,68 @@ def render_title_gen_option(prefix: str, provider: dict = None):
 def display_generated_titles(
     titles: list, prefix: str = "", target_language: str = "zh"
 ):
+    """TEMU 三语标题展示：中文 / Español(+回译) / Français(+回译)。
+
+    target_language 参数保留以兼容旧调用（不再影响输出布局）；
+    同时兼容旧历史记录中的纯字符串标题。"""
     if not titles:
         return
 
-    language_info = get_target_language(target_language)
+    entries = normalize_title_entries(titles)
+    if not entries:
+        return
 
-    if target_language == "en":
-        st.markdown("### 🏷️ 生成的商品标题 (纯英文)")
-    else:
-        st.markdown(f"### 🏷️ 生成的商品标题 (英文 + {language_info['label']})")
+    st.markdown("### 🏷️ 生成的商品标题 (TEMU 三语：中文 / Español / Français)")
 
-    if target_language != "en" and len(titles) >= 6:
-        labels = ["🔍 搜索优化", "💰 转化优化", "✨ 差异化"]
-        for i in range(0, min(6, len(titles)), 2):
-            title_idx = i // 2
-            label = labels[title_idx] if title_idx < 3 else f"标题 {title_idx + 1}"
-            en_title = titles[i] if i < len(titles) else ""
-            localized_title = titles[i + 1] if i + 1 < len(titles) else ""
+    issue_entries = [e for e in entries if e.get("lang") == "issue"]
+    title_entries = [e for e in entries if e.get("lang") != "issue"]
 
-            # 计算英文字符数
-            en_chars = len(en_title)
-            char_status = (
-                "✅" if MIN_TITLE_EN_CHARS <= en_chars <= MAX_TITLE_EN_CHARS else "⚠️"
-            )
-
-            st.markdown(
-                f"""
-            <div class="title-bilingual">
-                <div style="display:flex;justify-content:space-between;margin-bottom:0.5rem">
-                    <span style="color:#6366f1;font-weight:600">{label}</span>
-                    <span style="font-size:11px;color:#64748b">{char_status} EN: {en_chars}字符</span>
-                </div>
-                <div style="background:#e0e7ff;padding:0.5rem;border-radius:6px;margin-bottom:0.5rem">
-                    <span style="font-size:11px;color:#4338ca">🇺🇸 English</span><br>
-                    <span style="font-size:14px">{esc(en_title)}</span>
-                </div>
-                <div style="background:#fef3c7;padding:0.5rem;border-radius:6px">
-                    <span style="font-size:11px;color:#92400e">{language_info["flag"]} {language_info["label"]}</span><br>
-                    <span style="font-size:14px">{esc(localized_title)}</span>
-                </div>
+    for entry in title_entries:
+        lang = entry.get("lang", "")
+        label = TRI_TITLE_LABELS.get(lang, lang or "标题")
+        flag = TRI_TITLE_FLAGS.get(lang, "🏷️")
+        chars = entry.get("chars", len(entry.get("title", "")))
+        in_range = TRI_TITLE_MIN_CHARS <= chars <= TRI_TITLE_MAX_CHARS
+        char_status = "✅" if in_range else "⚠️"
+        back = entry.get("back_translation_zh", "")
+        back_html = (
+            f"""<div style="background:#fef3c7;padding:0.5rem;border-radius:6px;margin-top:0.5rem">
+                    <span style="font-size:11px;color:#92400e">🇨🇳 中文回译</span><br>
+                    <span style="font-size:13px">{esc(back)}</span>
+                </div>"""
+            if back
+            else ""
+        )
+        st.markdown(
+            f"""
+        <div class="title-bilingual">
+            <div style="display:flex;justify-content:space-between;margin-bottom:0.5rem">
+                <span style="color:#6366f1;font-weight:600">{flag} {esc(label)}</span>
+                <span style="font-size:11px;color:#64748b">{char_status} {chars}字符</span>
             </div>
-            """,
-                unsafe_allow_html=True,
-            )
-    else:
-        # 单语模式
-        labels = ["🔍 搜索优化", "💰 转化优化", "✨ 差异化"]
-        for i, t in enumerate(titles[:3]):
-            label = labels[i] if i < 3 else f"标题 {i + 1}"
-            st.markdown(
-                f"""
-            <div class="title-result">
-                <span style="color:#6366f1;font-weight:600">{label}</span><br>
-                <span style="font-size:15px">{esc(t)}</span>
+            <div style="background:#e0e7ff;padding:0.5rem;border-radius:6px">
+                <span style="font-size:14px">{esc(entry.get("title", ""))}</span>
             </div>
-            """,
-                unsafe_allow_html=True,
+            {back_html}
+        </div>
+        """,
+            unsafe_allow_html=True,
+        )
+        if not in_range:
+            st.caption(
+                f"⚠️ {label} 标题 {chars} 字符，超出/不足 TEMU 建议区间 "
+                f"({TRI_TITLE_MIN_CHARS}-{TRI_TITLE_MAX_CHARS} 字符)"
             )
+
+    for entry in issue_entries:
+        st.warning(f"⚠️ {entry.get('title', '')}")
 
     # 复制区域
-    copy_text = (
-        "\n\n".join(
-            [
-                f"Title {i // 2 + 1}:\nEN: {titles[i]}\n{language_info['copy_tag']}: {titles[i + 1]}"
-                for i in range(0, min(6, len(titles)), 2)
-            ]
-        )
-        if target_language != "en" and len(titles) >= 6
-        else "\n".join(titles)
-    )
+    copy_text = format_titles_text(entries)
     st.text_area(
         "📋 复制全部标题",
         copy_text,
-        height=120,
+        height=160,
         key=f"{prefix}_copy_titles_{random.randint(1000, 9999)}",
     )
 
@@ -5686,7 +5870,7 @@ def render_settings_defaults_tab():
             ),
             format_func=format_target_language_option,
             key="settings_default_title_language",
-            help="标题页和出图页标题功能默认使用此语言。标题始终优先英文；若选择英语，则输出纯英文标题。",
+            help="历史遗留设置：标题功能现固定输出 TEMU 三语（中/西/法），此项不再影响标题输出。",
         )
         default_image_language = st.selectbox(
             "默认图片文案语言",
@@ -5699,7 +5883,7 @@ def render_settings_defaults_tab():
             ),
             format_func=format_target_language_option,
             key="settings_default_image_language",
-            help="智能组图和快速出图里的图需、入图文案、图片提示词默认语言。",
+            help="智能组图和快速出图页面图片语言选择器的初始默认值；每个页面可按任务单独选择，互不影响。",
         )
         compliance_mode = st.selectbox(
             "默认合规模式",
@@ -6310,7 +6494,7 @@ def _execute_title_task(task: dict):
     if not result.get("success"):
         raise Exception(format_title_error(result))
     return {
-        "titles": result.get("titles", []),
+        "titles": merge_titles_and_issues(result),
         "errors": [],
         "files": [],
         "target_language": payload.get("title_language", DEFAULT_TARGET_LANGUAGE),
@@ -6391,7 +6575,7 @@ def _execute_smart_task(task: dict):
             payload.get("title_language", DEFAULT_TARGET_LANGUAGE),
         )
         if title_result.get("success"):
-            titles = title_result.get("titles", [])
+            titles = merge_titles_and_issues(title_result)
         else:
             errors.append(format_title_error(title_result))
     if not results and errors:
@@ -6516,7 +6700,7 @@ def _execute_combo_task(task: dict):
             payload.get("title_language", DEFAULT_TARGET_LANGUAGE),
         )
         if title_result.get("success"):
-            titles = title_result.get("titles", [])
+            titles = merge_titles_and_issues(title_result)
         else:
             errors.append(format_title_error(title_result))
     if not results and errors:
@@ -6904,7 +7088,7 @@ def render_history_record_block(record: dict, in_trash: bool = False):
 
         if titles:
             st.markdown("##### 标题内容")
-            st.code("\n".join(titles), language="text")
+            st.code(format_titles_text(titles), language="text")
 
 
 def render_file_management_tab(records: list):
@@ -7454,19 +7638,7 @@ def show_combo_page():
             if st.session_state.get("combo_enable_title") and st.session_state.get(
                 "combo_title_info"
             ):
-                target_label = get_target_language(
-                    st.session_state.get(
-                        "combo_title_language", DEFAULT_TARGET_LANGUAGE
-                    )
-                )["label"]
-                task_desc += (
-                    " + **纯英文标题**"
-                    if st.session_state.get(
-                        "combo_title_language", DEFAULT_TARGET_LANGUAGE
-                    )
-                    == "en"
-                    else f" + **英文 + {target_label} 标题**"
-                )
+                task_desc += " + **TEMU 三语标题（中/西/法）**"
             st.markdown(task_desc)
             if st.button("🚀 确认开始生成", type="primary", use_container_width=True):
                 template_key = st.session_state.get("combo_title_template", "default")
@@ -7761,22 +7933,18 @@ def show_title_page():
 
     st.markdown(
         f"""<div class="help-section">
-        <h4>🎯 输出规则</h4>
+        <h4>🎯 输出规则（TEMU 三语标题）</h4>
         <ul>
-            <li><b>默认英文优先</b> - 可输出纯英文，或英文 + 所选目标语言</li>
-            <li><b>英文字符</b> - {MIN_TITLE_EN_CHARS}-{MAX_TITLE_EN_CHARS}字符</li>
-            <li><b>三种策略</b> - 搜索优化/转化优化/差异化</li>
+            <li><b>固定三语</b> - 每次输出 🇨🇳 中文 / 🇪🇸 Español / 🇫🇷 Français 各一条</li>
+            <li><b>字符区间</b> - 每条 {TRI_TITLE_MIN_CHARS}-{TRI_TITLE_MAX_CHARS} 字符（含空格）</li>
+            <li><b>中文回译</b> - 西语/法语标题附中文回译，方便核对</li>
+            <li><b>合规自查</b> - 按 TEMU 三层合规框架幕后自查后输出</li>
         </ul>
     </div>""",
         unsafe_allow_html=True,
     )
 
-    title_language = render_target_language_selector(
-        "standalone_title",
-        "target_language",
-        "🌐 标题目标语言",
-        "标题默认优先英文；若选择英语，则输出纯英文标题。",
-    )
+    title_language = DEFAULT_TARGET_LANGUAGE  # 三语标题固定输出 zh/es/fr
 
     st.markdown("### 🧠 标题生成模型")
     default_title_vision_model = resolve_default_title_vision_model(
@@ -7796,12 +7964,7 @@ def show_title_page():
         f"ℹ️ 当前提供商协议：{provider.get('provider_type', 'gemini')}；"
         f"提供商默认配置：文字生成模型 {title_model or '未配置'} · 图片理解模型 {vision_model or '未配置'}"
     )
-    if title_language == "en":
-        st.caption("当前输出: 🇺🇸 纯英文标题")
-    else:
-        st.caption(
-            f"当前输出: 🇺🇸 English + {get_title_language_caption(title_language)}"
-        )
+    st.caption("当前输出: 🇨🇳 中文 + 🇪🇸 Español + 🇫🇷 Français（TEMU 三语标题）")
 
     # 输入模式
     st.markdown("### 📥 输入方式")
@@ -7920,7 +8083,7 @@ def show_title_page():
                 "image_paths": image_paths,
                 "title_model": selected_title_vision_model,
                 "vision_model": selected_title_vision_model,
-                "summary": f"标题任务 · {get_target_language(title_language)['label']}",
+                "summary": "标题任务 · TEMU 三语(中/西/法)",
             },
         )
         if task:
