@@ -11,6 +11,8 @@ import os
 import threading
 import re
 import hashlib
+import hmac
+import html as _html_mod
 import base64
 import copy
 import zipfile
@@ -37,6 +39,11 @@ APP_NAME = "电商出图工作台"
 DEMO_PROVIDER_ID = "local-demo-admin"
 DEMO_PROVIDER_KEY = "DEMO-ADMIN-KEY"
 DEMO_PROVIDER_NAME = "本地演示管理员"
+
+
+def esc(v):
+    """HTML 转义用户/AI 可控内容，防止注入 unsafe_allow_html 渲染。"""
+    return _html_mod.escape(str(v or ""), quote=True)
 
 
 def demo_mode_enabled() -> bool:
@@ -146,6 +153,7 @@ HISTORY_DIR = DATA_DIR / "history"
 
 KEYCHAIN_SERVICE = "ecommerce-image-workbench"
 MAX_TASK_QUEUE = 5
+MAX_HISTORY_RECORDS = 300
 MAX_ACTIVE_TASKS = 2
 TASK_STATUS_TERMINAL = {"done", "error", "cancelled", "expired"}
 HISTORY_RECORD_ACTIVE = "active"
@@ -1034,31 +1042,62 @@ TEMPLATE_GROUP_ORDER = ["combo_types", "smart_types", "translation_types"]
 
 
 # ==================== 数据管理 ====================
+FILE_IO_LOCK = threading.RLock()
+
+
 def load_json(fp, default=None):
-    try:
-        if fp.exists():
-            with open(fp, "r", encoding="utf-8") as f:
-                return json.load(f)
-    except:
-        pass
-    return default.copy() if default else {}
+    with FILE_IO_LOCK:
+        try:
+            if fp.exists():
+                with open(fp, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except:
+            pass
+        return default.copy() if default else {}
 
 
 def save_json(fp, data):
+    with FILE_IO_LOCK:
+        try:
+            tmp = str(fp) + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, str(fp))
+            return True
+        except:
+            return False
+
+
+_CONFIG_CACHE = {}
+
+
+def _cached_config(fp, builder):
+    """按文件 mtime 缓存合并后的配置。线程安全（FILE_IO_LOCK），
+    不依赖 st.cache_data（后台工作线程也会调用这些函数）。"""
+    fp_str = str(fp)
     try:
-        with open(fp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        return True
-    except:
-        return False
+        mtime = os.path.getmtime(fp_str) if fp.exists() else -1.0
+    except OSError:
+        mtime = -1.0
+    with FILE_IO_LOCK:
+        cached = _CONFIG_CACHE.get(fp_str)
+        if cached and cached[0] == mtime:
+            return copy.deepcopy(cached[1])
+    value = builder()
+    with FILE_IO_LOCK:
+        _CONFIG_CACHE[fp_str] = (mtime, copy.deepcopy(value))
+    return value
 
 
 def get_settings():
-    s = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
-    for k, v in DEFAULT_SETTINGS.items():
-        if k not in s:
-            s[k] = v
-    return s
+    def _build():
+        s = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
+        for k, v in DEFAULT_SETTINGS.items():
+            if k not in s:
+                s[k] = v
+        return s
+
+    return _cached_config(SETTINGS_FILE, _build)
 
 
 def save_settings(s):
@@ -1109,6 +1148,16 @@ def _get_or_create_local_secret_key() -> bytes:
         from cryptography.fernet import Fernet
     except ImportError:
         return b""
+    env_key = (os.getenv("XIAOBAITU_SECRET_KEY") or "").strip()
+    if env_key:
+        key_bytes = env_key.encode("utf-8")
+        try:
+            Fernet(key_bytes)
+            return key_bytes
+        except Exception:
+            logger.warning(
+                "XIAOBAITU_SECRET_KEY 不是有效的 Fernet 密钥，回退到本地密钥文件"
+            )
     try:
         if SECRET_KEY_FILE.exists():
             key = SECRET_KEY_FILE.read_bytes().strip()
@@ -1304,7 +1353,13 @@ def _normalize_providers_data(data):
 
 
 def save_providers(data):
-    return save_json(PROVIDERS_FILE, data)
+    ok = save_json(PROVIDERS_FILE, data)
+    if ok:
+        try:
+            os.chmod(str(PROVIDERS_FILE), 0o600)
+        except OSError:
+            pass
+    return ok
 
 
 def resolve_provider_api_key(provider: dict) -> str:
@@ -1353,8 +1408,8 @@ def migrate_provider_secrets(data):
         raw_key = (provider.get("api_key") or "").strip()
         if (
             raw_key
-            and provider.get("secret_storage") != "keychain"
-            and keychain_available()
+            and provider.get("secret_storage") in (None, "", "plain")
+            and (keychain_available() or encrypted_storage_available())
         ):
             provider, moved = persist_provider_secret(provider, raw_key)
             changed = changed or moved
@@ -1425,13 +1480,22 @@ def ensure_demo_provider(data: dict, set_current: bool = False) -> dict:
 
 def get_providers():
     data = load_json(PROVIDERS_FILE, DEFAULT_PROVIDERS_DATA)
+    try:
+        before = json.dumps(data, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        before = None
     data = _normalize_providers_data(data)
     if not data.get("providers"):
         data = _bootstrap_env_provider(data)
     if demo_mode_enabled():
         data = ensure_demo_provider(data, set_current=not data.get("current_id"))
     data = migrate_provider_secrets(data)
-    save_providers(data)
+    try:
+        after = json.dumps(data, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        after = ""
+    if before is None or after != before:
+        save_providers(data)
     return data
 
 
@@ -1612,23 +1676,30 @@ def _history_sort_key(record: dict):
     return record.get("completed_at", record.get("created_at", ""))
 
 
-def list_history_records(record_states=None):
+def list_history_records(record_states=None, owner_id=None):
+    # get_history_data() 已完成 normalize（含 deepcopy），此处不再重复
     data = get_history_data()
-    records = [_normalize_history_record(r) for r in data.get("records", [])]
+    records = list(data.get("records", []))
     if record_states:
         allowed_states = {
             str(state or "").strip().lower() for state in record_states if state
         }
         records = [r for r in records if r.get("record_state") in allowed_states]
+    if owner_id is not None:
+        # 历史遗留记录（无 owner_id）对所有会话可见；带 owner_id 的仅本人可见
+        records = [
+            r for r in records
+            if not (r.get("owner_id") or "") or r.get("owner_id") == owner_id
+        ]
     return sorted(records, key=_history_sort_key, reverse=True)
 
 
-def list_active_history_records():
-    return list_history_records({HISTORY_RECORD_ACTIVE})
+def list_active_history_records(owner_id=None):
+    return list_history_records({HISTORY_RECORD_ACTIVE}, owner_id=owner_id)
 
 
-def list_trashed_history_records():
-    return list_history_records({HISTORY_RECORD_TRASHED})
+def list_trashed_history_records(owner_id=None):
+    return list_history_records({HISTORY_RECORD_TRASHED}, owner_id=owner_id)
 
 
 def get_project_output_base_dir():
@@ -2067,6 +2138,7 @@ def record_task_history(task: dict, result: dict):
         "artifact_dir": str(artifact_dir),
         "project_name": artifact_dir.name,
         "provider_id": (task.get("payload", {}) or {}).get("provider_id", ""),
+        "owner_id": task.get("owner_id", ""),
         "payload": payload_snapshot,
     }
     (artifact_dir / "manifest.json").write_text(
@@ -2075,6 +2147,30 @@ def record_task_history(task: dict, result: dict):
 
     records = [r for r in data.get("records", []) if r.get("task_id") != task_id]
     records.append(manifest)
+    # 上限保护：超过 MAX_HISTORY_RECORDS 时优先清理最旧的回收站记录，再清理最旧的活跃记录
+    if len(records) > MAX_HISTORY_RECORDS:
+        overflow = len(records) - MAX_HISTORY_RECORDS
+        ordered = sorted(records, key=_history_sort_key)
+        to_remove = []
+        for candidate in ordered:
+            if len(to_remove) >= overflow:
+                break
+            if (
+                candidate.get("record_state") or HISTORY_RECORD_ACTIVE
+            ) == HISTORY_RECORD_TRASHED and candidate.get("task_id") != task_id:
+                to_remove.append(candidate)
+        if len(to_remove) < overflow:
+            for candidate in ordered:
+                if len(to_remove) >= overflow:
+                    break
+                if candidate.get("task_id") != task_id and candidate not in to_remove:
+                    to_remove.append(candidate)
+        removed_ids = {c.get("task_id") for c in to_remove}
+        for candidate in to_remove:
+            candidate_dir = candidate.get("artifact_dir")
+            if candidate_dir:
+                shutil.rmtree(candidate_dir, ignore_errors=True)
+        records = [r for r in records if r.get("task_id") not in removed_ids]
     data["records"] = records
     save_history_data(data)
     return manifest
@@ -2222,11 +2318,25 @@ def format_bytes(num_bytes: int):
     return f"{int(num_bytes)} B"
 
 
+_PATH_SIZE_CACHE = {}
+_PATH_SIZE_CACHE_LOCK = threading.Lock()
+
+
 def get_path_size(path: Path):
+    path = Path(path)
     if not path.exists():
         return 0
     if path.is_file():
         return path.stat().st_size
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    key = (str(path), mtime)
+    with _PATH_SIZE_CACHE_LOCK:
+        cached = _PATH_SIZE_CACHE.get(key)
+    if cached is not None:
+        return cached
     total = 0
     for child in path.rglob("*"):
         try:
@@ -2234,6 +2344,10 @@ def get_path_size(path: Path):
                 total += child.stat().st_size
         except OSError:
             continue
+    with _PATH_SIZE_CACHE_LOCK:
+        if len(_PATH_SIZE_CACHE) > 512:
+            _PATH_SIZE_CACHE.clear()
+        _PATH_SIZE_CACHE[key] = total
     return total
 
 
@@ -2307,11 +2421,11 @@ def render_template_item_preview(item: dict, group_meta: dict, item_meta: dict):
             <div class="template-preview-subtitle">你现在看到的是模板在后台中的展示效果，不需要保存就能先预览。</div>
             <div class="template-preview-card {state_class}">
                 <span class="{enabled_badge_class}">{enabled_text}</span>
-                <span class="template-preview-badge">适用页面: {group_meta.get('page_label', '未定义')}</span>
-                <div class="template-preview-name">{icon} {item.get('name', '未命名模板')}</div>
-                <div class="template-preview-desc">{item.get('desc', '暂无说明')}</div>
-                <div class="template-preview-hint">用途提示: {usage_note or '暂无用途说明'}</div>
-                <div class="template-preview-hint">提示语: {hint or '无'}</div>
+                <span class="template-preview-badge">适用页面: {esc(group_meta.get('page_label', '未定义'))}</span>
+                <div class="template-preview-name">{esc(icon)} {esc(item.get('name', '未命名模板'))}</div>
+                <div class="template-preview-desc">{esc(item.get('desc', '暂无说明'))}</div>
+                <div class="template-preview-hint">用途提示: {esc(usage_note or '暂无用途说明')}</div>
+                <div class="template-preview-hint">提示语: {esc(hint or '无')}</div>
             </div>
         </div>
         """,
@@ -2333,8 +2447,8 @@ def render_template_group_preview(group_key: str, group_meta: dict, group: dict)
         cards.append(
             f"""
             <div class="{card_class}">
-                <div>{item.get('icon', '📦')}</div>
-                <div class="template-preview-mini-name">{item.get('name', '未命名模板')}</div>
+                <div>{esc(item.get('icon', '📦'))}</div>
+                <div class="template-preview-mini-name">{esc(item.get('name', '未命名模板'))}</div>
                 <div class="template-preview-mini-meta">排序: {int(item.get('order', 1))}</div>
                 <div class="template-preview-mini-meta">{'启用中' if item.get('enabled', True) else '已停用'}</div>
             </div>
@@ -2343,7 +2457,7 @@ def render_template_group_preview(group_key: str, group_meta: dict, group: dict)
     st.markdown(
         f"""
         <div class="template-preview-shell">
-            <div class="template-preview-title">{group_meta.get('title', group_key)} 工作流预览</div>
+            <div class="template-preview-title">{esc(group_meta.get('title', group_key))} 工作流预览</div>
             <div class="template-preview-subtitle">模拟该工作流里模板选择区的呈现顺序与启用状态。</div>
             <div class="template-preview-grid">
                 {''.join(cards)}
@@ -2361,7 +2475,14 @@ def _record_option_label(record: dict):
     return f"{status} · {title} · {completed_at}"
 
 
+def record_owned_by_session(record: dict) -> bool:
+    """UI 层校验：记录无 owner_id（历史遗留）或属于当前会话时才可操作。"""
+    rid = (record or {}).get("owner_id") or ""
+    return (not rid) or rid == get_session_owner_id()
+
+
 def render_batch_record_actions(records: list, mode: str):
+    records = [r for r in records if record_owned_by_session(r)]
     if not records:
         return
     options = {record.get("task_id"): _record_option_label(record) for record in records}
@@ -2631,20 +2752,28 @@ def ensure_task_not_cancelled(task_id: str):
 
 
 def normalize_running_tasks():
-    data = get_tasks_data()
-    task_threads = get_task_threads()
-    changed = False
-    for task in data.get("tasks", []):
-        if task.get("status") != "running":
-            continue
-        th = task_threads.get(task.get("id"))
-        if th and th.is_alive():
-            continue
-        task["status"] = "expired"
-        task.setdefault("errors", []).append(
-            "任务在后台中断或页面刷新后未恢复，请重新提交。"
-        )
-        task["updated_at"] = datetime.now().isoformat()
+    expired_tasks = []
+    with TASK_LOCK:
+        data = get_tasks_data()
+        task_threads = get_task_threads()
+        changed = False
+        for task in data.get("tasks", []):
+            if task.get("status") != "running":
+                continue
+            th = task_threads.get(task.get("id"))
+            if th and th.is_alive():
+                continue
+            task["status"] = "expired"
+            task.setdefault("errors", []).append(
+                "任务在后台中断或页面刷新后未恢复，请重新提交。"
+            )
+            task["updated_at"] = datetime.now().isoformat()
+            expired_tasks.append(copy.deepcopy(task))
+            changed = True
+        if changed:
+            save_tasks_data(data)
+    # 写历史（含文件复制/压缩）放在锁外，避免长时间占用 TASK_LOCK
+    for task in expired_tasks:
         record_task_history(
             task,
             {
@@ -2656,9 +2785,6 @@ def normalize_running_tasks():
                 ),
             },
         )
-        changed = True
-    if changed:
-        save_tasks_data(data)
 
 
 def persist_image_for_task(img: Image.Image, filename: str):
@@ -2798,11 +2924,14 @@ def _demo_image(label: str, subtitle: str = "", aspect: str = "1:1") -> Image.Im
 
 
 def get_compliance():
-    c = load_json(COMPLIANCE_FILE, DEFAULT_COMPLIANCE)
-    for k, v in DEFAULT_COMPLIANCE.items():
-        if k not in c:
-            c[k] = v
-    return c
+    def _build():
+        c = load_json(COMPLIANCE_FILE, DEFAULT_COMPLIANCE)
+        for k, v in DEFAULT_COMPLIANCE.items():
+            if k not in c:
+                c[k] = v
+        return c
+
+    return _cached_config(COMPLIANCE_FILE, _build)
 
 
 def save_compliance(data):
@@ -2810,11 +2939,14 @@ def save_compliance(data):
 
 
 def get_prompts():
-    p = load_json(PROMPTS_FILE, DEFAULT_PROMPTS)
-    for k, v in DEFAULT_PROMPTS.items():
-        if k not in p:
-            p[k] = v
-    return p
+    def _build():
+        p = load_json(PROMPTS_FILE, DEFAULT_PROMPTS)
+        for k, v in DEFAULT_PROMPTS.items():
+            if k not in p:
+                p[k] = v
+        return p
+
+    return _cached_config(PROMPTS_FILE, _build)
 
 
 def save_prompts(data):
@@ -2941,19 +3073,22 @@ def _normalize_title_template_item(template_key: str, item: dict):
 
 
 def get_title_templates():
-    t = load_json(TITLE_TEMPLATES_FILE, DEFAULT_TITLE_TEMPLATES)
-    normalized = {}
-    for template_key in DEFAULT_TITLE_TEMPLATES.keys():
-        normalized[template_key] = _normalize_title_template_item(
-            template_key, (t or {}).get(template_key, {})
-        )
-    for template_key, template_value in (t or {}).items():
-        if template_key in normalized:
-            continue
-        normalized[template_key] = _normalize_title_template_item(
-            template_key, template_value
-        )
-    return normalized
+    def _build():
+        t = load_json(TITLE_TEMPLATES_FILE, DEFAULT_TITLE_TEMPLATES)
+        normalized = {}
+        for template_key in DEFAULT_TITLE_TEMPLATES.keys():
+            normalized[template_key] = _normalize_title_template_item(
+                template_key, (t or {}).get(template_key, {})
+            )
+        for template_key, template_value in (t or {}).items():
+            if template_key in normalized:
+                continue
+            normalized[template_key] = _normalize_title_template_item(
+                template_key, template_value
+            )
+        return normalized
+
+    return _cached_config(TITLE_TEMPLATES_FILE, _build)
 
 
 def save_title_templates(data):
@@ -3569,6 +3704,9 @@ def sanitize_task_error(message: str, fallback: str = "任务执行失败") -> s
     ):
         return "提供商连接失败，请检查 Base URL、代理或网络。"
     msg = re.sub(r"(https?://)([^:/@\s]+):([^/@\s]+)@", r"\1***:***@", msg)
+    msg = re.sub(
+        r"(?i)(key=|api[-_]?key\"?\s*[:=]\s*\"?)[A-Za-z0-9_\-]{8,}", r"\1***", msg
+    )
     msg = re.sub(r"\s+", " ", msg)
     return msg[:180] or fallback
 
@@ -3696,11 +3834,14 @@ class GeminiClient:
             if self.model == "gemini-3-pro-image-preview":
                 generation_config["thinkingConfig"] = {"thinkingLevel": thinking_level}
         payload["generationConfig"] = generation_config
-        endpoint = f"{self.base_url.rstrip('/')}/v1beta/models/{model}:generateContent?key={self.api_key}"
+        endpoint = f"{self.base_url.rstrip('/')}/v1beta/models/{model}:generateContent"
         req = urllib.request.Request(
             endpoint,
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": self.api_key,
+            },
         )
         try:
             with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
@@ -4721,7 +4862,13 @@ def create_zip_from_results(
         for item in results:
             filename = item.get("filename", "image.png")
             img = item.get("image")
-            if img:
+            if isinstance(img, str):
+                # 支持磁盘路径形式的结果，避免在内存中长期持有 PIL 对象
+                try:
+                    z.writestr(filename, Path(img).read_bytes())
+                except Exception:
+                    pass
+            elif img:
                 img_buf = io.BytesIO()
                 img.save(img_buf, format="PNG")
                 z.writestr(filename, img_buf.getvalue())
@@ -5025,12 +5172,19 @@ def show_provider_settings():
                 key=f"prov_type_{p['id']}",
                 help="gemini=官方SDK；relay=Gemini协议中转；openai=OpenAI协议(GPT Image 2等)",
             )
-            p["api_key"] = st.text_input(
+            _key_input = st.text_input(
                 "API Key",
-                current_secret,
+                "",
                 type="password",
                 key=f"prov_key_{p['id']}",
+                placeholder="留空表示不修改",
             )
+            if current_secret:
+                st.caption(
+                    f"当前已保存: {current_secret[:3]}***{current_secret[-4:]}"
+                )
+            if _key_input.strip():
+                p["api_key"] = _key_input.strip()
             p["base_url"] = st.text_input(
                 "Base URL (可选)", p.get("base_url", ""), key=f"prov_base_{p['id']}"
             )
@@ -5113,10 +5267,16 @@ def show_provider_settings():
     if st.button("💾 保存设置", type="primary"):
         all_errors = []
         for p in providers:
+            key_changed = bool(
+                str(st.session_state.get(f"prov_key_{p.get('id')}", "") or "").strip()
+            )
+            effective_key = (
+                p.get("api_key", "") if key_changed else resolve_provider_api_key(p)
+            )
             provider_errors = validate_provider_config(
                 p.get("name", ""),
                 p.get("provider_type", "gemini"),
-                p.get("api_key", ""),
+                effective_key,
                 p.get("base_url", ""),
             )
             if provider_errors:
@@ -5124,7 +5284,8 @@ def show_provider_settings():
                     [f"{p.get('name', '提供商')}: {message}" for message in provider_errors]
                 )
                 continue
-            p, _ = persist_provider_secret(p, p.get("api_key", ""))
+            if key_changed:
+                p, _ = persist_provider_secret(p, p.get("api_key", ""))
         if all_errors:
             for error in all_errors:
                 st.error(error)
@@ -5312,11 +5473,11 @@ def display_generated_titles(
                 </div>
                 <div style="background:#e0e7ff;padding:0.5rem;border-radius:6px;margin-bottom:0.5rem">
                     <span style="font-size:11px;color:#4338ca">🇺🇸 English</span><br>
-                    <span style="font-size:14px">{en_title}</span>
+                    <span style="font-size:14px">{esc(en_title)}</span>
                 </div>
                 <div style="background:#fef3c7;padding:0.5rem;border-radius:6px">
                     <span style="font-size:11px;color:#92400e">{language_info["flag"]} {language_info["label"]}</span><br>
-                    <span style="font-size:14px">{localized_title}</span>
+                    <span style="font-size:14px">{esc(localized_title)}</span>
                 </div>
             </div>
             """,
@@ -5331,7 +5492,7 @@ def display_generated_titles(
                 f"""
             <div class="title-result">
                 <span style="color:#6366f1;font-weight:600">{label}</span><br>
-                <span style="font-size:15px">{t}</span>
+                <span style="font-size:15px">{esc(t)}</span>
             </div>
             """,
                 unsafe_allow_html=True,
@@ -6004,7 +6165,22 @@ def display_generation_results(
 
         # 下载按钮
         st.markdown("---")
-        zip_bytes = create_zip_from_results(results, titles, target_language)
+        result_sig = hashlib.md5(
+            repr(
+                [
+                    (item.get("filename"), item.get("label"))
+                    for item in results
+                ]
+                + list(titles or [])
+                + [target_language, len(results)]
+            ).encode("utf-8")
+        ).hexdigest()
+        zip_cache = st.session_state.get(f"{prefix}_zip_cache")
+        if zip_cache and zip_cache[0] == result_sig:
+            zip_bytes = zip_cache[1]
+        else:
+            zip_bytes = create_zip_from_results(results, titles, target_language)
+            st.session_state[f"{prefix}_zip_cache"] = (result_sig, zip_bytes)
 
         col1, col2 = st.columns(2)
         with col1:
@@ -6018,10 +6194,18 @@ def display_generation_results(
             )
 
         with col2:
-            # 持久化存储
-            stype, retention, url, err = maybe_persist_and_upload(
-                zip_bytes, f"images_{date.today()}.zip"
-            )
+            # 持久化存储：同一批结果只上传一次
+            persist_cache = st.session_state.get(f"{prefix}_persisted_sig")
+            if persist_cache and persist_cache[0] == result_sig:
+                stype, retention, url, err = persist_cache[1]
+            else:
+                stype, retention, url, err = maybe_persist_and_upload(
+                    zip_bytes, f"images_{date.today()}.zip"
+                )
+                st.session_state[f"{prefix}_persisted_sig"] = (
+                    result_sig,
+                    (stype, retention, url, err),
+                )
             if url:
                 st.link_button("🌐 云端下载链接", url, use_container_width=True)
 
@@ -6421,8 +6605,8 @@ def schedule_task_workers():
 
 def render_task_center():
     tasks = list_tasks_for_display()
-    records = list_active_history_records()
-    trashed_records = list_trashed_history_records()
+    records = list_active_history_records(owner_id=get_session_owner_id())
+    trashed_records = list_trashed_history_records(owner_id=get_session_owner_id())
     st.markdown("#### 📚 项目中心概览")
     if not tasks and not records and not trashed_records:
         st.caption("暂无项目")
@@ -6473,11 +6657,11 @@ def render_sidebar_nav_section(title: str, items: list, current_page: str):
 def render_status_center_content():
     tasks = list_tasks_for_display()
     active_tasks = [task for task in tasks if task.get("status") in {"queued", "running"}]
-    active_records = list_active_history_records()
+    active_records = list_active_history_records(owner_id=get_session_owner_id())
     recent_done = [record for record in active_records if record.get("status") == "done"][:3]
     recent_error = [record for record in active_records if record.get("status") == "error"][:3]
 
-    st.caption(f"进行中 {len(active_tasks)} · 历史 {len(active_records)} · 回收站 {len(list_trashed_history_records())}")
+    st.caption(f"进行中 {len(active_tasks)} · 历史 {len(active_records)} · 回收站 {len(list_trashed_history_records(owner_id=get_session_owner_id()))}")
     if active_tasks:
         st.markdown("**进行中任务**")
         for task in active_tasks[:4]:
@@ -6574,17 +6758,26 @@ def render_history_record_block(record: dict, in_trash: bool = False):
             st.warning("; ".join(record.get("errors", [])[:3]))
 
         if zip_path and Path(zip_path).exists() and not in_trash:
-            try:
-                zip_bytes = Path(zip_path).read_bytes()
-                st.download_button(
-                    "⬇️ 下载本地 ZIP",
-                    data=zip_bytes,
-                    file_name=Path(zip_path).name,
-                    mime="application/zip",
-                    key=f"hist_zip_{record.get('task_id')}",
-                )
-            except Exception:
-                st.caption("ZIP 文件暂时不可读取")
+            zip_prep_key = f"zipprep_{record.get('task_id')}"
+            if not st.session_state.get(zip_prep_key):
+                if st.button(
+                    "📦 准备下载 ZIP",
+                    key=f"hist_zip_prep_{record.get('task_id')}",
+                ):
+                    st.session_state[zip_prep_key] = True
+                    st.rerun()
+            else:
+                try:
+                    zip_bytes = Path(zip_path).read_bytes()
+                    st.download_button(
+                        "⬇️ 下载本地 ZIP",
+                        data=zip_bytes,
+                        file_name=Path(zip_path).name,
+                        mime="application/zip",
+                        key=f"hist_zip_{record.get('task_id')}",
+                    )
+                except Exception:
+                    st.caption("ZIP 文件暂时不可读取")
 
         if in_trash:
             column_weights = [1, 1, 1] if runtime_supports_local_file_access() else [1, 1]
@@ -6593,6 +6786,9 @@ def render_history_record_block(record: dict, in_trash: bool = False):
             purge_key = f"purge_hist_{record.get('task_id')}"
             with columns[0]:
                 if st.button("♻️ 恢复", key=f"{restore_key}_trigger"):
+                    if not record_owned_by_session(record):
+                        st.warning("该记录属于其他会话，无法操作")
+                        st.stop()
                     restored = restore_history_record(record.get("task_id"))
                     if restored:
                         st.success("已恢复到历史项目")
@@ -6616,6 +6812,9 @@ def render_history_record_block(record: dict, in_trash: bool = False):
                 "彻底删除会移除该记录及其本地文件，执行后不可恢复。",
                 confirm_label="确认彻底删除",
             ):
+                if not record_owned_by_session(record):
+                    st.warning("该记录属于其他会话，无法操作")
+                    st.stop()
                 purged_record = purge_trashed_history_record(record.get("task_id"))
                 if purged_record:
                     st.success("已彻底删除")
@@ -6658,6 +6857,9 @@ def render_history_record_block(record: dict, in_trash: bool = False):
                 "删除后会进入回收站，可在回收站恢复；本地文件会先保留。",
                 confirm_label="确认移入回收站",
             ):
+                if not record_owned_by_session(record):
+                    st.warning("该记录属于其他会话，无法操作")
+                    st.stop()
                 trashed = trash_history_record(record.get("task_id"))
                 if trashed:
                     st.success("已移入回收站")
@@ -6692,9 +6894,12 @@ def render_file_management_tab(records: list):
     if not records:
         st.info("暂无可管理的项目文件。")
     orphan_dirs = find_orphan_project_dirs(records)
-    total_size = sum(summarize_record_files(record)["size_bytes"] for record in records)
+    summaries = {
+        id(record): summarize_record_files(record) for record in records
+    }
+    total_size = sum(s["size_bytes"] for s in summaries.values())
     missing_records = [
-        record for record in records if summarize_record_files(record)["missing_count"]
+        record for record in records if summaries[id(record)]["missing_count"]
     ]
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("项目数", len(records))
@@ -6751,7 +6956,7 @@ def render_file_management_tab(records: list):
                         st.error("删除失败，请检查目录权限。")
 
     for record in records:
-        summary = summarize_record_files(record)
+        summary = summaries.get(id(record)) or summarize_record_files(record)
         title = record.get("summary") or record.get("task_type", "任务")
         rebuild_zip_key = f"rebuild_zip_{record.get('task_id')}"
         with st.expander(
@@ -6797,8 +7002,8 @@ def show_project_center():
     )
 
     tasks = list_tasks_for_display()
-    active_records = list_active_history_records()
-    trashed_records = list_trashed_history_records()
+    active_records = list_active_history_records(owner_id=get_session_owner_id())
+    trashed_records = list_trashed_history_records(owner_id=get_session_owner_id())
     active_tasks = [t for t in tasks if t.get("status") in {"queued", "running"}]
     completed_records = [r for r in active_records if r.get("status") == "done"]
 
@@ -6942,7 +7147,7 @@ def show_combo_page():
         if st.session_state.combo_anchor:
             a = st.session_state.combo_anchor
             st.markdown(
-                f'<div class="success-card" style="font-size:13px"><strong>🎯 {a.get("product_name_zh", "商品")}</strong><br><span style="color:#64748b">品类: {a.get("primary_category", "未识别")}</span></div>',
+                f'<div class="success-card" style="font-size:13px"><strong>🎯 {esc(a.get("product_name_zh", "商品"))}</strong><br><span style="color:#64748b">品类: {esc(a.get("primary_category", "未识别"))}</span></div>',
                 unsafe_allow_html=True,
             )
         else:
@@ -7731,6 +7936,15 @@ def main_app():
             st.rerun()
 
     set_nav_page(current_page)
+    if demo_mode_enabled() and SERVER_MODE:
+        if not st.session_state.get("_demo_server_warned"):
+            logger.warning(
+                "XIAOBAITU_DEMO_MODE 在 server 模式下开启：演示面板对所有访问者可见，生产环境请关闭"
+            )
+            st.session_state["_demo_server_warned"] = True
+        st.warning(
+            "⚠️ 演示模式（XIAOBAITU_DEMO_MODE）已在服务器环境开启：演示管理面板对所有访问者可见，生产环境请设置 XIAOBAITU_DEMO_MODE=0。"
+        )
     render_global_toolbar(current_page)
 
     if current_page == "🚀 智能组图":
@@ -7751,6 +7965,27 @@ def main_app():
     show_footer()
 
 
+def require_access_password() -> None:
+    """若设置 APP_ACCESS_PASSWORD 环境变量，则要求输入访问口令。"""
+    expected = os.getenv("APP_ACCESS_PASSWORD", "")
+    if not expected:
+        return
+    if st.session_state.get("auth_ok") is True:
+        return
+    _, mid, _ = st.columns([1, 1.2, 1])
+    with mid:
+        st.markdown(f"### 🍌 {APP_NAME}")
+        st.caption("请输入访问口令")
+        pwd = st.text_input("访问口令", type="password", key="_access_pwd_input")
+        if st.button("进入", use_container_width=True):
+            if hmac.compare_digest(str(pwd or ""), expected):
+                st.session_state["auth_ok"] = True
+                st.rerun()
+            else:
+                st.error("口令错误")
+    st.stop()
+
+
 # ==================== 主入口 ====================
 def main():
     st.set_page_config(
@@ -7760,6 +7995,7 @@ def main():
         initial_sidebar_state="expanded",
     )
     apply_style()
+    require_access_password()
     apply_proxy_settings()
     init_session()
 

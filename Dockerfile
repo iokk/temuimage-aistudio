@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements-web.txt
 
 COPY app.py .
+COPY .streamlit/ ./.streamlit/
 
 ENV APP_RUNTIME=server
 ENV ECOMMERCE_WORKBENCH_DATA_DIR=/app/data
