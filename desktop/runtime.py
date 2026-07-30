@@ -95,10 +95,7 @@ def _python_executable() -> str:
 def streamlit_command(app_path: Path, port: int) -> list:
     return [
         _python_executable(),
-        "-m",
-        "streamlit",
-        "run",
-        str(app_path),
+        str(app_path.with_name("run_tulite.py")),
         f"--server.port={port}",
         "--server.address=127.0.0.1",
         "--server.headless=true",

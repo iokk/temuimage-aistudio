@@ -6,14 +6,17 @@ services:
     container_name: ecommerce-workbench
     restart: unless-stopped
     ports:
-      - "${APP_PORT:-8501}:8501"
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-8501}:8501"
     volumes:
       - ./data:/app/data
     environment:
       APP_RUNTIME: ${APP_RUNTIME:-server}
+      APP_ACCESS_PASSWORD: ${APP_ACCESS_PASSWORD:?APP_ACCESS_PASSWORD must be set}
+      XIAOBAITU_SECRET_KEY: ${XIAOBAITU_SECRET_KEY:-}
       XIAOBAITU_DEMO_MODE: ${XIAOBAITU_DEMO_MODE:-0}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_IMAGE_REQUEST_TIMEOUT_SECONDS: ${GEMINI_IMAGE_REQUEST_TIMEOUT_SECONDS:-300}
       ECOMMERCE_WORKBENCH_DATA_DIR: ${ECOMMERCE_WORKBENCH_DATA_DIR:-/app/data}
       ECOMMERCE_WORKBENCH_PROJECTS_DIR: ${ECOMMERCE_WORKBENCH_PROJECTS_DIR:-/app/data/projects}
       FILE_STORAGE_TYPE: ${FILE_STORAGE_TYPE:-local}

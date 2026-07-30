@@ -34,6 +34,13 @@ prepare_env() {
   mkdir -p data data/files data/projects
 }
 
+validate_config() {
+  if ! $DOCKER_COMPOSE config --quiet; then
+    echo -e "${RED}部署配置无效，请先在 .env 中设置 APP_ACCESS_PASSWORD 并修正上方错误。${NC}"
+    return 1
+  fi
+}
+
 build_image() {
   $DOCKER_COMPOSE build --no-cache
 }
@@ -72,6 +79,7 @@ case "${1:-install}" in
   install)
     print_header
     prepare_env
+    validate_config
     build_image
     start_service
     show_status
@@ -91,6 +99,7 @@ case "${1:-install}" in
   update)
     print_header
     prepare_env
+    validate_config
     $DOCKER_COMPOSE down
     build_image
     start_service
@@ -111,4 +120,3 @@ case "${1:-install}" in
     exit 1
     ;;
 esac
-

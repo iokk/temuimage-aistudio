@@ -9,10 +9,14 @@ import io
 import json
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 import hashlib
+import hmac
+import html as _html_mod
 import base64
 import copy
+import functools
 import zipfile
 import random
 import time
@@ -21,22 +25,48 @@ import tempfile
 import shutil
 import urllib.request
 import urllib.error
+import urllib.parse
 import logging
 import logging.handlers
 import uuid
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from google import genai
 from google.genai import types
+from task_engine import TaskEngine, TaskExecution, TaskHandler
+from task_status import TASK_COMPLETED_STATUSES, TASK_TERMINAL_STATUSES
+from task_store import SqliteTaskStore, TaskCapacityError
 
 # ==================== 配置常量 ====================
 APP_VERSION = "V15.2.1"
 APP_AUTHOR = "企鹅 & 小明"
 APP_COMMERCIAL = "企鹅 & Jerry"
-APP_NAME = "电商出图工作台"
+APP_NAME = "电商出图工作台"  # 内部常量：用于本地目录等功能性路径，勿改
+BRAND_NAME = "TuLite"
+BRAND_TITLE = "TuLite · 跨境出图工作台"
+BRAND_CAPTION = "图 Lite · 跨境出图"
+# 品牌 Logo（内联 SVG，无外部资源）：墨蓝描边圆角方框 + 画框山形 + 橙色太阳点 + 字标
+TULITE_LOGO_HTML = """
+<div style="display:flex;align-items:center;gap:10px;height:56px;margin:2px 0 6px 0;">
+  <svg width="44" height="44" viewBox="0 0 44 44" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <rect x="3" y="3" width="38" height="38" rx="8" fill="#ffffff" stroke="#1B2A4A" stroke-width="2.5"/>
+    <circle cx="29" cy="14.5" r="3.5" fill="#FF7A45"/>
+    <path d="M9 31 L18 19 L24 26 L28 22 L35 31 Z" fill="#1B2A4A"/>
+  </svg>
+  <div style="line-height:1.15;">
+    <div style="font-size:20px;font-weight:800;color:#1B2A4A;letter-spacing:0.2px;">TuLite</div>
+    <div style="font-size:11px;color:#64748B;">图 Lite · 跨境出图</div>
+  </div>
+</div>
+"""
 DEMO_PROVIDER_ID = "local-demo-admin"
 DEMO_PROVIDER_KEY = "DEMO-ADMIN-KEY"
 DEMO_PROVIDER_NAME = "本地演示管理员"
+
+
+def esc(v):
+    """HTML 转义用户/AI 可控内容，防止注入 unsafe_allow_html 渲染。"""
+    return _html_mod.escape(str(v or ""), quote=True)
 
 
 def demo_mode_enabled() -> bool:
@@ -141,20 +171,33 @@ COMPLIANCE_FILE = DATA_DIR / "compliance.json"
 TEMPLATES_FILE = DATA_DIR / "templates.json"
 TITLE_TEMPLATES_FILE = DATA_DIR / "title_templates.json"
 TASKS_FILE = DATA_DIR / "tasks.json"
+TASK_DB_FILE = DATA_DIR / "tasks.sqlite3"
 HISTORY_FILE = DATA_DIR / "history.json"
 HISTORY_DIR = DATA_DIR / "history"
+INSTANCE_FILE = DATA_DIR / "instance.json"
 
 KEYCHAIN_SERVICE = "ecommerce-image-workbench"
 MAX_TASK_QUEUE = 5
 MAX_ACTIVE_TASKS = 2
-TASK_STATUS_TERMINAL = {"done", "error", "cancelled", "expired"}
 HISTORY_RECORD_ACTIVE = "active"
 HISTORY_RECORD_TRASHED = "trashed"
 GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS = int(
     os.getenv("GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS", "60")
 )
 GEMINI_IMAGE_REQUEST_TIMEOUT_SECONDS = int(
-    os.getenv("GEMINI_IMAGE_REQUEST_TIMEOUT_SECONDS", "120")
+    os.getenv("GEMINI_IMAGE_REQUEST_TIMEOUT_SECONDS", "300")
+)
+IMAGE_RETRY_COOLDOWN_SECONDS = int(
+    os.getenv("IMAGE_RETRY_COOLDOWN_SECONDS", "90")
+)
+TASK_RUNNER_LEASE_SECONDS = max(
+    15, int(os.getenv("TASK_RUNNER_LEASE_SECONDS", "30"))
+)
+TASK_RUNNER_HEARTBEAT_SECONDS = max(
+    3, min(10, TASK_RUNNER_LEASE_SECONDS // 3)
+)
+TASK_SUPERVISOR_INTERVAL_SECONDS = max(
+    2, int(os.getenv("TASK_SUPERVISOR_INTERVAL_SECONDS", "5"))
 )
 
 # OpenAI 兼容协议（GPT Image 2 等）的默认配置
@@ -484,9 +527,10 @@ THINKING_LEVEL_DESC = {
     "high": "🧠 深度 - 最大推理深度",
 }
 
-MAIN_NAV_ITEMS = ["🚀 智能组图", "🎨 快速出图 / 图片翻译", "🏷️ 标题生成"]
+MAIN_NAV_ITEMS = ["🚀 智能组图", "✨ 文字生图", "🎨 快速出图 / 图片翻译", "🏷️ 标题生成"]
 PROJECT_CENTER_PAGE = "📚 项目中心"
-MANAGEMENT_NAV_ITEMS = ["🧩 模板库", PROJECT_CENTER_PAGE, "⚙️ 提供商设置", "🛠️ 系统设置"]
+TASK_CENTER_PAGE = "📡 任务中心"
+MANAGEMENT_NAV_ITEMS = [TASK_CENTER_PAGE, "🧩 模板库", PROJECT_CENTER_PAGE, "⚙️ 提供商设置", "🛠️ 系统设置"]
 
 # ==================== 默认配置 ====================
 DEFAULT_SETTINGS = {
@@ -501,6 +545,8 @@ DEFAULT_SETTINGS = {
     "default_resolution": "1K",
     "default_aspect": "1:1",
     "default_thinking_level": "high",
+    "max_active_tasks": MAX_ACTIVE_TASKS,
+    "max_task_queue": MAX_TASK_QUEUE,
     "compliance_mode": "strict",
     "trash_retention_days": 15,
     "file_storage_type": "local",
@@ -748,7 +794,7 @@ Requirements: {requirements}
 Generate JSON array:
 [{{"type_key": "xxx", "index": 1, "headline": "max 40 chars", "subline": "max 60 chars", "badge": "max 20 chars or empty"}}]
 CRITICAL: Use concise natural {output_language_name} only. Keep each field short and readable for ecommerce images. Return valid JSON.""",
-    "image_prompt": """Professional ecommerce product image.
+    "image_prompt": """Professional commercial product photography for an ecommerce listing.
 Product: {product_name}
 Category: {category}
 Image type: {image_type}
@@ -756,12 +802,14 @@ Style: {style_hint}
 Scene: {scene}
 Text overlay ({output_language_name} ONLY):
 {text_content}
-CRITICAL: Product must match reference. If the image contains text, use {output_language_name} only. Professional ecommerce style.
+Photography: studio softbox lighting, soft natural shadow under the product, clean seamless background, sharp focus, high detail, true-to-life colors.
+Composition: product is the hero, centered, filling about 70-80% of the frame, clear visual hierarchy, uncluttered layout.
+CRITICAL: Product must exactly match the reference image in shape, color, material and logo. If the image contains text, use {output_language_name} only. Keep the image free of watermarks and of any text beyond the overlay above. Professional ecommerce style.
 Aspect ratio: {aspect_ratio}""",
-    "size_image_prompt": """Professional product dimension diagram.
+    "size_image_prompt": """Professional product dimension diagram for an ecommerce listing.
 Product: {product_name}
-Style: Clean technical illustration on white background
-REQUIRED: Clear bidirectional arrow lines. Dual unit measurements: XX.XX inch / XX.X cm. Use word "inch" NOT "in". Clean sans-serif font. Use {output_language_name} for descriptive labels and notes while keeping inch and cm for units.
+Style: Clean technical illustration on a pure white background, product rendered accurately and centered, filling about 70% of the frame, flat even lighting, no decorative props.
+REQUIRED: Clear bidirectional arrow lines aligned to each measured edge. Dual unit measurements: XX.XX inch / XX.X cm. Use word "inch" NOT "in". Clean sans-serif font, high-contrast dark labels, generous spacing so every number stays legible. Use {output_language_name} for descriptive labels and notes while keeping inch and cm for units. Keep the diagram free of watermarks and unrelated text.
 Aspect ratio: {aspect_ratio}""",
     "translation_image_prompt": """Translate this ecommerce image into {output_language_name} while preserving the original layout as much as possible.
 Goal: compliance-first translation, not creative redesign.
@@ -786,6 +834,51 @@ Aspect ratio: {aspect_ratio}""",
 - {translation_language_rule}
 - Output exactly 6 lines total with no labels or commentary.
 - Line order must be English line then {target_language_name} line, repeated 3 times.""",
+    "temu_tri_title_prompt": """你是资深跨境电商标题专家。根据提供的商品文字信息与商品图片（如有），为 TEMU 平台同一款商品产出三条标题：中文、西班牙语（Español）、法语（Français）。
+
+商品信息：
+{product_info}
+
+{template_context}
+
+【幕后工作流程（对用户不可见，最终只交付成品）】
+1. 分别以中文、西班牙语、法语母语文案师的身份，各写一条标题；
+2. 切换为资深 TEMU 运营与合规专家身份，按下方三层合规框架逐条自查，发现问题立即改写；
+3. 只输出最终定稿结果，禁止输出思考过程、自查记录或任何解释。
+
+【三层合规框架】
+第一层 · 绝对禁用（任何情况下不得出现）：
+- 绝对化用语：最/第一/唯一/100%/保证/顶级/完美；Mejor/No.1/Único/Perfecto/100%/Garantía/Superior；Meilleur/No.1/Unique/Parfait/100%/Garantie/Supérieur
+- 虚假认证：FDA/CE/认证/Certificado/Certifié 等认证类词汇
+- 材质替换：gold→金色/Dorado/Doré；silver→银色/Plateado/Argenté；diamond→水晶·仿钻/Cristal·Estrás/Cristal·Strass
+
+第二层 · 条件禁用（仅当商品确实具备该属性、且商品信息明确支持时才可使用，否则一律省略）：
+- 防水 waterproof/Impermeable/Imperméable
+- 保温/隔热 insulated/Aislante/Isolant
+- 抗菌 antibacterial/Antibacteriano/Antibactérien
+- 环保·有机 eco·organic/Ecológico·Orgánico/Écologique·Bio
+- 儿童相关词汇（仅当商品确实属于儿童品类时可用）
+
+第三层 · 语义风险自查（看含义而非词表）：
+- 不得出现商品信息无法支撑的功效、安全、环保、医疗暗示
+- 不得用同义改写规避第一层禁用词
+- 不得暗示官方认证或针对未成年人营销
+- 命中任意一条立即改写该标题
+
+【质量原则】
+- 核心产品词放最前面；不堆砌同义词
+- 母语级自然表达，不是逐字翻译；三种语言各自贴合本地买家真实搜索习惯选长尾词
+- 宁可精准不要凑数
+- 结构公式（灵活运用）：[核心产品词]+[关键属性/材质]+[尺寸/规格]+[使用场景]+[风格/颜色]
+- 三条标题按各自语言的本地搜索表达组织，禁止三种语言互相逐字对译
+
+【硬性要求】
+- 字符区间为硬性要求（含空格）：中文 40-80 字符；西班牙语和法语 150-200 字符。写完后逐条数字符：中文不足 40 或超过 80 时增删属性词至达标；西语/法语不足 150 时必须继续补充真实合规的长尾属性词（材质、规格、场景、人群、风格、颜色等）直到达标，超过 200 时删减。这些区间对各自语言都完全可以达到，不要轻易放弃
+- 西班牙语和法语标题必须附中文回译（back_translation_zh）
+- 例外规则（极少使用）：仅当某语言因合规原因（而非长度原因）实在无法产出干净标题时，该语言才不输出标题，改为在 issues 中用一句话说明原因。长度不足不是使用例外规则的理由
+
+【输出格式：只输出下面结构的 JSON，不要 markdown 代码块，不要任何多余文字】
+{"titles": [{"lang": "zh", "title": "..."}, {"lang": "es", "title": "...", "back_translation_zh": "..."}, {"lang": "fr", "title": "...", "back_translation_zh": "..."}], "issues": []}""",
 }
 
 DEFAULT_TEMPLATES = {
@@ -794,7 +887,7 @@ DEFAULT_TEMPLATES = {
             "name": "主图白底",
             "icon": "🎯",
             "desc": "纯白背景产品主图",
-            "hint": "Pure white background, centered product",
+            "hint": "Pure seamless white background, product centered filling 70-80% of frame, soft grounding shadow, no props, no text",
             "enabled": True,
             "order": 1,
         },
@@ -802,7 +895,7 @@ DEFAULT_TEMPLATES = {
             "name": "功能卖点图",
             "icon": "⭐",
             "desc": "突出商品核心卖点与优势的说明图",
-            "hint": "Feature highlights with callouts",
+            "hint": "Feature highlights with clean callout lines and short labels, product hero centered, tidy uncluttered layout",
             "enabled": True,
             "order": 2,
         },
@@ -810,7 +903,7 @@ DEFAULT_TEMPLATES = {
             "name": "场景应用图",
             "icon": "🏠",
             "desc": "展示商品在真实使用场景中的效果",
-            "hint": "Lifestyle scene, product in use",
+            "hint": "Realistic lifestyle scene, product in natural use, warm inviting light, believable environment, product clearly visible",
             "enabled": True,
             "order": 3,
         },
@@ -818,7 +911,7 @@ DEFAULT_TEMPLATES = {
             "name": "细节特写图",
             "icon": "🔍",
             "desc": "放大展示材质、工艺和细节做工",
-            "hint": "Macro close-up shot, texture details",
+            "hint": "Macro close-up shot, texture and craftsmanship details, shallow depth of field, razor-sharp focus on material",
             "enabled": True,
             "order": 4,
         },
@@ -826,7 +919,7 @@ DEFAULT_TEMPLATES = {
             "name": "尺寸规格图",
             "icon": "📐",
             "desc": "展示尺寸、规格或参数信息的说明图",
-            "hint": "Dimension diagram with inch/cm",
+            "hint": "Clean technical dimension diagram, bidirectional arrows, dual inch/cm units, pure white background",
             "enabled": True,
             "order": 5,
             "special": True,
@@ -835,7 +928,7 @@ DEFAULT_TEMPLATES = {
             "name": "对比优势图",
             "icon": "⚖️",
             "desc": "用对比方式突出商品优势与差异点",
-            "hint": "Side by side comparison",
+            "hint": "Clear side-by-side comparison layout, consistent lighting on both sides, our product's advantage clearly highlighted",
             "enabled": True,
             "order": 6,
         },
@@ -843,7 +936,7 @@ DEFAULT_TEMPLATES = {
             "name": "包装清单图",
             "icon": "📦",
             "desc": "展示包装内包含的商品与配件内容",
-            "hint": "Flat lay of package contents",
+            "hint": "Neat flat lay of all package contents on a clean background, evenly lit, every item fully visible and labeled",
             "enabled": True,
             "order": 7,
         },
@@ -851,7 +944,7 @@ DEFAULT_TEMPLATES = {
             "name": "操作引导图",
             "icon": "📋",
             "desc": "用于说明安装、使用流程或操作顺序的信息图",
-            "hint": "Step by step visual guide",
+            "hint": "Numbered step-by-step visual guide, clean infographic layout, consistent product rendering across steps",
             "enabled": True,
             "order": 8,
         },
@@ -1034,31 +1127,155 @@ TEMPLATE_GROUP_ORDER = ["combo_types", "smart_types", "translation_types"]
 
 
 # ==================== 数据管理 ====================
+FILE_IO_LOCK = threading.RLock()
+
+
 def load_json(fp, default=None):
-    try:
-        if fp.exists():
-            with open(fp, "r", encoding="utf-8") as f:
-                return json.load(f)
-    except:
-        pass
-    return default.copy() if default else {}
+    with FILE_IO_LOCK:
+        try:
+            if fp.exists():
+                with open(fp, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except:
+            pass
+        return default.copy() if default else {}
 
 
 def save_json(fp, data):
-    try:
-        with open(fp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        return True
-    except:
+    with FILE_IO_LOCK:
+        try:
+            tmp = str(fp) + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, str(fp))
+            return True
+        except:
+            return False
+
+
+class _InterProcessHistoryLock:
+    """Reentrant thread lock plus OS lock for the JSON history index."""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self._thread_lock = threading.RLock()
+        self._depth = 0
+        self._handle = None
+
+    def __enter__(self):
+        self._thread_lock.acquire()
+        try:
+            if self._depth == 0:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                self._handle = open(self.path, "a+b")
+                if os.name == "nt":
+                    import msvcrt
+
+                    self._handle.seek(0, os.SEEK_END)
+                    if self._handle.tell() == 0:
+                        self._handle.write(b"\0")
+                        self._handle.flush()
+                    self._handle.seek(0)
+                    msvcrt.locking(self._handle.fileno(), msvcrt.LK_LOCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX)
+            self._depth += 1
+            return self
+        except Exception:
+            if self._handle:
+                self._handle.close()
+                self._handle = None
+            self._thread_lock.release()
+            raise
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            self._depth -= 1
+            if self._depth == 0 and self._handle:
+                if os.name == "nt":
+                    import msvcrt
+
+                    self._handle.seek(0)
+                    msvcrt.locking(self._handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+                self._handle.close()
+                self._handle = None
+        finally:
+            self._thread_lock.release()
         return False
 
 
+@st.cache_resource(show_spinner=False)
+def get_history_lock():
+    return _InterProcessHistoryLock(Path(str(HISTORY_FILE) + ".lock"))
+
+
+def synchronized_history_mutation(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        with get_history_lock():
+            return func(*args, **kwargs)
+
+    return wrapper
+
+
+_CONFIG_CACHE = {}
+
+
+def _cached_config(fp, builder):
+    """按文件 mtime 缓存合并后的配置。线程安全（FILE_IO_LOCK），
+    不依赖 st.cache_data（后台工作线程也会调用这些函数）。"""
+    fp_str = str(fp)
+    try:
+        mtime = os.path.getmtime(fp_str) if fp.exists() else -1.0
+    except OSError:
+        mtime = -1.0
+    with FILE_IO_LOCK:
+        cached = _CONFIG_CACHE.get(fp_str)
+        if cached and cached[0] == mtime:
+            return copy.deepcopy(cached[1])
+    value = builder()
+    with FILE_IO_LOCK:
+        _CONFIG_CACHE[fp_str] = (mtime, copy.deepcopy(value))
+    return value
+
+
 def get_settings():
-    s = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
-    for k, v in DEFAULT_SETTINGS.items():
-        if k not in s:
-            s[k] = v
-    return s
+    def _build():
+        s = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
+        for k, v in DEFAULT_SETTINGS.items():
+            if k not in s:
+                s[k] = v
+        return s
+
+    return _cached_config(SETTINGS_FILE, _build)
+
+
+def get_task_limits(settings=None):
+    """Return validated runtime queue limits, with environment overrides.
+
+    Keep the legacy constants as defaults so older settings files remain safe,
+    while allowing operators to tune concurrency from System Settings.
+    """
+    s = settings or get_settings()
+    try:
+        max_active = int(
+            os.getenv("MAX_ACTIVE_TASKS") or s.get("max_active_tasks") or MAX_ACTIVE_TASKS
+        )
+    except (TypeError, ValueError):
+        max_active = MAX_ACTIVE_TASKS
+    try:
+        max_queue = int(
+            os.getenv("MAX_TASK_QUEUE") or s.get("max_task_queue") or MAX_TASK_QUEUE
+        )
+    except (TypeError, ValueError):
+        max_queue = MAX_TASK_QUEUE
+    return max(1, min(max_active, 16)), max(1, min(max_queue, 100))
 
 
 def save_settings(s):
@@ -1109,6 +1326,16 @@ def _get_or_create_local_secret_key() -> bytes:
         from cryptography.fernet import Fernet
     except ImportError:
         return b""
+    env_key = (os.getenv("XIAOBAITU_SECRET_KEY") or "").strip()
+    if env_key:
+        key_bytes = env_key.encode("utf-8")
+        try:
+            Fernet(key_bytes)
+            return key_bytes
+        except Exception:
+            logger.warning(
+                "XIAOBAITU_SECRET_KEY 不是有效的 Fernet 密钥，回退到本地密钥文件"
+            )
     try:
         if SECRET_KEY_FILE.exists():
             key = SECRET_KEY_FILE.read_bytes().strip()
@@ -1261,6 +1488,9 @@ def _normalize_provider_entry(entry):
     keychain_account = (
         entry.get("keychain_account") or ""
     ).strip() or _keychain_account(pid)
+    model_catalog = entry.get("model_catalog")
+    if not isinstance(model_catalog, list):
+        model_catalog = []
     return {
         "id": pid,
         "name": name,
@@ -1274,6 +1504,9 @@ def _normalize_provider_entry(entry):
         "is_default": is_default,
         "secret_storage": secret_storage,
         "keychain_account": keychain_account,
+        "model_catalog": _normalize_model_catalog(model_catalog),
+        "model_catalog_updated_at": str(entry.get("model_catalog_updated_at") or "").strip(),
+        "model_catalog_error": str(entry.get("model_catalog_error") or "").strip(),
     }
 
 
@@ -1304,7 +1537,13 @@ def _normalize_providers_data(data):
 
 
 def save_providers(data):
-    return save_json(PROVIDERS_FILE, data)
+    ok = save_json(PROVIDERS_FILE, data)
+    if ok:
+        try:
+            os.chmod(str(PROVIDERS_FILE), 0o600)
+        except OSError:
+            pass
+    return ok
 
 
 def resolve_provider_api_key(provider: dict) -> str:
@@ -1315,6 +1554,12 @@ def resolve_provider_api_key(provider: dict) -> str:
         return get_keychain_secret(provider.get("keychain_account"))
     if storage == "encrypted":
         return decrypt_secret(provider.get("api_key") or "")
+    if storage == "environment":
+        return (
+            os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or ""
+        ).strip()
+    if storage == "runtime":
+        return (provider.get("api_key") or "").strip()
     # "plain" (legacy) or unset: read raw value as-is for backward compat.
     return (provider.get("api_key") or "").strip()
 
@@ -1322,6 +1567,8 @@ def resolve_provider_api_key(provider: dict) -> str:
 def persist_provider_secret(provider: dict, api_key: str):
     api_key = (api_key or "").strip()
     if not provider:
+        return provider, False
+    if not api_key:
         return provider, False
     if keychain_available() and api_key:
         ok, _ = set_keychain_secret(
@@ -1342,9 +1589,18 @@ def persist_provider_secret(provider: dict, api_key: str):
             provider["secret_storage"] = "encrypted"
             provider["api_key"] = cipher_text
             return provider, True
-    provider["secret_storage"] = "plain"
-    provider["api_key"] = api_key
-    return provider, False
+    raise RuntimeError(
+        "当前环境无法安全保存 API Key，请配置 Keychain 或 XIAOBAITU_SECRET_KEY。"
+    )
+
+
+def provider_secret_storage_notice(provider: dict) -> str:
+    storage = (provider or {}).get("secret_storage")
+    if storage == "keychain":
+        return "API Key 已安全保存到 Keychain。"
+    if storage == "encrypted":
+        return "API Key 已加密保存。"
+    return ""
 
 
 def migrate_provider_secrets(data):
@@ -1353,8 +1609,8 @@ def migrate_provider_secrets(data):
         raw_key = (provider.get("api_key") or "").strip()
         if (
             raw_key
-            and provider.get("secret_storage") != "keychain"
-            and keychain_available()
+            and provider.get("secret_storage") in (None, "", "plain")
+            and (keychain_available() or encrypted_storage_available())
         ):
             provider, moved = persist_provider_secret(provider, raw_key)
             changed = changed or moved
@@ -1374,13 +1630,14 @@ def _bootstrap_env_provider(data):
         "id": _new_provider_id(),
         "name": "环境变量Key",
         "provider_type": "gemini",
-        "api_key": env_key,
+        "api_key": "",
         "base_url": "",
         "title_model": s.get("default_title_model", "gemini-3.1-flash-lite-preview"),
         "vision_model": s.get("default_vision_model", "gemini-3.1-flash-lite-preview"),
         "image_model": s.get("default_model", "gemini-3.1-flash-image-preview"),
         "enabled": True,
         "is_default": True,
+        "secret_storage": "environment",
     }
     data["providers"] = [provider]
     data["current_id"] = provider["id"]
@@ -1425,13 +1682,22 @@ def ensure_demo_provider(data: dict, set_current: bool = False) -> dict:
 
 def get_providers():
     data = load_json(PROVIDERS_FILE, DEFAULT_PROVIDERS_DATA)
+    try:
+        before = json.dumps(data, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        before = None
     data = _normalize_providers_data(data)
     if not data.get("providers"):
         data = _bootstrap_env_provider(data)
     if demo_mode_enabled():
         data = ensure_demo_provider(data, set_current=not data.get("current_id"))
     data = migrate_provider_secrets(data)
-    save_providers(data)
+    try:
+        after = json.dumps(data, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        after = ""
+    if before is None or after != before:
+        save_providers(data)
     return data
 
 
@@ -1450,6 +1716,7 @@ def get_active_provider():
     if current:
         current = current.copy()
         current["api_key"] = resolve_provider_api_key(current)
+        current["secret_storage"] = "runtime"
     return current
 
 
@@ -1470,6 +1737,7 @@ def get_provider_by_id(provider_id: str):
     if provider:
         provider = provider.copy()
         provider["api_key"] = resolve_provider_api_key(provider)
+        provider["secret_storage"] = "runtime"
     return provider
 
 
@@ -1490,7 +1758,47 @@ def validate_provider_config(
         errors.append("Relay/OpenAI 类型必须填写 Base URL。")
     if normalized_base and not re.match(r"^https?://", normalized_base):
         errors.append("Base URL 必须以 http:// 或 https:// 开头。")
+    elif normalized_base:
+        try:
+            parsed_base_url = urllib.parse.urlsplit(normalized_base)
+            hostname = parsed_base_url.hostname
+        except ValueError:
+            parsed_base_url = None
+            hostname = None
+        if not hostname:
+            errors.append("Base URL 必须包含有效主机名。")
+        elif parsed_base_url.username is not None or parsed_base_url.password is not None:
+            errors.append("Base URL 不能包含用户名或密码。")
+        if parsed_base_url and (parsed_base_url.query or parsed_base_url.fragment):
+            errors.append("Base URL 不能包含查询参数或片段。")
     return errors
+
+
+def provider_with_runtime_secret(provider: dict, api_key: str) -> dict:
+    runtime_provider = copy.deepcopy(provider or {})
+    runtime_provider["api_key"] = (api_key or "").strip()
+    runtime_provider["secret_storage"] = "runtime"
+    return runtime_provider
+
+
+def prepare_provider_for_save(provider: dict, replacement_secret: str = ""):
+    replacement_secret = (replacement_secret or "").strip()
+    effective_secret = replacement_secret or resolve_provider_api_key(provider)
+    errors = validate_provider_config(
+        provider.get("name", ""),
+        provider.get("provider_type", "gemini"),
+        effective_secret,
+        provider.get("base_url", ""),
+    )
+    if errors:
+        return None, errors, False
+    prepared = copy.deepcopy(provider)
+    if replacement_secret:
+        prepared, stored_securely = persist_provider_secret(
+            prepared, replacement_secret
+        )
+        return prepared, [], stored_securely
+    return prepared, [], False
 
 
 def provider_has_active_tasks(provider_id: str):
@@ -1516,8 +1824,25 @@ def find_replacement_provider(excluded_provider_id: str = ""):
     return enabled[0] if enabled else None
 
 
-TASK_LOCK = threading.Lock()
-TASK_THREADS = {}
+@st.cache_resource(show_spinner=False)
+def get_task_repository(database_path: str, legacy_json_path: str):
+    return SqliteTaskStore(
+        Path(database_path), legacy_json_path=Path(legacy_json_path)
+    )
+
+
+TASK_REPOSITORY = get_task_repository(str(TASK_DB_FILE), str(TASKS_FILE))
+
+
+def _task_runner_id() -> str:
+    runner_prefix = os.getenv("TULITE_RUNNER_ID", "").strip()
+    if not runner_prefix:
+        workspace_id = TASK_REPOSITORY.get_or_create_workspace_id()
+        runner_prefix = f"local-{workspace_id}"
+    return f"{runner_prefix}-{os.getpid()}-{uuid.uuid4().hex[:12]}"
+
+
+_TASK_OWNER_LOCK = threading.RLock()
 
 
 def _new_task_id():
@@ -1527,59 +1852,39 @@ def _new_task_id():
 
 
 def get_session_owner_id() -> str:
-    """Stable per-browser-session identifier used to scope task *visibility*.
-
-    The task execution engine (thread pool / TASK_LOCK / MAX_ACTIVE_TASKS) stays
-    process-global and shared across sessions; only which tasks a session is
-    allowed to *see* is scoped by this id.
-    """
-    owner_id = st.session_state.get("session_owner_id")
-    if not owner_id:
-        owner_id = str(uuid.uuid4())
+    """Return the stable owner for this installation across tabs and restarts."""
+    with _TASK_OWNER_LOCK:
+        legacy_instance = load_json(INSTANCE_FILE, {"owner_id": ""})
+        owner_id = TASK_REPOSITORY.get_or_create_workspace_id(
+            (legacy_instance.get("owner_id") or "").strip()
+        )
+        if TASK_REPOSITORY.get_metadata("ownership_migration_version") != "1":
+            if _migrate_legacy_instance_ownership(owner_id):
+                TASK_REPOSITORY.set_metadata("ownership_migration_version", "1")
+    if st.session_state.get("session_owner_id") != owner_id:
         st.session_state["session_owner_id"] = owner_id
     return owner_id
 
 
-@st.cache_resource(show_spinner=False)
-def get_task_runtime():
-    try:
-        TASKS_FILE.unlink()
-    except (FileNotFoundError, OSError):
-        pass
-    return {"tasks": [], "threads": {}, "last_cleanup_ts": 0.0}
+@synchronized_history_mutation
+def _migrate_legacy_instance_ownership(owner_id: str) -> bool:
+    def migrate_tasks(data):
+        for task in data.get("tasks", []):
+            task["owner_id"] = owner_id
+        return data
 
-
-def get_task_store():
-    runtime = get_task_runtime()
-    tasks = runtime.get("tasks")
-    if not isinstance(tasks, list):
-        runtime["tasks"] = []
-    return runtime
-
-
-def get_task_threads():
-    runtime = get_task_runtime()
-    threads = runtime.get("threads")
-    if not isinstance(threads, dict):
-        runtime["threads"] = {}
-    return runtime["threads"]
-
-
-def get_tasks_data():
-    data = get_task_store()
-    if not isinstance(data, dict):
-        data = {"tasks": []}
-    tasks = data.get("tasks", [])
-    if not isinstance(tasks, list):
-        tasks = []
-    data["tasks"] = tasks
-    return data
-
-
-def save_tasks_data(data):
-    store = get_task_store()
-    store["tasks"] = data.get("tasks", []) if isinstance(data, dict) else []
-    return store
+    TASK_REPOSITORY.migrate(migrate_tasks)
+    history = load_json(HISTORY_FILE, {"records": []})
+    records = history.get("records", []) if isinstance(history, dict) else []
+    changed = False
+    for record in records:
+        if isinstance(record, dict) and record.get("owner_id") != owner_id:
+            record["owner_id"] = owner_id
+            changed = True
+    if changed:
+        history["records"] = records
+        return save_json(HISTORY_FILE, history)
+    return True
 
 
 def get_history_data():
@@ -1612,23 +1917,30 @@ def _history_sort_key(record: dict):
     return record.get("completed_at", record.get("created_at", ""))
 
 
-def list_history_records(record_states=None):
+def list_history_records(record_states=None, owner_id=None):
+    # get_history_data() 已完成 normalize（含 deepcopy），此处不再重复
     data = get_history_data()
-    records = [_normalize_history_record(r) for r in data.get("records", [])]
+    records = list(data.get("records", []))
     if record_states:
         allowed_states = {
             str(state or "").strip().lower() for state in record_states if state
         }
         records = [r for r in records if r.get("record_state") in allowed_states]
+    if owner_id is not None:
+        # 历史遗留记录（无 owner_id）对所有会话可见；带 owner_id 的仅本人可见
+        records = [
+            r for r in records
+            if not (r.get("owner_id") or "") or r.get("owner_id") == owner_id
+        ]
     return sorted(records, key=_history_sort_key, reverse=True)
 
 
-def list_active_history_records():
-    return list_history_records({HISTORY_RECORD_ACTIVE})
+def list_active_history_records(owner_id=None):
+    return list_history_records({HISTORY_RECORD_ACTIVE}, owner_id=owner_id)
 
 
-def list_trashed_history_records():
-    return list_history_records({HISTORY_RECORD_TRASHED})
+def list_trashed_history_records(owner_id=None):
+    return list_history_records({HISTORY_RECORD_TRASHED}, owner_id=owner_id)
 
 
 def get_project_output_base_dir():
@@ -1708,6 +2020,7 @@ def write_manifest_record(record: dict):
         return False
 
 
+@synchronized_history_mutation
 def replace_history_record(task_id: str, updated_record: dict):
     data = get_history_data()
     replaced = False
@@ -1733,6 +2046,7 @@ def get_history_record(task_id: str):
     )
 
 
+@synchronized_history_mutation
 def rebuild_history_index_from_manifests():
     existing_records = {
         record.get("task_id"): record for record in get_history_data().get("records", [])
@@ -1786,6 +2100,7 @@ def find_orphan_project_dirs(records: list):
     return orphan_dirs
 
 
+@synchronized_history_mutation
 def cleanup_expired_trashed_records():
     settings = get_settings()
     retention_days = int(settings.get("trash_retention_days", 15) or 0)
@@ -1810,6 +2125,7 @@ def cleanup_expired_trashed_records():
     return purged_records
 
 
+@synchronized_history_mutation
 def rebuild_record_zip(task_id: str):
     record = get_history_record(task_id)
     if not record:
@@ -1901,7 +2217,6 @@ def _write_history_zip(
 ):
     dest_dir.mkdir(parents=True, exist_ok=True)
     zip_path = dest_dir / "download.zip"
-    language_info = get_target_language(target_language)
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
         for path in file_paths or []:
             if not path:
@@ -1910,21 +2225,7 @@ def _write_history_zip(
             if src.exists():
                 z.write(src, arcname=src.name)
         if titles:
-            if target_language == "en":
-                titles_content = "\n\n".join(
-                    [f"Title {i + 1}:\nEN: {t}" for i, t in enumerate(titles)]
-                )
-            else:
-                titles_content = "\n\n".join(
-                    [
-                        f"标题 {i // 2 + 1}:\nEN: {titles[i]}\n{language_info['copy_tag']}: {titles[i + 1]}"
-                        for i in range(0, len(titles) - 1, 2)
-                    ]
-                )
-            if not titles_content and titles:
-                titles_content = "\n".join(
-                    [f"Title {i + 1}: {t}" for i, t in enumerate(titles)]
-                )
+            titles_content = format_titles_text(titles)
             z.writestr("titles.txt", titles_content)
         if errors:
             z.writestr("errors.txt", "\n".join([str(err) for err in errors if err]))
@@ -1936,18 +2237,7 @@ def _write_project_text_files(
 ):
     dest_dir.mkdir(parents=True, exist_ok=True)
     if titles:
-        language_info = get_target_language(target_language)
-        if target_language == "en":
-            content = "\n\n".join(
-                [f"Title {i + 1}:\nEN: {t}" for i, t in enumerate(titles)]
-            )
-        else:
-            content = "\n\n".join(
-                [
-                    f"标题 {i // 2 + 1}:\nEN: {titles[i]}\n{language_info['copy_tag']}: {titles[i + 1]}"
-                    for i in range(0, len(titles) - 1, 2)
-                ]
-            )
+        content = format_titles_text(titles)
         (dest_dir / "titles.txt").write_text(content or "", encoding="utf-8")
     if errors:
         (dest_dir / "errors.txt").write_text(
@@ -2001,16 +2291,17 @@ def relaunch_history_record(task_id: str):
     payload = build_relaunch_payload(record)
     if not payload:
         return None, "该历史项目缺少可重发参数，请先重新生成一次新项目。"
-    task, err = create_task(record.get("task_type", "task"), payload)
-    if task:
-        schedule_task_workers()
-    return task, err
+    return create_task(record.get("task_type", "task"), payload)
 
 
-def record_task_history(task: dict, result: dict):
-    if not task or task.get("status") not in TASK_STATUS_TERMINAL:
+def _record_task_history(task: dict, result: dict):
+    if not task or task.get("status") not in TASK_TERMINAL_STATUSES:
         return None
     task_id = task.get("id") or _new_task_id()
+    persisted_task = TASK_REPOSITORY.get(task_id)
+    if persisted_task and persisted_task.get("history_archived_at"):
+        return get_history_record(task_id)
+    task = persisted_task or task
     data = get_history_data()
     existing_record = next(
         (r for r in data.get("records", []) if r.get("task_id") == task_id), None
@@ -2061,12 +2352,15 @@ def record_task_history(task: dict, result: dict):
         "titles": titles,
         "errors": errors,
         "progress": task.get("progress", {}),
+        "item_results": task.get("item_results", [])
+        or result.get("item_results", []),
         "file_paths": copied_files,
         "input_file_paths": copied_input_paths,
         "zip_path": zip_path,
         "artifact_dir": str(artifact_dir),
         "project_name": artifact_dir.name,
         "provider_id": (task.get("payload", {}) or {}).get("provider_id", ""),
+        "owner_id": task.get("owner_id", ""),
         "payload": payload_snapshot,
     }
     (artifact_dir / "manifest.json").write_text(
@@ -2076,10 +2370,27 @@ def record_task_history(task: dict, result: dict):
     records = [r for r in data.get("records", []) if r.get("task_id") != task_id]
     records.append(manifest)
     data["records"] = records
-    save_history_data(data)
+    if not save_history_data(data):
+        return None
+    if persisted_task:
+        TASK_REPOSITORY.update(
+            task_id,
+            {"history_archived_at": datetime.now().isoformat()},
+            expected_status=task.get("status"),
+        )
     return manifest
 
 
+@synchronized_history_mutation
+def record_task_history(task: dict, result: dict):
+    try:
+        return _record_task_history(task, result)
+    except Exception:
+        logger.exception("task history archiving failed (task_id=%s)", (task or {}).get("id"))
+        return None
+
+
+@synchronized_history_mutation
 def trash_history_record(task_id: str):
     data = get_history_data()
     record = next(
@@ -2102,6 +2413,7 @@ def trash_history_record(task_id: str):
     return _normalize_history_record(updated_record or record)
 
 
+@synchronized_history_mutation
 def restore_history_record(task_id: str):
     data = get_history_data()
     record = next(
@@ -2124,6 +2436,7 @@ def restore_history_record(task_id: str):
     return _normalize_history_record(updated_record or record)
 
 
+@synchronized_history_mutation
 def delete_history_record(task_id: str):
     data = get_history_data()
     record = next(
@@ -2138,6 +2451,7 @@ def delete_history_record(task_id: str):
     return record
 
 
+@synchronized_history_mutation
 def trash_history_records_by_status(statuses):
     status_set = {str(status or "").strip() for status in (statuses or []) if status}
     if not status_set:
@@ -2164,6 +2478,7 @@ def trash_history_records_by_status(statuses):
     return moved_records
 
 
+@synchronized_history_mutation
 def purge_history_records_by_status(statuses):
     status_set = {str(status or "").strip() for status in (statuses or []) if status}
     if not status_set:
@@ -2194,6 +2509,7 @@ def purge_history_records_by_status(statuses):
     return removed_records
 
 
+@synchronized_history_mutation
 def purge_trashed_history_record(task_id: str):
     data = get_history_data()
     record = next(
@@ -2206,10 +2522,9 @@ def purge_trashed_history_record(task_id: str):
     return delete_history_record(task_id)
 
 
+@synchronized_history_mutation
 def purge_all_trashed_history_records():
-    return purge_history_records_by_status(
-        {"done", "error", "cancelled", "expired"}
-    )
+    return purge_history_records_by_status(TASK_TERMINAL_STATUSES)
 
 
 def format_bytes(num_bytes: int):
@@ -2222,11 +2537,25 @@ def format_bytes(num_bytes: int):
     return f"{int(num_bytes)} B"
 
 
+_PATH_SIZE_CACHE = {}
+_PATH_SIZE_CACHE_LOCK = threading.Lock()
+
+
 def get_path_size(path: Path):
+    path = Path(path)
     if not path.exists():
         return 0
     if path.is_file():
         return path.stat().st_size
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    key = (str(path), mtime)
+    with _PATH_SIZE_CACHE_LOCK:
+        cached = _PATH_SIZE_CACHE.get(key)
+    if cached is not None:
+        return cached
     total = 0
     for child in path.rglob("*"):
         try:
@@ -2234,6 +2563,10 @@ def get_path_size(path: Path):
                 total += child.stat().st_size
         except OSError:
             continue
+    with _PATH_SIZE_CACHE_LOCK:
+        if len(_PATH_SIZE_CACHE) > 512:
+            _PATH_SIZE_CACHE.clear()
+        _PATH_SIZE_CACHE[key] = total
     return total
 
 
@@ -2307,11 +2640,11 @@ def render_template_item_preview(item: dict, group_meta: dict, item_meta: dict):
             <div class="template-preview-subtitle">你现在看到的是模板在后台中的展示效果，不需要保存就能先预览。</div>
             <div class="template-preview-card {state_class}">
                 <span class="{enabled_badge_class}">{enabled_text}</span>
-                <span class="template-preview-badge">适用页面: {group_meta.get('page_label', '未定义')}</span>
-                <div class="template-preview-name">{icon} {item.get('name', '未命名模板')}</div>
-                <div class="template-preview-desc">{item.get('desc', '暂无说明')}</div>
-                <div class="template-preview-hint">用途提示: {usage_note or '暂无用途说明'}</div>
-                <div class="template-preview-hint">提示语: {hint or '无'}</div>
+                <span class="template-preview-badge">适用页面: {esc(group_meta.get('page_label', '未定义'))}</span>
+                <div class="template-preview-name">{esc(icon)} {esc(item.get('name', '未命名模板'))}</div>
+                <div class="template-preview-desc">{esc(item.get('desc', '暂无说明'))}</div>
+                <div class="template-preview-hint">用途提示: {esc(usage_note or '暂无用途说明')}</div>
+                <div class="template-preview-hint">提示语: {esc(hint or '无')}</div>
             </div>
         </div>
         """,
@@ -2333,8 +2666,8 @@ def render_template_group_preview(group_key: str, group_meta: dict, group: dict)
         cards.append(
             f"""
             <div class="{card_class}">
-                <div>{item.get('icon', '📦')}</div>
-                <div class="template-preview-mini-name">{item.get('name', '未命名模板')}</div>
+                <div>{esc(item.get('icon', '📦'))}</div>
+                <div class="template-preview-mini-name">{esc(item.get('name', '未命名模板'))}</div>
                 <div class="template-preview-mini-meta">排序: {int(item.get('order', 1))}</div>
                 <div class="template-preview-mini-meta">{'启用中' if item.get('enabled', True) else '已停用'}</div>
             </div>
@@ -2343,7 +2676,7 @@ def render_template_group_preview(group_key: str, group_meta: dict, group: dict)
     st.markdown(
         f"""
         <div class="template-preview-shell">
-            <div class="template-preview-title">{group_meta.get('title', group_key)} 工作流预览</div>
+            <div class="template-preview-title">{esc(group_meta.get('title', group_key))} 工作流预览</div>
             <div class="template-preview-subtitle">模拟该工作流里模板选择区的呈现顺序与启用状态。</div>
             <div class="template-preview-grid">
                 {''.join(cards)}
@@ -2361,7 +2694,14 @@ def _record_option_label(record: dict):
     return f"{status} · {title} · {completed_at}"
 
 
+def record_owned_by_session(record: dict) -> bool:
+    """UI 层校验：记录无 owner_id（历史遗留）或属于当前会话时才可操作。"""
+    rid = (record or {}).get("owner_id") or ""
+    return (not rid) or rid == get_session_owner_id()
+
+
 def render_batch_record_actions(records: list, mode: str):
+    records = [r for r in records if record_owned_by_session(r)]
     if not records:
         return
     options = {record.get("task_id"): _record_option_label(record) for record in records}
@@ -2441,22 +2781,7 @@ def collect_diagnostics(records: list):
 
 def collect_template_library_diagnostics():
     issues = []
-    title_templates = get_title_templates()
-    enabled_title_templates = get_enabled_title_templates()
     image_templates = get_templates()
-
-    if not enabled_title_templates:
-        issues.append("标题模板已全部停用，标题页将无法正常选择模板。")
-
-    for key, template in title_templates.items():
-        prompt = (template.get("prompt") or "").strip()
-        if not prompt:
-            issues.append(f"标题模板「{template.get('name', key)}」缺少 Prompt。")
-            continue
-        if "{product_info}" not in prompt and key != "image_analysis":
-            issues.append(
-                f"标题模板「{template.get('name', key)}」未包含 {{product_info}} 占位符，可能无法利用商品信息。"
-            )
 
     translation_templates = image_templates.get("translation_types", {})
     enabled_translation = [
@@ -2482,8 +2807,6 @@ def collect_template_library_diagnostics():
             )
 
     return {
-        "title_template_count": len(title_templates),
-        "enabled_title_template_count": len(enabled_title_templates),
         "image_template_count": sum(len(group) for group in image_templates.values() if isinstance(group, dict)),
         "enabled_translation_count": len(enabled_translation),
         "issues": issues,
@@ -2505,146 +2828,224 @@ def open_in_file_manager(path_str: str):
 
 
 def list_tasks():
-    data = get_tasks_data()
     return sorted(
-        data.get("tasks", []), key=lambda x: x.get("created_at", ""), reverse=True
+        TASK_REPOSITORY.list(), key=lambda x: x.get("created_at", ""), reverse=True
     )
 
 
 def list_tasks_for_display():
-    """list_tasks() filtered to the current session's own tasks.
-
-    Tasks without an owner_id (created before this change) remain visible to
-    everyone for backward compatibility. Use this instead of list_tasks() in
-    any UI that renders tasks to the user; keep list_tasks() (unfiltered) for
-    the shared execution engine (scheduling, cancellation lookups, counts).
-    """
+    """Query the current workspace's tasks at the storage seam."""
     owner_id = get_session_owner_id()
-    return [
-        task
-        for task in list_tasks()
-        if not task.get("owner_id") or task.get("owner_id") == owner_id
-    ]
+    return sorted(
+        TASK_REPOSITORY.list(
+            scope_owner_id=owner_id,
+            include_unowned=True,
+        ),
+        key=lambda task: task.get("created_at", ""),
+        reverse=True,
+    )
 
 
-def clear_terminal_tasks():
-    with TASK_LOCK:
-        data = get_tasks_data()
-        existing_tasks = data.get("tasks", [])
-        active_tasks = [
-            task
-            for task in existing_tasks
-            if task.get("status") not in TASK_STATUS_TERMINAL
-        ]
-        removed_count = len(existing_tasks) - len(active_tasks)
-        data["tasks"] = active_tasks
-        save_tasks_data(data)
-        return removed_count
+def clear_completed_tasks():
+    return TASK_REPOSITORY.clear_archived_done(
+        scope_owner_id=get_session_owner_id(),
+        include_unowned=True,
+    )
 
 
-def update_task(task_id: str, **updates):
-    with TASK_LOCK:
-        data = get_tasks_data()
-        for task in data.get("tasks", []):
-            if task.get("id") == task_id:
-                task.update(updates)
-                task["updated_at"] = datetime.now().isoformat()
-                if updates.get("status") == "running":
-                    task.setdefault("started_at", datetime.now().isoformat())
-                if updates.get("status") in TASK_STATUS_TERMINAL:
-                    task.setdefault("ended_at", datetime.now().isoformat())
-                save_tasks_data(data)
-                return task
-    return None
-
-
-def prune_task_slots(tasks: list):
-    while len(tasks) >= MAX_TASK_QUEUE:
-        removable_index = next(
-            (i for i, t in enumerate(tasks) if t.get("status") in TASK_STATUS_TERMINAL),
-            None,
-        )
-        if removable_index is None:
-            return False, tasks
-        tasks.pop(removable_index)
-    return True, tasks
+def update_task(
+    task_id: str,
+    expected_status=None,
+    expected_claim_token: str = None,
+    scope_owner_id: str = None,
+    include_unowned: bool = False,
+    **updates,
+):
+    current = TASK_REPOSITORY.get(
+        task_id,
+        scope_owner_id=scope_owner_id,
+        include_unowned=include_unowned,
+    )
+    if not current:
+        return None
+    now = datetime.now().isoformat()
+    changes = copy.deepcopy(updates)
+    changes["updated_at"] = now
+    if changes.get("status") == "running" and not current.get("started_at"):
+        changes["started_at"] = now
+    if (
+        changes.get("status") in TASK_TERMINAL_STATUSES
+        and not current.get("ended_at")
+    ):
+        changes["ended_at"] = now
+    return TASK_REPOSITORY.update(
+        task_id,
+        changes,
+        expected_status=expected_status,
+        expected_claim_token=expected_claim_token,
+        scope_owner_id=scope_owner_id,
+        include_unowned=include_unowned,
+    )
 
 
 def create_task(task_type: str, payload: dict):
-    with TASK_LOCK:
-        data = get_tasks_data()
-        tasks = data.get("tasks", [])
-        ok, tasks = prune_task_slots(tasks)
-        if not ok:
-            return (
-                None,
-                f"最多同时保留 {MAX_TASK_QUEUE} 个任务，请先清理已完成或失败任务。",
-            )
-        task = {
-            "id": _new_task_id(),
-            "type": task_type,
-            "status": "queued",
-            "owner_id": get_session_owner_id(),
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat(),
-            "payload": payload,
-            "progress": {"done": 0, "total": payload.get("total", 0)},
-            "errors": [],
-            "titles": [],
-            "result_files": [],
-            "result_title_language": payload.get("target_language")
-            or payload.get("title_language")
-            or DEFAULT_TARGET_LANGUAGE,
-            "summary": payload.get("summary", ""),
+    handler = get_task_handlers().get(str(task_type or ""))
+    validation_errors = (
+        [f"不支持的任务类型：{task_type or 'unknown'}"]
+        if not handler
+        else [
+            str(error)
+            for error in handler.validate_payload(payload)
+            if error
+        ]
+    )
+    if validation_errors:
+        return None, "；".join(validation_errors)
+    _, max_task_queue = get_task_limits()
+    now = datetime.now().isoformat()
+    task = {
+        "id": _new_task_id(),
+        "type": task_type,
+        "status": "queued",
+        "owner_id": get_session_owner_id(),
+        "created_at": now,
+        "updated_at": now,
+        "payload": copy.deepcopy(payload),
+        "priority": int(payload.get("priority") or 0),
+        "available_at": str(payload.get("available_at") or ""),
+        "progress": {"done": 0, "total": payload.get("total", 0)},
+        "errors": [],
+        "titles": [],
+        "result_files": [],
+        "result_title_language": payload.get("target_language")
+        or payload.get("title_language")
+        or DEFAULT_TARGET_LANGUAGE,
+        "summary": payload.get("summary", ""),
+    }
+    try:
+        return (
+            TASK_REPOSITORY.create(
+                task,
+                max_tasks=max_task_queue,
+                terminal_statuses=TASK_TERMINAL_STATUSES,
+            ),
+            "",
+        )
+    except TaskCapacityError:
+        return (
+            None,
+            f"最多同时保留 {max_task_queue} 个任务，请先清理已完成或失败任务。",
+        )
+
+
+def is_retryable_failed_item(item: dict) -> bool:
+    if not isinstance(item, dict):
+        return False
+    if item.get("status") != "error" or not item.get("prompt"):
+        return False
+    if "retryable" in item:
+        return item.get("retryable") is True
+    error_type = str(item.get("error_type") or "").lower()
+    message = str(item.get("error") or "").lower()
+    return bool(
+        error_type in {"upstream_timeout", "rate_limited"}
+        or "timeout" in message
+        or "timed out" in message
+        or "time-out" in message
+        or "请求超时" in message
+        or "rate limit" in message
+        or "too many requests" in message
+        or "请求过于频繁" in message
+        or re.search(r"\b(?:429|502|503|504)\b", message)
+    )
+
+
+def build_failed_item_retry_payload(task: dict):
+    if not task or task.get("type") != "smart":
+        return None, "仅智能组图任务支持按失败项重试。"
+    wait_seconds = failed_item_retry_wait_seconds(task)
+    if wait_seconds:
+        return None, f"上游仍在冷却，请等待 {wait_seconds} 秒后再重试失败项。"
+    failed_items = [
+        {
+            "type_name": item.get("type_name", "图片"),
+            "index": item.get("index", index + 1),
+            "prompt": item.get("prompt", ""),
         }
-        tasks.append(task)
-        data["tasks"] = tasks
-        save_tasks_data(data)
-        return task, ""
+        for index, item in enumerate(task.get("item_results", []) or [])
+        if is_retryable_failed_item(item)
+    ]
+    if not failed_items:
+        return None, "该任务没有可重试的失败项。"
+    payload = copy.deepcopy(task.get("payload", {}) or {})
+    payload.update(
+        {
+            "retry_items": failed_items,
+            "retry_parent_id": task.get("id", ""),
+            "total": len(failed_items),
+            "enable_title": False,
+            "title_info": "",
+            "summary": f"重试失败项 · {task.get('summary') or '智能组图'}",
+        }
+    )
+    return payload, ""
+
+
+def has_retryable_failed_items(task: dict) -> bool:
+    return bool(
+        task
+        and task.get("type") == "smart"
+        and any(
+            is_retryable_failed_item(item)
+            for item in task.get("item_results", []) or []
+        )
+    )
+
+
+def build_task_center_state(task: dict) -> dict:
+    task = task or {}
+    status = str(task.get("status") or "empty")
+    return {
+        "status": status,
+        "can_cancel": status in {"queued", "running"},
+        "can_retry_failed_items": (
+            status in TASK_TERMINAL_STATUSES
+            and has_retryable_failed_items(task)
+        ),
+    }
+
+
+def retry_failed_task_items(task_id: str):
+    task = TASK_REPOSITORY.get(
+        task_id,
+        scope_owner_id=get_session_owner_id(),
+        include_unowned=True,
+    )
+    payload, error = build_failed_item_retry_payload(task)
+    if not payload:
+        return None, error
+    return create_task("smart", payload)
 
 
 def cancel_task(task_id: str):
-    task = update_task(task_id, status="cancelled")
+    owner_id = get_session_owner_id()
+    current = TASK_REPOSITORY.get(
+        task_id,
+        scope_owner_id=owner_id,
+        include_unowned=True,
+    ) or {}
+    errors = list(current.get("errors") or [])
+    if "用户手动取消任务" not in errors:
+        errors.append("用户手动取消任务")
+    task = update_task(
+        task_id,
+        expected_status={"queued", "running"},
+        scope_owner_id=owner_id,
+        include_unowned=True,
+        status="cancelled",
+        errors=errors,
+    )
     if task:
-        record_task_history(
-            task,
-            {
-                "titles": task.get("titles", []),
-                "errors": ["用户手动取消任务"],
-                "files": task.get("result_files", []),
-                "target_language": task.get(
-                    "result_title_language", DEFAULT_TARGET_LANGUAGE
-                ),
-            },
-        )
-    return bool(task)
-
-
-def is_task_cancelled(task_id: str) -> bool:
-    task = next((t for t in list_tasks() if t.get("id") == task_id), None)
-    return bool(task and task.get("status") == "cancelled")
-
-
-def ensure_task_not_cancelled(task_id: str):
-    if is_task_cancelled(task_id):
-        raise Exception("任务已取消")
-
-
-def normalize_running_tasks():
-    data = get_tasks_data()
-    task_threads = get_task_threads()
-    changed = False
-    for task in data.get("tasks", []):
-        if task.get("status") != "running":
-            continue
-        th = task_threads.get(task.get("id"))
-        if th and th.is_alive():
-            continue
-        task["status"] = "expired"
-        task.setdefault("errors", []).append(
-            "任务在后台中断或页面刷新后未恢复，请重新提交。"
-        )
-        task["updated_at"] = datetime.now().isoformat()
         record_task_history(
             task,
             {
@@ -2656,9 +3057,29 @@ def normalize_running_tasks():
                 ),
             },
         )
-        changed = True
-    if changed:
-        save_tasks_data(data)
+    return bool(task)
+
+
+def repair_unarchived_task_history(limit: int = 3):
+    pending = [
+        task
+        for task in list_tasks()
+        if task.get("status") in TASK_TERMINAL_STATUSES
+        and not task.get("history_archived_at")
+    ]
+    for task in sorted(pending, key=lambda item: item.get("updated_at", ""))[:limit]:
+        record_task_history(
+            task,
+            {
+                "titles": task.get("titles", []),
+                "errors": task.get("errors", []),
+                "files": task.get("result_files", []),
+                "item_results": task.get("item_results", []),
+                "target_language": task.get(
+                    "result_title_language", DEFAULT_TARGET_LANGUAGE
+                ),
+            },
+        )
 
 
 def persist_image_for_task(img: Image.Image, filename: str):
@@ -2798,11 +3219,14 @@ def _demo_image(label: str, subtitle: str = "", aspect: str = "1:1") -> Image.Im
 
 
 def get_compliance():
-    c = load_json(COMPLIANCE_FILE, DEFAULT_COMPLIANCE)
-    for k, v in DEFAULT_COMPLIANCE.items():
-        if k not in c:
-            c[k] = v
-    return c
+    def _build():
+        c = load_json(COMPLIANCE_FILE, DEFAULT_COMPLIANCE)
+        for k, v in DEFAULT_COMPLIANCE.items():
+            if k not in c:
+                c[k] = v
+        return c
+
+    return _cached_config(COMPLIANCE_FILE, _build)
 
 
 def save_compliance(data):
@@ -2810,11 +3234,14 @@ def save_compliance(data):
 
 
 def get_prompts():
-    p = load_json(PROMPTS_FILE, DEFAULT_PROMPTS)
-    for k, v in DEFAULT_PROMPTS.items():
-        if k not in p:
-            p[k] = v
-    return p
+    def _build():
+        p = load_json(PROMPTS_FILE, DEFAULT_PROMPTS)
+        for k, v in DEFAULT_PROMPTS.items():
+            if k not in p:
+                p[k] = v
+        return p
+
+    return _cached_config(PROMPTS_FILE, _build)
 
 
 def save_prompts(data):
@@ -2941,19 +3368,22 @@ def _normalize_title_template_item(template_key: str, item: dict):
 
 
 def get_title_templates():
-    t = load_json(TITLE_TEMPLATES_FILE, DEFAULT_TITLE_TEMPLATES)
-    normalized = {}
-    for template_key in DEFAULT_TITLE_TEMPLATES.keys():
-        normalized[template_key] = _normalize_title_template_item(
-            template_key, (t or {}).get(template_key, {})
-        )
-    for template_key, template_value in (t or {}).items():
-        if template_key in normalized:
-            continue
-        normalized[template_key] = _normalize_title_template_item(
-            template_key, template_value
-        )
-    return normalized
+    def _build():
+        t = load_json(TITLE_TEMPLATES_FILE, DEFAULT_TITLE_TEMPLATES)
+        normalized = {}
+        for template_key in DEFAULT_TITLE_TEMPLATES.keys():
+            normalized[template_key] = _normalize_title_template_item(
+                template_key, (t or {}).get(template_key, {})
+            )
+        for template_key, template_value in (t or {}).items():
+            if template_key in normalized:
+                continue
+            normalized[template_key] = _normalize_title_template_item(
+                template_key, template_value
+            )
+        return normalized
+
+    return _cached_config(TITLE_TEMPLATES_FILE, _build)
 
 
 def save_title_templates(data):
@@ -3011,21 +3441,6 @@ def build_template_selector_options(
     return options, labels
 
 
-def build_title_template_selector_options(
-    input_mode: str = "",
-    include_custom: bool = False,
-):
-    enabled_templates = get_enabled_title_templates()
-    priority_keys = ["image_analysis"] if input_mode == "🖼️ 图片分析" else []
-    template_options, template_names = build_template_selector_options(
-        enabled_templates,
-        include_custom=include_custom,
-        custom_label="✏️ 自定义提示词",
-        priority_keys=priority_keys,
-    )
-    return enabled_templates, template_options, template_names
-
-
 def build_translation_template_selector_options():
     enabled_templates = get_enabled_template_group("translation_types")
     template_options, template_names = build_template_selector_options(
@@ -3056,18 +3471,36 @@ def render_target_language_selector(
     label: str,
     help_text: str,
 ):
-    """语言选择器：跨页面共享 global_image_language / global_title_language，
-    避免同一款语言在 smart/combo/title 三个页面各自为政。"""
+    """语言选择器。
+
+    - 图片语言（key_suffix 含 image）：按页面独立（per-prefix），每次任务单独选择，
+      初始默认取设置里的 default_image_language，不回写全局。
+    - 标题语言：保持跨页面共享 global_title_language 的旧行为。"""
     s = get_settings()
     options = [item["code"] for item in TARGET_LANGUAGES]
     is_image_lang = "image" in key_suffix
-    global_key = "global_image_language" if is_image_lang else "global_title_language"
+    state_key = f"{prefix}_{key_suffix}"
 
-    if global_key not in st.session_state:
-        default_code = s.get(
-            "default_image_language" if is_image_lang else "default_title_language",
-            DEFAULT_TARGET_LANGUAGE,
+    if is_image_lang:
+        # 每个页面独立的图片语言选择，不与其他页面/全局设置联动
+        if state_key in st.session_state:
+            current_code = st.session_state[state_key]
+        else:
+            current_code = s.get("default_image_language", DEFAULT_TARGET_LANGUAGE)
+        if current_code not in options:
+            current_code = DEFAULT_TARGET_LANGUAGE
+        return st.selectbox(
+            label,
+            options=options,
+            index=options.index(current_code),
+            format_func=format_target_language_option,
+            key=state_key,
+            help=help_text,
         )
+
+    global_key = "global_title_language"
+    if global_key not in st.session_state:
+        default_code = s.get("default_title_language", DEFAULT_TARGET_LANGUAGE)
         if default_code not in options:
             default_code = DEFAULT_TARGET_LANGUAGE
         st.session_state[global_key] = default_code
@@ -3082,7 +3515,7 @@ def render_target_language_selector(
         options=options,
         index=default_index,
         format_func=format_target_language_option,
-        key=f"{prefix}_{key_suffix}",
+        key=state_key,
         help=help_text,
     )
     st.session_state[global_key] = selected
@@ -3141,6 +3574,35 @@ def build_title_prompt(
         translation_language_rule=extra_rule,
     )
     return f"{prompt}\n\n{rules}"
+
+
+def build_temu_tri_title_prompt(template_prompt: str, product_info: str) -> str:
+    """TEMU 三语标题提示词：中文/西语/法语三条标题，JSON 输出。
+
+    所选标题模板仅作为产品类目背景参考注入，输出格式以三语规范为准。"""
+    prompts = get_prompts()
+    tri_template = (
+        prompts.get("temu_tri_title_prompt")
+        or DEFAULT_PROMPTS["temu_tri_title_prompt"]
+    )
+    template_context = ""
+    if template_prompt:
+        filled = fill_prompt_template(
+            template_prompt,
+            product_info=product_info,
+            target_language_name="Spanish and French",
+            target_language_native="Español / Français",
+            target_language_label="西语/法语",
+        )
+        template_context = (
+            "【类目模板参考（仅供理解产品与选词，其中关于输出语言/行数/格式的要求一律忽略，"
+            "最终输出必须严格遵循本规范与 JSON 格式）】\n" + filled
+        )
+    return fill_prompt_template(
+        tri_template,
+        product_info=product_info or "No additional info provided",
+        template_context=template_context,
+    )
 
 
 def get_image_language_instruction(target_language: str) -> str:
@@ -3453,6 +3915,163 @@ def _validate_title_output(lines: list, target_language: str) -> tuple:
     return _validate_bilingual_titles(lines)
 
 
+# ==================== TEMU 三语标题（中/西/法）====================
+TRI_TITLE_LANGS = ("zh", "es", "fr")
+TRI_TITLE_LABELS = {"zh": "中文", "es": "Español", "fr": "Français"}
+TRI_TITLE_FLAGS = {"zh": "🇨🇳", "es": "🇪🇸", "fr": "🇫🇷"}
+TRI_TITLE_MIN_CHARS = 150
+TRI_TITLE_MAX_CHARS = 200
+# 各语言标题建议字符区间：中文自然长度远短于西/法语，单独设区间
+TITLE_CHAR_RANGES = {"zh": (40, 80), "es": (150, 200), "fr": (150, 200)}
+
+
+def get_title_char_range(lang: str) -> tuple:
+    return TITLE_CHAR_RANGES.get(lang, (TRI_TITLE_MIN_CHARS, TRI_TITLE_MAX_CHARS))
+
+
+def parse_tri_language_titles(text: str) -> dict:
+    """解析三语标题 JSON 输出，返回 {"entries": [...], "issues": [...]}。
+
+    - 容忍 markdown 代码块包裹与 JSON 前后杂质
+    - 字符数以 Python len() 为准，不信任模型自报数值
+    """
+    result = {"entries": [], "issues": []}
+    if not text:
+        return result
+    cleaned = _strip_code_fence(text).strip()
+    data = None
+    for candidate in (cleaned,):
+        try:
+            data = json.loads(candidate)
+            break
+        except Exception:
+            pass
+    if data is None:
+        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group(0))
+            except Exception:
+                data = None
+    if not isinstance(data, dict):
+        return result
+    for item in data.get("titles", []) or []:
+        if not isinstance(item, dict):
+            continue
+        lang = str(item.get("lang", "")).strip().lower()
+        title = str(item.get("title", "") or "").strip()
+        if lang not in TRI_TITLE_LANGS or not title:
+            continue
+        entry = {
+            "lang": lang,
+            "title": title,
+            "chars": len(title),
+        }
+        back = str(item.get("back_translation_zh", "") or "").strip()
+        if lang in ("es", "fr"):
+            entry["back_translation_zh"] = back
+        result["entries"].append(entry)
+    for issue in data.get("issues", []) or []:
+        issue_text = str(issue or "").strip()
+        if issue_text:
+            result["issues"].append(issue_text)
+    return result
+
+
+def _validate_tri_title_output(parsed: dict) -> tuple:
+    """校验三语标题结果。允许例外规则：缺某语言时须在 issues 里有说明。"""
+    entries = parsed.get("entries", []) if parsed else []
+    issues = parsed.get("issues", []) if parsed else []
+    details = {
+        "langs": [e.get("lang") for e in entries],
+        "issue_count": len(issues),
+    }
+    if not entries and not issues:
+        return False, "未解析到任何标题（JSON 格式不符合要求）", details
+    seen = set()
+    for entry in entries:
+        lang = entry.get("lang")
+        if lang in seen:
+            return False, f"语言 {lang} 出现重复标题", details
+        seen.add(lang)
+        if lang in ("es", "fr") and not entry.get("back_translation_zh"):
+            return False, f"{TRI_TITLE_LABELS.get(lang, lang)} 标题缺少中文回译", details
+    missing = [l for l in TRI_TITLE_LANGS if l not in seen]
+    if missing and not issues:
+        missing_labels = "、".join(TRI_TITLE_LABELS[l] for l in missing)
+        return False, f"缺少 {missing_labels} 标题且无 issues 说明", details
+    return True, "", details
+
+
+def normalize_title_entries(titles: list) -> list:
+    """把任务/历史里存储的标题统一为 dict 条目列表；兼容旧版纯字符串。"""
+    entries = []
+    for item in titles or []:
+        if isinstance(item, dict):
+            title = str(item.get("title", "") or "").strip()
+            if not title:
+                continue
+            entry = dict(item)
+            entry["title"] = title
+            entry["chars"] = len(title)
+            entries.append(entry)
+        elif isinstance(item, str) and item.strip():
+            entries.append({"lang": "", "title": item.strip(), "chars": len(item.strip())})
+    return entries
+
+
+def format_titles_text(titles: list, issues: list = None) -> str:
+    """标题内容的纯文本布局（用于复制区、titles.txt、历史展示）。"""
+    entries = normalize_title_entries(titles)
+    lines = []
+    idx = 0
+    issue_lines = [f"⚠️ {issue}" for issue in issues or []]
+    for entry in entries:
+        lang = entry.get("lang", "")
+        if lang == "issue":
+            issue_lines.append(f"⚠️ {entry['title']}")
+            continue
+        idx += 1
+        label = TRI_TITLE_LABELS.get(lang, lang or "标题")
+        lines.append(f"{idx}. {label} — {entry['title']} | {entry['chars']}字符")
+        back = entry.get("back_translation_zh", "")
+        if back:
+            lines.append(f"   中文回译: {back}")
+    lines.extend(issue_lines)
+    return "\n".join(lines)
+
+
+def merge_titles_and_issues(title_result: dict) -> list:
+    """把标题条目与 issues 合并成一个可持久化的列表（issues 作为特殊条目）。"""
+    merged = list(title_result.get("titles", []) or [])
+    for issue in title_result.get("issues", []) or []:
+        merged.append({"lang": "issue", "title": str(issue)})
+    return merged
+
+
+def _demo_tri_title_entries(product_info: str) -> dict:
+    base = re.sub(r"\s+", " ", (product_info or "演示商品").strip())[:40] or "演示商品"
+    filler_zh = "多功能家用收纳系列 大容量分层设计 加厚耐用材质 卧室客厅浴室通用 简约现代风格 日常整理好帮手 适合家庭办公室出租屋多场景使用 灰白色"
+    filler_es = "Organizador multifuncional para el hogar, gran capacidad con diseño de niveles, material grueso y duradero, ideal para dormitorio salón y baño, estilo moderno sencillo, color gris y blanco para uso diario"
+    filler_fr = "Organisateur multifonction pour la maison, grande capacité avec design à niveaux, matériau épais et durable, idéal pour chambre salon et salle de bain, style moderne simple, coloris gris et blanc"
+    entries = [
+        {"lang": "zh", "title": f"{base} {filler_zh}"},
+        {
+            "lang": "es",
+            "title": filler_es,
+            "back_translation_zh": "多功能家用收纳架，大容量分层设计，加厚耐用材质，适合卧室客厅浴室，现代简约风格，灰白色，日常使用。",
+        },
+        {
+            "lang": "fr",
+            "title": filler_fr,
+            "back_translation_zh": "多功能家用收纳架，大容量分层设计，加厚耐用材质，适合卧室客厅浴室，现代简约风格，灰白色。",
+        },
+    ]
+    for entry in entries:
+        entry["chars"] = len(entry["title"])
+    return {"entries": entries, "issues": []}
+
+
 def _build_title_result(
     success: bool,
     titles: list = None,
@@ -3463,10 +4082,12 @@ def _build_title_result(
     attempt_count: int = 1,
     input_mode: str = "text",
     details: dict = None,
+    issues: list = None,
 ):
     return {
         "success": success,
         "titles": titles or [],
+        "issues": issues or [],
         "raw_text": raw_text or "",
         "error_type": error_type or "",
         "error_message": error_message or "",
@@ -3533,7 +4154,49 @@ def format_title_error(result: dict) -> str:
     return f"{base}：上游请求失败，请稍后重试。"
 
 
-def sanitize_task_error(message: str, fallback: str = "任务执行失败") -> str:
+def _redact_sensitive_error_text(message: str, secrets=()) -> str:
+    redacted = _html_mod.unescape(str(message or ""))
+    redacted = re.sub(r"<[^>]*>", " ", redacted)
+
+    def redact_url(match):
+        try:
+            parsed = urllib.parse.urlsplit(match.group(0))
+            hostname = parsed.hostname
+            parsed.port
+        except ValueError:
+            return "[REDACTED_URL]"
+        if parsed.scheme.lower() not in {"http", "https"} or not hostname:
+            return "[REDACTED_URL]"
+        netloc = parsed.netloc.rsplit("@", 1)[-1]
+        return urllib.parse.urlunsplit(
+            (parsed.scheme, netloc, parsed.path, "", "")
+        )
+
+    redacted = re.sub(r"https?://[^\s<>\"']+", redact_url, redacted)
+    redacted = re.sub(
+        r"(?i)\b(?:authorization\s*:\s*)?bearer\s+[^\s<>\"']+",
+        "[REDACTED]",
+        redacted,
+    )
+    redacted = re.sub(
+        r"(?i)\bsk-[A-Za-z0-9_-]{8,}", "[REDACTED]", redacted
+    )
+    redacted = re.sub(
+        r"(?i)(api[-_ ]?key\s*[:=]\s*)[^\s,;]+",
+        r"\1[REDACTED]",
+        redacted,
+    )
+    for secret in secrets or ():
+        if secret:
+            redacted = redacted.replace(str(secret), "[REDACTED]")
+    return re.sub(r"\s+", " ", redacted).strip()
+
+
+def sanitize_task_error(
+    message: str,
+    fallback: str = "任务执行失败",
+    secrets=(),
+) -> str:
     msg = str(message or "").strip()
     if not msg:
         return fallback
@@ -3552,7 +4215,14 @@ def sanitize_task_error(message: str, fallback: str = "任务执行失败") -> s
         return "Google API 当前账号或地区不支持该调用。"
     if "resource has been exhausted" in low or "proxy_config_error" in low:
         return "中转站上游配额已用尽，请稍后重试或切换其他模型/提供商。"
-    if "timeout" in low or "timed out" in low:
+    if (
+        "timeout" in low
+        or "timed out" in low
+        or "time-out" in low
+        or "gateway timeout" in low
+        or "gateway time-out" in low
+        or re.search(r"\b50[234]\b", low)
+    ):
         return "请求超时，请检查网络、代理或模型响应速度。"
     if "api key" in low or "unauthorized" in low:
         return "API Key 无效或未配置。"
@@ -3568,9 +4238,88 @@ def sanitize_task_error(message: str, fallback: str = "任务执行失败") -> s
         or "unreachable" in low
     ):
         return "提供商连接失败，请检查 Base URL、代理或网络。"
-    msg = re.sub(r"(https?://)([^:/@\s]+):([^/@\s]+)@", r"\1***:***@", msg)
-    msg = re.sub(r"\s+", " ", msg)
-    return msg[:180] or fallback
+    return _redact_sensitive_error_text(msg, secrets)[:180] or fallback
+
+
+def format_task_error_summary(errors, limit: int = 3) -> str:
+    return "; ".join(
+        sanitize_task_error(error)
+        for error in list(errors or [])[: max(0, int(limit))]
+    )
+
+
+def classify_image_task_error(message: str, now: datetime = None) -> dict:
+    raw = str(message or "")
+    low = raw.lower()
+    current = now or datetime.now()
+    is_upstream_timeout = bool(
+        "timeout" in low
+        or "timed out" in low
+        or "time-out" in low
+        or "gateway timeout" in low
+        or "gateway time-out" in low
+        or "请求超时" in raw
+        or re.search(r"\b50[234]\b", low)
+    )
+    if is_upstream_timeout:
+        retry_after = current + timedelta(seconds=IMAGE_RETRY_COOLDOWN_SECONDS)
+        return {
+            "error": "上游图片生成超时或网关异常（502/503/504），成功图片已保留。请稍后仅重试失败项。",
+            "error_type": "upstream_timeout",
+            "retryable": True,
+            "retry_after_at": retry_after.isoformat(),
+        }
+    if "too many requests" in low or "rate limit" in low or "429" in low:
+        retry_after = current + timedelta(seconds=IMAGE_RETRY_COOLDOWN_SECONDS)
+        return {
+            "error": "上游请求过于频繁，成功图片已保留。请稍后仅重试失败项。",
+            "error_type": "rate_limited",
+            "retryable": True,
+            "retry_after_at": retry_after.isoformat(),
+        }
+    return {
+        "error": sanitize_task_error(raw),
+        "error_type": "upstream_error",
+        "retryable": False,
+        "retry_after_at": "",
+    }
+
+
+def classify_provider_image_task_error(message: str, provider: dict) -> dict:
+    result = classify_image_task_error(message)
+    result["error"] = sanitize_task_error(
+        result.get("error", ""),
+        secrets=(str((provider or {}).get("api_key") or ""),),
+    )
+    return result
+
+
+def failed_item_retry_wait_seconds(task: dict, now: datetime = None) -> int:
+    current = now or datetime.now()
+    waits = []
+    for item in task.get("item_results", []) or []:
+        if not is_retryable_failed_item(item):
+            continue
+        retry_after_at = item.get("retry_after_at", "")
+        legacy_transient = "retryable" not in item
+        if not retry_after_at and legacy_transient:
+            task_failed_at = task.get("ended_at") or task.get("updated_at") or ""
+            try:
+                retry_after_at = (
+                    datetime.fromisoformat(task_failed_at)
+                    + timedelta(seconds=IMAGE_RETRY_COOLDOWN_SECONDS)
+                ).isoformat()
+            except (TypeError, ValueError):
+                retry_after_at = ""
+        if not retry_after_at:
+            continue
+        try:
+            remaining = (datetime.fromisoformat(retry_after_at) - current).total_seconds()
+        except (TypeError, ValueError):
+            continue
+        if remaining > 0:
+            waits.append(int(remaining + 0.999))
+    return max(waits, default=0)
 
 
 # ==================== AI客户端 (V15.2修复版) ====================
@@ -3607,6 +4356,9 @@ class GeminiClient:
         self.total_tokens = 0
         self.last_error = None
 
+    def _sanitize_client_error(self, message: str) -> str:
+        return sanitize_task_error(message, secrets=(self.api_key,))
+
     def _load_prompts_safe(self):
         prompts = get_prompts()
         for key, default_value in DEFAULT_PROMPTS.items():
@@ -3624,8 +4376,9 @@ class GeminiClient:
             try:
                 return _run_with_timeout(func, timeout_seconds)
             except Exception as e:
-                self.last_error = str(e)
-                err = str(e).lower()
+                raw_error = str(e)
+                self.last_error = self._sanitize_client_error(raw_error)
+                err = raw_error.lower()
                 if "quota" in err:
                     raise Exception("⚠️ API配额已用尽")
                 if "timeout" in err or "timed out" in err:
@@ -3643,8 +4396,8 @@ class GeminiClient:
                 if i < retries - 1:
                     time.sleep(1)
                     continue
-                raise e
-        raise Exception(f"⚠️ 请求失败: {self.last_error}")
+                raise Exception(self.last_error)
+        raise Exception(self._sanitize_client_error(self.last_error or "请求失败"))
 
     def _prep_images(self, images, max_count=3):
         parts = []
@@ -3696,20 +4449,25 @@ class GeminiClient:
             if self.model == "gemini-3-pro-image-preview":
                 generation_config["thinkingConfig"] = {"thinkingLevel": thinking_level}
         payload["generationConfig"] = generation_config
-        endpoint = f"{self.base_url.rstrip('/')}/v1beta/models/{model}:generateContent?key={self.api_key}"
+        endpoint = f"{self.base_url.rstrip('/')}/v1beta/models/{model}:generateContent"
         req = urllib.request.Request(
             endpoint,
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": self.api_key,
+            },
         )
         try:
             with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
                 return json.loads(resp.read().decode("utf-8", "ignore"))
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", "ignore")
-            raise Exception(sanitize_task_error(body or str(e)))
+            self.last_error = self._sanitize_client_error(body or str(e))
+            raise Exception(self.last_error)
         except Exception as e:
-            raise Exception(sanitize_task_error(str(e)))
+            self.last_error = self._sanitize_client_error(str(e))
+            raise Exception(self.last_error)
 
     def _count_manual_tokens(self, response_data: dict):
         try:
@@ -3811,7 +4569,7 @@ class GeminiClient:
         return self.total_tokens
 
     def get_last_error(self):
-        return sanitize_task_error(self.last_error)
+        return self._sanitize_client_error(self.last_error)
 
     def _text_request(
         self, prompt_text, timeout_seconds=GEMINI_TEXT_REQUEST_TIMEOUT_SECONDS
@@ -4137,15 +4895,17 @@ Return valid JSON only."""
             raise e
 
     def generate_titles(self, product_info, template_prompt, target_language="zh"):
+        # target_language 参数保留以兼容旧调用，三语标题固定输出 中文/西语/法语
         if is_demo_api_key(self.api_key):
-            titles = _demo_title_lines(product_info, target_language)
+            demo = _demo_tri_title_entries(product_info)
             return _build_title_result(
                 True,
-                titles=titles,
-                raw_text="\n".join(titles),
+                titles=demo["entries"],
+                raw_text=format_titles_text(demo["entries"]),
                 attempt_count=1,
                 input_mode="text",
-                details={"target_language": target_language, "demo": True},
+                details={"demo": True},
+                issues=demo["issues"],
             )
 
         if not self.api_key:
@@ -4158,39 +4918,38 @@ Return valid JSON only."""
                 input_mode="text",
             )
 
-        language_info = get_target_language(target_language)
-        prompt = build_title_prompt(template_prompt, product_info, target_language)
+        prompt = build_temu_tri_title_prompt(template_prompt, product_info)
         last_raw = ""
-        last_lines = []
+        last_parsed = {"entries": [], "issues": []}
         for attempt in range(1, 3):
             try:
                 prompt_text = prompt
                 if attempt == 2:
                     prompt_text = (
-                        f"{prompt}\n\nSTRICT OUTPUT: Return exactly 6 lines, "
-                        f"English then {language_info['english_name']} for each title, no extra lines."
+                        f"{prompt}\n\nSTRICT OUTPUT: 只输出规范中的 JSON 对象本身，"
+                        "不要 markdown 代码块，不要任何解释文字。"
                     )
                 text = self._text_request(prompt_text)
-                lines = _parse_title_lines(text)
-                valid, reason, details = _validate_title_output(lines, target_language)
-                details["target_language"] = target_language
+                parsed = parse_tri_language_titles(text)
+                valid, reason, details = _validate_tri_title_output(parsed)
                 if valid:
                     return _build_title_result(
                         True,
-                        titles=lines[:6],
+                        titles=parsed["entries"],
                         raw_text=text,
                         attempt_count=attempt,
                         input_mode="text",
                         details=details,
+                        issues=parsed["issues"],
                     )
 
                 last_raw = text
-                last_lines = lines
+                last_parsed = parsed
                 if attempt == 1:
                     continue
                 return _build_title_result(
                     False,
-                    titles=lines[:6],
+                    titles=parsed["entries"],
                     raw_text=text,
                     error_type="retry_exhausted",
                     error_message=reason or "输出格式不符合要求",
@@ -4198,6 +4957,7 @@ Return valid JSON only."""
                     attempt_count=attempt,
                     input_mode="text",
                     details=details,
+                    issues=parsed["issues"],
                 )
             except Exception as e:
                 self.last_error = str(e)
@@ -4206,7 +4966,7 @@ Return valid JSON only."""
                     error_type = "provider_error"
                 return _build_title_result(
                     False,
-                    titles=last_lines[:6],
+                    titles=last_parsed["entries"],
                     raw_text=last_raw,
                     error_type=error_type,
                     error_message=str(e),
@@ -4217,14 +4977,13 @@ Return valid JSON only."""
 
         return _build_title_result(
             False,
-            titles=last_lines[:6],
+            titles=last_parsed["entries"],
             raw_text=last_raw,
             error_type="invalid_format",
             error_message="输出格式不符合要求",
             retryable=False,
             attempt_count=2,
             input_mode="text",
-            details={"line_count": len(last_lines)},
         )
 
     def generate_titles_from_image(
@@ -4234,16 +4993,17 @@ Return valid JSON only."""
         template_prompt=None,
         target_language="zh",
     ):
-        """从图片分析生成商品标题"""
+        """从图片分析生成商品标题（三语：中文/西语/法语）"""
         if is_demo_api_key(self.api_key):
-            titles = _demo_title_lines(product_info or "Image based product", target_language)
+            demo = _demo_tri_title_entries(product_info or "Image based product")
             return _build_title_result(
                 True,
-                titles=titles,
-                raw_text="\n".join(titles),
+                titles=demo["entries"],
+                raw_text=format_titles_text(demo["entries"]),
                 attempt_count=1,
                 input_mode="image",
-                details={"target_language": target_language, "demo": True},
+                details={"demo": True},
+                issues=demo["issues"],
             )
 
         if not self.api_key:
@@ -4266,48 +5026,44 @@ Return valid JSON only."""
             )
 
         if template_prompt is None:
-            template_prompt = DEFAULT_TITLE_TEMPLATES.get("image_analysis", {}).get(
-                "prompt", ""
-            )
+            template_prompt = ""
 
-        language_info = get_target_language(target_language)
-        prompt = build_title_prompt(
+        prompt = build_temu_tri_title_prompt(
             template_prompt,
             product_info or "No additional info provided",
-            target_language,
         )
 
         last_raw = ""
-        last_lines = []
+        last_parsed = {"entries": [], "issues": []}
         for attempt in range(1, 3):
             try:
                 prompt_text = prompt
                 if attempt == 2:
                     prompt_text = (
-                        f"{prompt}\n\nSTRICT OUTPUT: Return exactly 6 lines, "
-                        f"English then {language_info['english_name']} for each title, no extra lines."
+                        f"{prompt}\n\nSTRICT OUTPUT: 只输出规范中的 JSON 对象本身，"
+                        "不要 markdown 代码块，不要任何解释文字。"
                     )
                 text = self._vision_request(images, prompt_text, 5)
-                lines = _parse_title_lines(text)
-                valid, reason, details = _validate_title_output(lines, target_language)
-                details["target_language"] = target_language
+                parsed = parse_tri_language_titles(text)
+                valid, reason, details = _validate_tri_title_output(parsed)
                 if valid:
                     return _build_title_result(
                         True,
-                        titles=lines[:6],
+                        titles=parsed["entries"],
                         raw_text=text,
                         attempt_count=attempt,
                         input_mode="image",
                         details=details,
+                        issues=parsed["issues"],
                     )
 
                 last_raw = text
-                last_lines = lines
+                last_parsed = parsed
                 if attempt == 1:
                     continue
                 return _build_title_result(
                     False,
-                    titles=lines[:6],
+                    titles=parsed["entries"],
                     raw_text=text,
                     error_type="retry_exhausted",
                     error_message=reason or "输出格式不符合要求",
@@ -4315,6 +5071,7 @@ Return valid JSON only."""
                     attempt_count=attempt,
                     input_mode="image",
                     details=details,
+                    issues=parsed["issues"],
                 )
             except Exception as e:
                 self.last_error = str(e)
@@ -4323,7 +5080,7 @@ Return valid JSON only."""
                     error_type = "provider_error"
                 return _build_title_result(
                     False,
-                    titles=last_lines[:6],
+                    titles=last_parsed["entries"],
                     raw_text=last_raw,
                     error_type=error_type,
                     error_message=str(e),
@@ -4334,14 +5091,13 @@ Return valid JSON only."""
 
         return _build_title_result(
             False,
-            titles=last_lines[:6],
+            titles=last_parsed["entries"],
             raw_text=last_raw,
             error_type="invalid_format",
             error_message="输出格式不符合要求",
             retryable=False,
             attempt_count=2,
             input_mode="image",
-            details={"line_count": len(last_lines)},
         )
 
 
@@ -4418,7 +5174,9 @@ class OpenAIClient(GeminiClient):
                     e.read().decode("utf-8", "ignore")
                 )
                 low = (detail or "").lower()
-                self.last_error = detail or f"HTTP {e.code}"
+                self.last_error = self._sanitize_client_error(
+                    detail or f"HTTP {e.code}"
+                )
                 if e.code in (401, 403):
                     raise Exception("API Key 无效或没有访问权限")
                 if e.code == 402 or (
@@ -4430,15 +5188,15 @@ class OpenAIClient(GeminiClient):
                     or "content policy" in low
                     or "moderation" in low
                 ):
-                    raise Exception(f"内容触发上游安全策略：{detail[:120]}")
+                    raise Exception(self.last_error)
                 if (e.code == 429 or e.code >= 500) and attempt < retries - 1:
                     time.sleep(delay)
                     delay = min(delay * 2, 30)
                     continue
-                raise Exception(sanitize_task_error(detail or f"HTTP {e.code}"))
+                raise Exception(self.last_error)
             except Exception as e:
                 err_text = str(e)
-                self.last_error = err_text
+                self.last_error = self._sanitize_client_error(err_text)
                 low = err_text.lower()
                 retryable = (
                     "timed out" in low
@@ -4453,8 +5211,8 @@ class OpenAIClient(GeminiClient):
                     continue
                 if "timed out" in low or "timeout" in low:
                     raise Exception(f"请求超时（{timeout_seconds}s），请稍后重试")
-                raise
-        raise Exception(sanitize_task_error(self.last_error or "请求失败"))
+                raise Exception(self.last_error)
+        raise Exception(self._sanitize_client_error(self.last_error or "请求失败"))
 
     # ---- 文本 / 视觉 ----
     def _chat(
@@ -4586,6 +5344,7 @@ class OpenAIClient(GeminiClient):
                 f"multipart/form-data; boundary={boundary}",
             ),
             timeout_seconds=GEMINI_IMAGE_REQUEST_TIMEOUT_SECONDS,
+            retries=1,
         )
 
     def _extract_openai_image(self, data):
@@ -4650,6 +5409,7 @@ class OpenAIClient(GeminiClient):
                         "n": 1,
                     },
                     timeout_seconds=GEMINI_IMAGE_REQUEST_TIMEOUT_SECONDS,
+                    retries=1,
                 )
             usage = (data or {}).get("usage") or {}
             try:
@@ -4721,27 +5481,19 @@ def create_zip_from_results(
         for item in results:
             filename = item.get("filename", "image.png")
             img = item.get("image")
-            if img:
+            if isinstance(img, str):
+                # 支持磁盘路径形式的结果，避免在内存中长期持有 PIL 对象
+                try:
+                    z.writestr(filename, Path(img).read_bytes())
+                except Exception:
+                    pass
+            elif img:
                 img_buf = io.BytesIO()
                 img.save(img_buf, format="PNG")
                 z.writestr(filename, img_buf.getvalue())
 
         if titles:
-            if target_language == "en":
-                titles_content = "\n\n".join(
-                    [f"Title {i + 1}:\nEN: {t}" for i, t in enumerate(titles)]
-                )
-            else:
-                titles_content = "\n\n".join(
-                    [
-                        f"标题 {i // 2 + 1}:\nEN: {titles[i]}\n{language_info['copy_tag']}: {titles[i + 1]}"
-                        for i in range(0, len(titles) - 1, 2)
-                    ]
-                )
-            if not titles_content and titles:
-                titles_content = "\n".join(
-                    [f"Title {i + 1}: {t}" for i, t in enumerate(titles)]
-                )
+            titles_content = format_titles_text(titles)
             z.writestr("titles.txt", titles_content)
 
     return buf.getvalue()
@@ -4751,11 +5503,11 @@ def create_zip_from_results(
 def apply_style():
     st.markdown(
         """<style>
-    :root { --primary: #6366f1; --success: #10b981; --warning: #f59e0b; --danger: #ef4444; }
-    .main-title { font-size: 2.5rem; font-weight: 800; text-align: center; margin: 1rem 0; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    :root { color-scheme: light; --primary: #1B2A4A; --accent: #FF7A45; --slate: #64748B; --success: #10b981; --warning: #f59e0b; --danger: #ef4444; }
+    .main-title { font-size: 2.5rem; font-weight: 800; text-align: center; margin: 1rem 0; color: #1B2A4A; }
     .page-title { font-size: 1.75rem; font-weight: 700; margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 3px solid var(--primary); }
     .stButton>button { border-radius: 10px; font-weight: 600; transition: all 0.2s; }
-    .stButton>button:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3); }
+    .stButton>button:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(27, 42, 74, 0.25); }
     section[data-testid="stSidebar"] .stButton>button { padding: 0.38rem 0.65rem; min-height: 0; margin-bottom: 0.18rem; }
     section[data-testid="stSidebar"] h4 { margin-top: 0.15rem; margin-bottom: 0.45rem; font-size: 0.92rem; }
     section[data-testid="stSidebar"] .element-container { margin-bottom: 0.15rem; }
@@ -4773,16 +5525,17 @@ def apply_style():
     .feature-desc { font-size: 12px; color: #64748b; }
     .token-badge { background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); border: 1px solid #f59e0b; border-radius: 8px; padding: 0.25rem 0.75rem; font-size: 12px; font-weight: 500; color: #92400e; display: inline-block; }
     .footer { margin-top: 2.5rem; padding: 1.1rem 0 0.35rem 0; border-top: 1px solid #e2e8f0; text-align: right; color: #64748b; font-size: 11px; }
-    #MainMenu, footer, header { visibility: hidden; }
+    #MainMenu, footer { visibility: hidden; }
+    header { visibility: visible; background: transparent; }
     .title-box { background: linear-gradient(135deg, #eff6ff 0%, #f5f3ff 100%); border: 1px solid #c7d2fe; border-radius: 12px; padding: 1rem; margin: 0.75rem 0; }
     .image-card { border: 1px solid #e2e8f0; border-radius: 12px; padding: 0.5rem; margin: 0.5rem 0; background: white; }
-    .image-label { font-size: 12px; font-weight: 600; color: #6366f1; text-align: center; margin-top: 0.25rem; }
+    .image-label { font-size: 12px; font-weight: 600; color: #1B2A4A; text-align: center; margin-top: 0.25rem; }
     .template-preview-shell { border: 1px solid #dbe4f0; border-radius: 16px; background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%); padding: 1rem; margin: 0.5rem 0 1rem 0; }
-    .template-preview-title { font-size: 13px; font-weight: 700; color: #1e3a8a; margin-bottom: 0.4rem; }
+    .template-preview-title { font-size: 13px; font-weight: 700; color: #1B2A4A; margin-bottom: 0.4rem; }
     .template-preview-subtitle { font-size: 12px; color: #64748b; margin-bottom: 0.75rem; }
     .template-preview-card { border: 1px solid #dbe4f0; border-radius: 14px; background: white; padding: 0.9rem; min-height: 128px; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05); }
     .template-preview-card.disabled { opacity: 0.55; border-style: dashed; }
-    .template-preview-badge { display: inline-block; border-radius: 999px; background: #eff6ff; color: #1d4ed8; padding: 0.16rem 0.55rem; font-size: 11px; font-weight: 600; margin-right: 0.35rem; }
+    .template-preview-badge { display: inline-block; border-radius: 999px; background: #f1f5f9; color: #1B2A4A; padding: 0.16rem 0.55rem; font-size: 11px; font-weight: 600; margin-right: 0.35rem; }
     .template-preview-badge.off { background: #f3f4f6; color: #6b7280; }
     .template-preview-name { font-size: 16px; font-weight: 700; color: #0f172a; margin: 0.55rem 0 0.3rem 0; }
     .template-preview-desc { font-size: 13px; color: #334155; line-height: 1.5; }
@@ -4797,6 +5550,10 @@ def apply_style():
     .settings-panel [data-testid="stVerticalBlock"] { gap: 0.5rem; }
     .settings-hint-ok { color: var(--success); font-size: 12px; }
     .settings-hint-warn { color: var(--warning); font-size: 12px; }
+    .provider-active-card { background: #eff6ff; border: 1px solid #93c5fd; border-left: 5px solid #1B2A4A; border-radius: 10px; padding: 1rem 1.15rem; margin: 0.5rem 0 1rem; }
+    .provider-active-label { font-size: 11px; color: #1d4ed8; font-weight: 700; }
+    .provider-active-name { font-size: 18px; color: #0f172a; font-weight: 700; margin: 0.12rem 0; }
+    .provider-active-meta { font-size: 12px; color: #475569; }
     </style>""",
         unsafe_allow_html=True,
     )
@@ -4809,7 +5566,7 @@ def show_footer():
     st.markdown(
         f"""
     <div class="footer">
-        <p><strong>{APP_NAME}</strong></p>
+        <p><strong>{BRAND_TITLE}</strong></p>
         <p>核心作者: {APP_AUTHOR} · 商业订阅: {APP_COMMERCIAL}</p>
         <p style="margin-top:0.45rem;font-size:10px;color:#94a3b8">© {datetime.now().year} All Rights Reserved.</p>
     </div>
@@ -4863,6 +5620,8 @@ def init_session():
         "smart_image_language": s.get(
             "default_image_language", DEFAULT_TARGET_LANGUAGE
         ),
+        "text_to_image_results": [],
+        "text_to_image_error": "",
         "session_tokens": 0,
     }
     for k, v in defaults.items():
@@ -4901,74 +5660,394 @@ def render_demo_admin_panel():
         return
     st.markdown("#### 本地演示")
     st.caption("管理员 Demo 已开放，测试密钥不会访问外部 API。")
-    if st.button("一键输入测试密钥", key="demo_seed_provider", use_container_width=True):
+    if st.button("一键输入测试密钥", key="demo_seed_provider", width="stretch"):
         ensure_demo_provider(load_json(PROVIDERS_FILE, DEFAULT_PROVIDERS_DATA), set_current=True)
         st.session_state["demo_notice"] = "已启用本地演示管理员提供商。"
         st.rerun()
-    if st.button("进入管理员入口", key="demo_open_admin", use_container_width=True):
+    if st.button("进入管理员入口", key="demo_open_admin", width="stretch"):
         set_nav_page("⚙️ 提供商设置")
         st.rerun()
     if notice := st.session_state.pop("demo_notice", ""):
         st.success(notice)
 
 
+MODEL_CUSTOM_OPTION = "自定义…"
+MODEL_UNSET_OPTION = "（留空，使用默认）"
+
+
+def render_model_select_with_custom(
+    label: str,
+    catalog: list,
+    current_value: str,
+    key: str,
+    allow_unset: bool = True,
+    format_map: dict = None,
+) -> str:
+    """模型名下拉选择 + 自定义输入。
+
+    catalog 内的已知模型用 selectbox 选择；选「自定义…」时展示文本框，
+    允许中转提供商使用目录之外的模型名。返回最终模型名字符串（可为空）。
+    """
+    options = ([MODEL_UNSET_OPTION] if allow_unset else []) + list(catalog) + [
+        MODEL_CUSTOM_OPTION
+    ]
+    cur = str(current_value or "").strip()
+    if not cur and allow_unset:
+        idx = 0
+    elif cur in catalog:
+        idx = options.index(cur)
+    else:
+        idx = len(options) - 1
+    format_map = format_map or {}
+
+    def _format_choice(value):
+        if value in (MODEL_UNSET_OPTION, MODEL_CUSTOM_OPTION):
+            return value
+        return format_map.get(value, value)
+
+    choice = st.selectbox(
+        label,
+        options,
+        index=idx,
+        key=f"{key}_sel",
+        format_func=_format_choice,
+    )
+    if choice == MODEL_CUSTOM_OPTION:
+        prefill = cur if cur and cur not in catalog else ""
+        return st.text_input(
+            f"{label} - 自定义模型名",
+            value=prefill,
+            key=f"{key}_custom",
+            placeholder="例如 gpt-image-2",
+        ).strip()
+    if choice == MODEL_UNSET_OPTION:
+        return ""
+    return choice
+
+
+MODEL_ROLE_KEYS = ("title", "vision", "image")
+MODEL_ROLE_LABELS = {
+    "title": "标题模型",
+    "vision": "视觉模型",
+    "image": "出图模型",
+}
+MODEL_IMAGE_TOKENS = (
+    "image",
+    "imagen",
+    "dall-e",
+    "flux",
+    "banana",
+    "stable-diffusion",
+    "sdxl",
+)
+MODEL_VISION_TOKENS = (
+    "vision",
+    "-vl",
+    "vl-",
+    "4o",
+    "4.1",
+    "5.4",
+    "gemini",
+    "claude",
+    "grok",
+)
+
+
+def _model_roles_for_entry(model_id: str, supported_methods=None) -> list:
+    """Infer usable roles from upstream metadata, then use conservative name hints."""
+    lowered = (model_id or "").lower()
+    methods = {str(item).lower() for item in (supported_methods or [])}
+    roles = set()
+    if any("image" in method or "imagen" in method for method in methods):
+        roles.add("image")
+    if any(method in methods for method in ("generatecontent", "chatcompletion", "chat")):
+        roles.update(("title", "vision"))
+    is_image_model = any(token in lowered for token in MODEL_IMAGE_TOKENS)
+    if is_image_model:
+        roles.add("image")
+    if any(token in lowered for token in MODEL_VISION_TOKENS):
+        roles.add("vision")
+    if is_image_model:
+        roles.discard("title")
+        roles.discard("vision")
+    elif "vision" in roles:
+        # Multimodal/text models can serve title generation as well as image understanding.
+        roles.add("title")
+    if not roles:
+        roles.update(("title", "vision"))
+    return [role for role in MODEL_ROLE_KEYS if role in roles]
+
+
+def _normalize_model_catalog(entries: list) -> list:
+    """Normalize Gemini/OpenAI-compatible model responses for JSON persistence."""
+    normalized = []
+    seen = set()
+    for entry in entries or []:
+        if isinstance(entry, str):
+            raw_id, raw_name, methods = entry, entry, []
+        elif isinstance(entry, dict):
+            raw_id = entry.get("id") or entry.get("name") or entry.get("model")
+            raw_name = entry.get("displayName") or entry.get("name") or raw_id
+            methods = entry.get("supportedGenerationMethods") or entry.get(
+                "supported_generation_methods"
+            ) or entry.get("capabilities") or []
+            if isinstance(methods, str):
+                methods = [methods]
+        else:
+            continue
+        model_id = str(raw_id or "").strip()
+        if model_id.startswith("models/"):
+            model_id = model_id.split("/", 1)[1]
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        roles = _model_roles_for_entry(model_id, methods)
+        normalized.append(
+            {
+                "id": model_id,
+                "name": str(raw_name or model_id).strip(),
+                "roles": roles,
+                "source": "upstream",
+            }
+        )
+    return sorted(normalized, key=lambda item: (item.get("name", "").lower(), item["id"]))
+
+
+def _provider_model_catalog(provider: dict) -> list:
+    return _normalize_model_catalog((provider or {}).get("model_catalog") or [])
+
+
+def _provider_model_choices(provider: dict, role: str) -> list:
+    """Return fetched models first, then compatible built-ins for old providers."""
+    fetched = _provider_model_catalog(provider)
+    role_ids = [item["id"] for item in fetched if role in (item.get("roles") or [])]
+    fetched_ids = role_ids or [item["id"] for item in fetched]
+    builtins = list(MODELS.keys()) if role == "image" else list(TITLE_VISION_MODEL_ORDER)
+    return list(dict.fromkeys(fetched_ids + builtins))
+
+
+def _provider_model_labels(provider: dict, role: str) -> dict:
+    labels = {}
+    builtins = MODELS if role == "image" else TITLE_VISION_MODELS
+    for model_id, info in builtins.items():
+        labels[model_id] = info.get("name", model_id)
+    labels.update({item["id"]: item.get("name", item["id"]) for item in _provider_model_catalog(provider)})
+    return labels
+
+
+def render_provider_model_select(
+    label: str, provider: dict, role: str, current_value: str, key: str, allow_unset: bool = True
+) -> str:
+    choices = _provider_model_choices(provider, role)
+    labels = _provider_model_labels(provider, role)
+    return render_model_select_with_custom(
+        label,
+        choices,
+        current_value,
+        key,
+        allow_unset=allow_unset,
+        format_map=labels,
+    )
+
+
+def _model_endpoint(base_url: str, suffix: str) -> str:
+    base = (base_url or "").strip().rstrip("/")
+    if not base:
+        return suffix.lstrip("/")
+    if base.endswith("/models"):
+        return base
+    desired_version = ""
+    if suffix.startswith("/v1beta"):
+        desired_version = "/v1beta"
+    elif suffix.startswith("/v1"):
+        desired_version = "/v1"
+    for version in ("/v1beta", "/v1"):
+        if base.endswith(version):
+            root = base[: -len(version)]
+            return f"{root}{desired_version or version}/models"
+    return f"{base}/{suffix.lstrip('/')}"
+
+
+def _request_model_endpoint(endpoint: str, headers: dict):
+    req = urllib.request.Request(endpoint, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            return json.loads(response.read().decode("utf-8", "ignore"))
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8", "ignore")
+        raise RuntimeError(f"HTTP {error.code}: {_extract_model_error(body)}") from error
+
+
+def _extract_model_error(body: str) -> str:
+    try:
+        payload = json.loads(body or "{}")
+    except json.JSONDecodeError:
+        return (body or "请求失败")[:180]
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(error, dict):
+        return str(error.get("message") or error.get("status") or "请求失败")[:180]
+    return str(payload.get("message") or "请求失败")[:180] if isinstance(payload, dict) else "请求失败"
+
+
+def _model_entries_from_response(payload) -> list:
+    if isinstance(payload, dict):
+        entries = payload.get("data") or payload.get("models") or payload.get("items") or []
+    elif isinstance(payload, list):
+        entries = payload
+    else:
+        entries = []
+    return entries if isinstance(entries, list) else []
+
+
+def fetch_provider_models(provider: dict) -> list:
+    """Fetch a provider's upstream model catalog without changing assignments."""
+    provider = provider or {}
+    api_key = resolve_provider_api_key(provider)
+    if is_demo_api_key(api_key):
+        demo_entries = [
+            {"id": model_id, "displayName": info.get("name", model_id), "supportedGenerationMethods": ["generateContent"]}
+            for model_id, info in MODELS.items()
+        ] + [
+            {"id": model_id, "displayName": info.get("name", model_id), "supportedGenerationMethods": ["generateContent"]}
+            for model_id, info in TITLE_VISION_MODELS.items()
+        ]
+        return _normalize_model_catalog(demo_entries)
+    if not api_key:
+        raise RuntimeError("请先填写 API Key。")
+
+    provider_type = (provider.get("provider_type") or "gemini").strip().lower()
+    base_url = (provider.get("base_url") or "").strip()
+    requests = []
+    if provider_type == "openai":
+        base = base_url or OPENAI_DEFAULT_BASE_URL
+        requests = [
+            (
+                _model_endpoint(base, "/v1/models"),
+                {
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                },
+            )
+        ]
+    else:
+        base = base_url or "https://generativelanguage.googleapis.com"
+        requests = [
+            (
+                _model_endpoint(base, "/v1beta/models"),
+                {"Accept": "application/json", "x-goog-api-key": api_key},
+            )
+        ]
+        if provider_type == "relay":
+            bearer_headers = {
+                "Accept": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            }
+            requests.extend(
+                [
+                    (_model_endpoint(base, "/v1/models"), bearer_headers),
+                    (_model_endpoint(base, "/models"), bearer_headers),
+                ]
+            )
+
+    errors = []
+    seen_endpoints = set()
+    for endpoint, headers in requests:
+        if endpoint in seen_endpoints:
+            continue
+        seen_endpoints.add(endpoint)
+        try:
+            payload = _request_model_endpoint(endpoint, headers)
+            catalog = _normalize_model_catalog(_model_entries_from_response(payload))
+            if catalog:
+                return catalog
+            errors.append(f"{endpoint}: 未返回模型")
+        except Exception as error:
+            errors.append(str(error))
+    raise RuntimeError("；".join(errors)[:500] or "上游模型目录为空。")
+
+
+def _collect_custom_model_names(provider: dict) -> list:
+    """返回该提供商配置里不在内置目录中的模型名（自定义模型名）。"""
+    customs = []
+    image_model = str(provider.get("image_model", "") or "").strip()
+    if image_model and image_model not in MODELS:
+        customs.append(image_model)
+    for field in ("title_model", "vision_model"):
+        value = str(provider.get(field, "") or "").strip()
+        if value and value not in TITLE_VISION_MODEL_ORDER:
+            customs.append(value)
+    return list(dict.fromkeys(customs))
+
+
+def _provider_model_status(provider: dict) -> str:
+    catalog = _provider_model_catalog(provider)
+    if not catalog:
+        return "尚未获取上游目录，当前使用内置候选。"
+    updated = provider.get("model_catalog_updated_at") or "刚刚"
+    return f"已获取 {len(catalog)} 个上游模型 · 最近更新 {updated}"
+
+
 def show_provider_settings():
-    s = get_settings()
-    st.markdown(
-        '<div class="page-title">⚙️ 提供商设置</div>', unsafe_allow_html=True
-    )
-    st.markdown(
-        "在本地管理 API 提供商信息。支持直连 Gemini 与中转/Relay Base URL，并为后续任务切换提供保护。"
-    )
+    st.markdown('<div class="page-title">⚙️ 提供商设置</div>', unsafe_allow_html=True)
+    st.caption("管理 API 提供商、模型绑定与连接状态。任务页面会始终使用下方标记为“当前使用中”的提供商。")
 
     data = get_providers()
     providers = data.get("providers", [])
     current_id = data.get("current_id")
-
     current = next((p for p in providers if p.get("id") == current_id), None)
     if current:
-        st.info(f"当前提供商: {current.get('name', '')}")
+        image_model = current.get("image_model") or "尚未选择"
+        st.markdown(
+            f'''<div class="provider-active-card">
+<div class="provider-active-label">当前使用中</div>
+<div class="provider-active-name">{esc(current.get("name", "未命名提供商"))}</div>
+<div class="provider-active-meta">{esc(current.get("provider_type", "gemini").upper())} 协议 · 出图模型：{esc(image_model)} · {_provider_model_status(current)}</div>
+</div>''',
+            unsafe_allow_html=True,
+        )
+        provider_ids = [p.get("id", "") for p in providers if p.get("enabled", True)]
+        if provider_ids:
+            selected_id = st.selectbox(
+                "当前提供商",
+                provider_ids,
+                index=provider_ids.index(current_id) if current_id in provider_ids else 0,
+                format_func=lambda pid: next((p.get("name", "未命名提供商") for p in providers if p.get("id") == pid), pid),
+                key="provider_current_picker",
+                help="切换后，新的出图和标题任务会使用此提供商；已进入队列的任务不受影响。",
+            )
+            if selected_id != current_id:
+                set_current_provider(selected_id)
+                st.session_state["_provider_model_notice"] = "当前提供商已切换。"
+                st.rerun()
+
+    for notice_key in ("_provider_custom_model_notice", "_provider_model_notice"):
+        notice = st.session_state.pop(notice_key, "")
+        if notice:
+            st.success(notice)
 
     if demo_mode_enabled():
-        st.success("本地演示模式已开启。可直接使用测试密钥管理全部功能。")
-        if st.button("一键写入测试密钥并设为当前", type="primary"):
-            data = ensure_demo_provider(data, set_current=True)
-            providers = data.get("providers", [])
-            current_id = data.get("current_id")
-            st.success("✅ 已启用本地演示管理员")
-            st.rerun()
+        st.success("本地演示模式已开启。模型获取不会访问外部 API，可直接演练完整配置流程。")
 
-    with st.expander("➕ 添加提供商"):
-        new_name = st.text_input("名称", key="prov_new_name")
+    with st.expander("➕ 添加一个新提供商", expanded=not providers):
+        st.caption("添加后会生成一张独立配置卡；你可以继续添加第二个、第三个提供商，再分别获取模型目录。")
+        new_name = st.text_input("提供商名称", key="prov_new_name", placeholder="例如：我的 Gemini 中转")
         new_type = st.selectbox(
-            "类型",
+            "协议类型",
             ["gemini", "relay", "openai"],
             key="prov_new_type",
-            help="gemini=官方SDK；relay=Gemini协议中转；openai=OpenAI协议(GPT Image 2等)",
+            format_func=lambda value: {
+                "gemini": "Gemini 官方协议",
+                "relay": "Gemini 协议中转站",
+                "openai": "OpenAI 兼容协议",
+            }.get(value, value),
         )
         new_key = st.text_input("API Key", type="password", key="prov_new_key")
         new_base = st.text_input(
-            "Base URL ("
-            + ("openai/relay 类型必填" if new_type in ("relay", "openai") else "可选")
-            + ")",
+            "Base URL" if new_type in ("relay", "openai") else "Base URL（可选）",
             key="prov_new_base",
+            placeholder="例如 https://example.com/v1",
         )
-        new_title_model = st.text_input(
-            "标题模型 (可选)",
-            value=s.get("default_title_model", "gemini-3.1-flash-lite-preview"),
-            key="prov_new_title_model",
-        )
-        new_vision_model = st.text_input(
-            "视觉模型 (可选)",
-            value=s.get("default_vision_model", "gemini-3.1-flash-lite-preview"),
-            key="prov_new_vision_model",
-        )
-        new_image_model = st.text_input(
-            "图像模型 (可选)",
-            value=s.get("default_model", "gemini-3.1-flash-image-preview"),
-            key="prov_new_image_model",
-        )
-        if st.button("添加提供商", type="primary"):
+        if st.button("添加提供商", type="primary", key="add_provider_btn"):
             errors = validate_provider_config(new_name, new_type, new_key, new_base)
             if errors:
                 for error in errors:
@@ -4981,128 +6060,196 @@ def show_provider_settings():
                     "provider_type": new_type,
                     "api_key": new_key.strip(),
                     "base_url": new_base.strip(),
-                    "title_model": new_title_model.strip(),
-                    "vision_model": new_vision_model.strip(),
-                    "image_model": new_image_model.strip(),
+                    "title_model": "",
+                    "vision_model": "",
+                    "image_model": "",
+                    "model_catalog": [],
                     "enabled": True,
                     "is_default": not providers,
                 }
-                provider, stored_in_keychain = persist_provider_secret(
-                    provider, new_key
-                )
-                providers.append(provider)
-                if not data.get("current_id"):
-                    data["current_id"] = new_id
-                data["providers"] = providers
-                save_providers(data)
-                st.success(
-                    "✅ 已添加"
-                    + ("，Key 已安全保存到 Keychain" if stored_in_keychain else "")
-                )
-                st.rerun()
+                try:
+                    provider, _ = persist_provider_secret(provider, new_key)
+                except RuntimeError as error:
+                    st.error(sanitize_task_error(str(error)))
+                else:
+                    providers.append(provider)
+                    if not data.get("current_id"):
+                        data["current_id"] = new_id
+                    data["providers"] = providers
+                    save_providers(data)
+                    st.session_state["_provider_model_notice"] = (
+                        f"已添加「{provider['name']}」。现在点击该卡片里的“从上游获取模型”。"
+                    )
+                    storage_notice = provider_secret_storage_notice(provider)
+                    if storage_notice:
+                        st.session_state["_provider_model_notice"] += f" {storage_notice}"
+                    st.rerun()
 
     if not providers:
-        st.warning("暂无提供商，请先添加。")
+        st.warning("还没有配置提供商。添加后可继续配置多个提供商。")
         return
 
-    for idx, p in enumerate(providers):
-        label = f"{p.get('name', '提供商')} ({p.get('provider_type', 'gemini')})"
-        with st.expander(label, expanded=False):
+    ordered_providers = sorted(
+        providers,
+        key=lambda provider: (provider.get("id") != data.get("current_id"), provider.get("name", "")),
+    )
+    st.markdown("#### 已保存的提供商")
+    st.caption("当前提供商始终排在第一位。展开一张卡片后可编辑、同步模型目录、测试连接或保存更改。")
+    for p in ordered_providers:
+        provider_is_current = data.get("current_id") == p.get("id")
+        state = "当前使用中" if provider_is_current else "备用"
+        label = f"{'🟢 ' if provider_is_current else '⚪ '}{p.get('name', '提供商')} · {p.get('provider_type', 'gemini').upper()} · {state}"
+        with st.expander(label, expanded=(data.get("current_id") == p.get("id"))):
             current_secret = resolve_provider_api_key(p)
             provider_active_tasks = provider_has_active_tasks(p.get("id"))
-            provider_is_current = data.get("current_id") == p.get("id")
-            p["name"] = st.text_input(
-                "名称", p.get("name", ""), key=f"prov_name_{p['id']}"
+            st.caption(
+                "此提供商正在被新任务使用。" if provider_is_current
+                else "这是备用提供商；可先测试连接，再设为当前。"
             )
+            p["name"] = st.text_input("名称", p.get("name", ""), key=f"prov_name_{p['id']}")
             p["provider_type"] = st.selectbox(
-                "类型",
+                "协议类型",
                 ["gemini", "relay", "openai"],
-                index=["gemini", "relay", "openai"].index(
-                    p.get("provider_type", "gemini")
-                )
-                if p.get("provider_type") in ["gemini", "relay", "openai"]
-                else 0,
+                index=["gemini", "relay", "openai"].index(p.get("provider_type", "gemini"))
+                if p.get("provider_type") in ["gemini", "relay", "openai"] else 0,
                 key=f"prov_type_{p['id']}",
-                help="gemini=官方SDK；relay=Gemini协议中转；openai=OpenAI协议(GPT Image 2等)",
+                format_func=lambda value: {
+                    "gemini": "Gemini 官方协议",
+                    "relay": "Gemini 协议中转站",
+                    "openai": "OpenAI 兼容协议",
+                }.get(value, value),
             )
-            p["api_key"] = st.text_input(
-                "API Key",
-                current_secret,
-                type="password",
-                key=f"prov_key_{p['id']}",
+            _key_input = st.text_input(
+                "API Key", "", type="password", key=f"prov_key_{p['id']}", placeholder="留空表示不修改"
             )
-            p["base_url"] = st.text_input(
-                "Base URL (可选)", p.get("base_url", ""), key=f"prov_base_{p['id']}"
+            effective_secret = _key_input.strip() or current_secret
+            if current_secret:
+                st.caption(f"已保存 Key：{current_secret[:3]}***{current_secret[-4:]}")
+            p["base_url"] = st.text_input("Base URL", p.get("base_url", ""), key=f"prov_base_{p['id']}")
+
+            catalog = _provider_model_catalog(p)
+            status_col, fetch_col = st.columns([3, 1])
+            with status_col:
+                st.markdown(f"**上游模型目录**  ·  {_provider_model_status(p)}")
+                if p.get("model_catalog_error"):
+                    st.warning(
+                        "上次获取失败："
+                        + sanitize_task_error(p["model_catalog_error"])
+                    )
+            with fetch_col:
+                if st.button(
+                    "🔄 从上游获取模型",
+                    key=f"prov_fetch_models_{p['id']}",
+                    disabled=not effective_secret,
+                    width="stretch",
+                ):
+                    provider_for_fetch = provider_with_runtime_secret(
+                        p, effective_secret
+                    )
+                    try:
+                        with st.spinner("正在读取上游模型目录…"):
+                            fetched_catalog = fetch_provider_models(provider_for_fetch)
+                        p["model_catalog"] = fetched_catalog
+                        p["model_catalog_updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                        p["model_catalog_error"] = ""
+                        if _key_input.strip():
+                            prepared, provider_errors, _ = prepare_provider_for_save(
+                                p, _key_input.strip()
+                            )
+                            if provider_errors:
+                                raise ValueError("；".join(provider_errors))
+                            p.update(prepared)
+                        data["providers"] = providers
+                        save_providers(data)
+                        st.session_state["_provider_model_notice"] = (
+                            f"「{p.get('name', '提供商')}」已加载 {len(fetched_catalog)} 个模型。"
+                        )
+                        st.rerun()
+                    except Exception as error:
+                        p["model_catalog_error"] = sanitize_task_error(
+                            str(error), secrets=(effective_secret,)
+                        )
+                        data["providers"] = providers
+                        save_providers(data)
+                        st.error(f"模型获取失败：{p['model_catalog_error']}")
+
+            st.markdown("##### 模型绑定")
+            st.caption("绑定只对当前提供商生效；任务页会默认使用这里的选择，也可以在任务中临时切换。")
+            p["title_model"] = render_provider_model_select(
+                "标题模型", p, "title", p.get("title_model", ""), key=f"prov_title_{p['id']}"
             )
-            p["title_model"] = st.text_input(
-                "标题模型 (可选)", p.get("title_model", ""), key=f"prov_title_{p['id']}"
+            p["vision_model"] = render_provider_model_select(
+                "视觉模型", p, "vision", p.get("vision_model", ""), key=f"prov_vision_{p['id']}"
             )
-            p["vision_model"] = st.text_input(
-                "视觉模型 (可选)",
-                p.get("vision_model", ""),
-                key=f"prov_vision_{p['id']}",
+            p["image_model"] = render_provider_model_select(
+                "出图模型", p, "image", p.get("image_model", ""), key=f"prov_image_{p['id']}"
             )
-            p["image_model"] = st.text_input(
-                "图像模型 (可选)", p.get("image_model", ""), key=f"prov_image_{p['id']}"
-            )
-            p["enabled"] = st.checkbox(
-                "启用", p.get("enabled", True), key=f"prov_enabled_{p['id']}"
-            )
+            p["enabled"] = st.checkbox("启用此提供商", p.get("enabled", True), key=f"prov_enabled_{p['id']}")
+
             if provider_active_tasks:
                 st.warning("当前有进行中任务正在使用该提供商，暂不允许删除。")
             if provider_is_current:
                 st.caption("当前默认提供商")
 
+            st.markdown("##### 操作")
             c1, c2, c3 = st.columns(3)
             with c1:
-                if st.button("设为当前", key=f"prov_set_{p['id']}"):
+                if st.button("✓ 当前使用中" if provider_is_current else "设为当前", key=f"prov_set_{p['id']}", disabled=provider_is_current, type="primary" if not provider_is_current else "secondary", width="stretch"):
                     set_current_provider(p["id"])
-                    st.success("✅ 已设为当前")
+                    st.session_state["_provider_model_notice"] = f"已切换当前提供商：{p.get('name', '提供商')}。"
                     st.rerun()
             with c2:
-                if st.button(
-                    "测试连接",
-                    key=f"prov_test_{p['id']}",
-                    disabled=not current_secret,
-                ):
+                if st.button("测试 API 连接", key=f"prov_test_{p['id']}", disabled=not effective_secret, width="stretch"):
+                    provider_for_test = provider_with_runtime_secret(
+                        p, effective_secret
+                    )
                     provider_errors = validate_provider_config(
-                        p.get("name", ""),
-                        p.get("provider_type", "gemini"),
-                        current_secret,
-                        p.get("base_url", ""),
+                        p.get("name", ""), p.get("provider_type", "gemini"), effective_secret, p.get("base_url", "")
                     )
                     if provider_errors:
                         st.error("；".join(provider_errors))
                     else:
                         try:
-                            client = create_ai_client(p)
-                            reply = client.test_connection()
-                            st.success(f"✅ 连接成功: {(reply or '').strip()[:60]}")
-                        except Exception as e:
-                            st.error(sanitize_task_error(str(e)))
+                            reply = create_ai_client(provider_for_test).test_connection()
+                            st.success(f"✅ 连接成功：{(reply or '').strip()[:60]}")
+                        except Exception as error:
+                            st.error(
+                                sanitize_task_error(
+                                    str(error), secrets=(effective_secret,)
+                                )
+                            )
             with c3:
+                if st.button("保存更改", key=f"prov_save_{p['id']}", width="stretch"):
+                    try:
+                        prepared, provider_errors, _ = prepare_provider_for_save(
+                            p, _key_input
+                        )
+                        if provider_errors:
+                            for error in provider_errors:
+                                st.error(error)
+                        else:
+                            p.update(prepared)
+                            data["providers"] = providers
+                            save_providers(data)
+                            st.success(f"✅ 已保存「{p.get('name', '提供商')}」")
+                    except RuntimeError as error:
+                        st.error(sanitize_task_error(str(error)))
+            with st.expander("危险操作", expanded=False):
                 delete_confirm_key = f"confirm_delete_provider_{p['id']}"
-                if st.button(
-                    "删除",
-                    key=f"prov_del_{p['id']}",
-                    disabled=provider_active_tasks,
-                ):
+                st.caption("删除会移除此提供商配置；当前提供商会自动切换到其余可用项。")
+                if st.button("删除此提供商", key=f"prov_del_{p['id']}", disabled=provider_active_tasks, width="stretch"):
                     activate_confirmation(delete_confirm_key)
                     st.rerun()
                 replacement = find_replacement_provider(p.get("id"))
                 delete_message = "删除后会移除该提供商配置。"
                 if provider_is_current:
-                    if replacement:
-                        delete_message += f" 当前默认将切换为 {replacement.get('name', '其他提供商')}。"
-                    else:
-                        delete_message += " 删除后当前默认提供商将被清空。"
-                if render_confirmation_bar(
-                    delete_confirm_key,
-                    delete_message,
-                    confirm_label="确认删除提供商",
-                ):
+                    delete_message += (
+                        f" 当前默认将切换为 {replacement.get('name', '其他提供商')}。"
+                        if replacement else " 删除后当前默认提供商将被清空。"
+                    )
+                if render_confirmation_bar(delete_confirm_key, delete_message, confirm_label="确认删除提供商"):
                     delete_keychain_secret(p.get("keychain_account"))
-                    providers.pop(idx)
+                    providers.remove(p)
                     if provider_is_current:
                         data["current_id"] = replacement.get("id", "") if replacement else ""
                     data["providers"] = providers
@@ -5110,46 +6257,29 @@ def show_provider_settings():
                     st.success("✅ 已删除提供商")
                     st.rerun()
 
-    if st.button("💾 保存设置", type="primary"):
-        all_errors = []
-        for p in providers:
-            provider_errors = validate_provider_config(
-                p.get("name", ""),
-                p.get("provider_type", "gemini"),
-                p.get("api_key", ""),
-                p.get("base_url", ""),
-            )
-            if provider_errors:
-                all_errors.extend(
-                    [f"{p.get('name', '提供商')}: {message}" for message in provider_errors]
-                )
-                continue
-            p, _ = persist_provider_secret(p, p.get("api_key", ""))
-        if all_errors:
-            for error in all_errors:
-                st.error(error)
-            return
-        data["providers"] = providers
-        save_providers(data)
-        st.success("✅ 已保存")
+    st.caption("模型目录获取会立即保存；名称、协议、模型绑定和启用状态可在卡片内保存。")
 
 
 def show_settings_center():
     st.markdown('<div class="page-title">🛠️ 系统设置</div>', unsafe_allow_html=True)
     st.markdown(
-        "统一管理默认语言、模型、输出目录、代理、自动清理与诊断。模板资产已独立到「模板库」。"
+        "系统设置只处理运行行为、内容默认、诊断与合规；提供商、模型目录和连接测试统一放在「提供商设置」。"
     )
 
-    tabs = st.tabs(["🌐 默认设置", "🩺 诊断", "🛡️ 合规词", "🧠 提示词"])
+    tabs = st.tabs(["⚙️ 运行与存储", "🌐 内容默认", "🩺 诊断", "🛡️ 合规词", "🧠 提示词"])
 
     with tabs[0]:
-        render_settings_defaults_tab()
+        render_settings_runtime_tab()
 
     with tabs[1]:
-        render_settings_diagnostics_tab()
+        render_settings_defaults_tab()
 
     with tabs[2]:
+        render_settings_diagnostics_tab()
+
+    with tabs[3]:
         st.markdown("### 🛡️ 个人合规词管理")
+        st.caption("这里的合规词用于图片文案、图需和图片翻译；商品标题使用固定的 TEMU 三语合规规则。")
         show_user_compliance()
 
         st.markdown("---")
@@ -5177,51 +6307,27 @@ def show_settings_center():
             save_compliance(comp)
             st.success("✅ 全局合规词已保存")
 
-    with tabs[3]:
+    with tabs[4]:
         render_prompt_management()
 
 
 # ==================== 标题生成选项组件 ====================
 def render_title_gen_option(prefix: str, provider: dict = None):
-    enabled_templates, template_options, template_names = (
-        build_title_template_selector_options(include_custom=False)
-    )
-
     st.markdown("---")
     st.markdown("### 🏷️ 智能标题生成 (可选)")
 
     enable_title = st.checkbox(
         "📝 同时生成商品标题",
         key=f"{prefix}_enable_title",
-        help="勾选后将在出图完成时一并生成英文 + 目标语言标题",
+        help="勾选后将在出图完成时一并生成 TEMU 三语标题（中文 / Español / Français）",
     )
 
     if enable_title:
         st.markdown('<div class="title-box">', unsafe_allow_html=True)
 
-        target_language = render_target_language_selector(
-            prefix,
-            "title_language",
-            "🌐 标题目标语言",
-            "标题默认优先英文；若选择英语，则输出纯英文标题。",
-        )
-        if target_language == "en":
-            st.caption("当前模式: 🇺🇸 纯英文标题")
-        else:
-            st.caption(
-                f"固定首行: 🇺🇸 English · 第二行: {get_title_language_caption(target_language)}"
-            )
-
-        selected_template = st.selectbox(
-            "标题模板",
-            options=template_options,
-            format_func=lambda x: template_names.get(x, x),
-            key=f"{prefix}_title_template",
-            label_visibility="collapsed",
-        )
-
-        template_info = enabled_templates.get(selected_template, {})
-        st.caption(f"📝 {template_info.get('desc', '')}")
+        target_language = DEFAULT_TARGET_LANGUAGE  # 三语标题固定输出 zh/es/fr
+        st.caption("输出固定为 TEMU 三语标题：🇨🇳 中文 · 🇪🇸 Español · 🇫🇷 Français（西/法附中文回译）")
+        st.caption("标题策略：内置 TEMU 三语生成与合规自查")
 
         title_info = st.text_area(
             f"商品信息描述 (最多{MAX_TITLE_INFO_CHARS}字)",
@@ -5238,27 +6344,26 @@ def render_title_gen_option(prefix: str, provider: dict = None):
         provider_default_model = provider.get("title_model") or provider.get(
             "vision_model", ""
         )
-        default_title_vision_model = resolve_default_title_vision_model(
+        default_title_vision_model = provider_default_model or resolve_default_title_vision_model(
             provider_default_model
         )
         with st.expander("⚙️ 高级：标题生成模型（默认沿用提供商配置，一般无需修改）"):
-            title_vision_model = st.selectbox(
+            title_vision_model = render_provider_model_select(
                 "标题生成模型",
-                options=TITLE_VISION_MODEL_ORDER,
-                index=TITLE_VISION_MODEL_ORDER.index(default_title_vision_model),
-                format_func=format_title_vision_model,
+                provider,
+                "vision",
+                default_title_vision_model,
                 key=f"{prefix}_title_vision_model",
-                help="标题一般用能识图的模型即可，GPT/Gemini/Grok 均可选择。"
-                "注意需与当前提供商协议匹配，选错会在生成时报错。",
-                label_visibility="collapsed",
+                allow_unset=False,
             )
+            st.caption("当前列表优先显示该提供商上游目录；未获取目录时显示内置候选。")
 
         st.markdown("</div>", unsafe_allow_html=True)
 
         return (
             enable_title,
             title_info,
-            selected_template,
+            "default",
             target_language,
             title_vision_model,
         )
@@ -5279,79 +6384,69 @@ def render_title_gen_option(prefix: str, provider: dict = None):
 def display_generated_titles(
     titles: list, prefix: str = "", target_language: str = "zh"
 ):
+    """TEMU 三语标题展示：中文 / Español(+回译) / Français(+回译)。
+
+    target_language 参数保留以兼容旧调用（不再影响输出布局）；
+    同时兼容旧历史记录中的纯字符串标题。"""
     if not titles:
         return
 
-    language_info = get_target_language(target_language)
+    entries = normalize_title_entries(titles)
+    if not entries:
+        return
 
-    if target_language == "en":
-        st.markdown("### 🏷️ 生成的商品标题 (纯英文)")
-    else:
-        st.markdown(f"### 🏷️ 生成的商品标题 (英文 + {language_info['label']})")
+    st.markdown("### 🏷️ 生成的商品标题 (TEMU 三语：中文 / Español / Français)")
 
-    if target_language != "en" and len(titles) >= 6:
-        labels = ["🔍 搜索优化", "💰 转化优化", "✨ 差异化"]
-        for i in range(0, min(6, len(titles)), 2):
-            title_idx = i // 2
-            label = labels[title_idx] if title_idx < 3 else f"标题 {title_idx + 1}"
-            en_title = titles[i] if i < len(titles) else ""
-            localized_title = titles[i + 1] if i + 1 < len(titles) else ""
+    issue_entries = [e for e in entries if e.get("lang") == "issue"]
+    title_entries = [e for e in entries if e.get("lang") != "issue"]
 
-            # 计算英文字符数
-            en_chars = len(en_title)
-            char_status = (
-                "✅" if MIN_TITLE_EN_CHARS <= en_chars <= MAX_TITLE_EN_CHARS else "⚠️"
-            )
-
-            st.markdown(
-                f"""
-            <div class="title-bilingual">
-                <div style="display:flex;justify-content:space-between;margin-bottom:0.5rem">
-                    <span style="color:#6366f1;font-weight:600">{label}</span>
-                    <span style="font-size:11px;color:#64748b">{char_status} EN: {en_chars}字符</span>
-                </div>
-                <div style="background:#e0e7ff;padding:0.5rem;border-radius:6px;margin-bottom:0.5rem">
-                    <span style="font-size:11px;color:#4338ca">🇺🇸 English</span><br>
-                    <span style="font-size:14px">{en_title}</span>
-                </div>
-                <div style="background:#fef3c7;padding:0.5rem;border-radius:6px">
-                    <span style="font-size:11px;color:#92400e">{language_info["flag"]} {language_info["label"]}</span><br>
-                    <span style="font-size:14px">{localized_title}</span>
-                </div>
+    for entry in title_entries:
+        lang = entry.get("lang", "")
+        label = TRI_TITLE_LABELS.get(lang, lang or "标题")
+        flag = TRI_TITLE_FLAGS.get(lang, "🏷️")
+        chars = entry.get("chars", len(entry.get("title", "")))
+        range_min, range_max = get_title_char_range(lang)
+        in_range = range_min <= chars <= range_max
+        char_status = "✅" if in_range else "⚠️"
+        back = entry.get("back_translation_zh", "")
+        back_html = (
+            f"""<div style="background:#fef3c7;padding:0.5rem;border-radius:6px;margin-top:0.5rem">
+                    <span style="font-size:11px;color:#92400e">🇨🇳 中文回译</span><br>
+                    <span style="font-size:13px">{esc(back)}</span>
+                </div>"""
+            if back
+            else ""
+        )
+        st.markdown(
+            f"""
+        <div class="title-bilingual">
+            <div style="display:flex;justify-content:space-between;margin-bottom:0.5rem">
+                <span style="color:#6366f1;font-weight:600">{flag} {esc(label)}</span>
+                <span style="font-size:11px;color:#64748b">{char_status} {chars}字符</span>
             </div>
-            """,
-                unsafe_allow_html=True,
-            )
-    else:
-        # 单语模式
-        labels = ["🔍 搜索优化", "💰 转化优化", "✨ 差异化"]
-        for i, t in enumerate(titles[:3]):
-            label = labels[i] if i < 3 else f"标题 {i + 1}"
-            st.markdown(
-                f"""
-            <div class="title-result">
-                <span style="color:#6366f1;font-weight:600">{label}</span><br>
-                <span style="font-size:15px">{t}</span>
+            <div style="background:#e0e7ff;padding:0.5rem;border-radius:6px">
+                <span style="font-size:14px">{esc(entry.get("title", ""))}</span>
             </div>
-            """,
-                unsafe_allow_html=True,
+            {back_html}
+        </div>
+        """,
+            unsafe_allow_html=True,
+        )
+        if not in_range:
+            st.caption(
+                f"⚠️ {label} 标题 {chars} 字符，超出/不足 TEMU 建议区间 "
+                f"({range_min}-{range_max} 字符)"
             )
+
+    for entry in issue_entries:
+        st.warning(f"⚠️ {entry.get('title', '')}")
 
     # 复制区域
-    copy_text = (
-        "\n\n".join(
-            [
-                f"Title {i // 2 + 1}:\nEN: {titles[i]}\n{language_info['copy_tag']}: {titles[i + 1]}"
-                for i in range(0, min(6, len(titles)), 2)
-            ]
-        )
-        if target_language != "en" and len(titles) >= 6
-        else "\n".join(titles)
-    )
+    copy_text = format_titles_text(entries)
     st.text_area(
         "📋 复制全部标题",
         copy_text,
-        height=120,
+        height=160,
         key=f"{prefix}_copy_titles_{random.randint(1000, 9999)}",
     )
 
@@ -5381,7 +6476,7 @@ def render_type_selector(
 
     with col1:
         if st.button(
-            "✅ 一键全选", key=f"{prefix}_select_all", use_container_width=True
+            "✅ 一键全选", key=f"{prefix}_select_all", width="stretch"
         ):
             for tk in enabled_templates:
                 st.session_state[sel_key(tk)] = True
@@ -5389,7 +6484,7 @@ def render_type_selector(
 
     with col2:
         if st.button(
-            "🔄 清空选择", key=f"{prefix}_clear_all", use_container_width=True
+            "🔄 清空选择", key=f"{prefix}_clear_all", width="stretch"
         ):
             for tk in enabled_templates:
                 st.session_state[sel_key(tk)] = False
@@ -5445,33 +6540,6 @@ def render_type_selector(
     return result, calc_total()
 
 
-def render_title_template_management():
-    # Title template editing is kept separate from image template editing so the
-    # user-facing settings model stays aligned with product concepts.
-    st.markdown("### 🏷️ 标题模板管理")
-    title_templates = get_title_templates()
-    for key, value in title_templates.items():
-        with st.expander(f"{value.get('name', key)}", expanded=False):
-            value["name"] = st.text_input(
-                "模板名称", value.get("name", ""), key=f"title_tpl_name_{key}"
-            )
-            value["desc"] = st.text_input(
-                "模板说明", value.get("desc", ""), key=f"title_tpl_desc_{key}"
-            )
-            value["enabled"] = st.checkbox(
-                "启用", value.get("enabled", True), key=f"title_tpl_enabled_{key}"
-            )
-            value["prompt"] = st.text_area(
-                "模板提示词",
-                value.get("prompt", ""),
-                height=220,
-                key=f"title_tpl_prompt_{key}",
-            )
-    if st.button("💾 保存标题模板", key="save_title_templates_btn"):
-        save_title_templates(title_templates)
-        st.success("✅ 标题模板已保存")
-
-
 def render_prompt_management():
     st.markdown("### 🧠 提示词管理")
     prompts = get_prompts()
@@ -5490,200 +6558,159 @@ def render_prompt_management():
         st.success("✅ 提示词已保存")
 
 
-def render_settings_defaults_tab():
+def render_settings_runtime_tab():
     s = get_settings()
-    st.markdown("### 🌐 全局默认")
+    st.markdown("### ⚙️ 运行与存储")
+    st.caption("这里控制任务队列、并发、代理和文件清理；提供商凭据、模型获取和连接测试请在「提供商设置」完成。")
+
+    max_active_tasks = st.number_input(
+        "同时执行的任务数",
+        min_value=1,
+        max_value=16,
+        step=1,
+        value=get_task_limits(s)[0],
+        key="settings_max_active_tasks",
+        help="任务越多越快，但也会增加上游限流、网络和本机资源压力。",
+    )
+    max_task_queue = st.number_input(
+        "任务中心最多保留",
+        min_value=1,
+        max_value=100,
+        step=1,
+        value=get_task_limits(s)[1],
+        key="settings_max_task_queue",
+        help="达到上限时会优先复用已结束任务的位置；不会删除正在运行的任务。",
+    )
     c1, c2 = st.columns(2)
     with c1:
-        default_title_language = st.selectbox(
-            "默认标题语言",
-            [item["code"] for item in TARGET_LANGUAGES],
-            index=[item["code"] for item in TARGET_LANGUAGES].index(
-                s.get("default_title_language", DEFAULT_TARGET_LANGUAGE)
-                if s.get("default_title_language", DEFAULT_TARGET_LANGUAGE)
-                in [item["code"] for item in TARGET_LANGUAGES]
-                else DEFAULT_TARGET_LANGUAGE
-            ),
-            format_func=format_target_language_option,
-            key="settings_default_title_language",
-            help="标题页和出图页标题功能默认使用此语言。标题始终优先英文；若选择英语，则输出纯英文标题。",
+        trash_retention_days = st.number_input(
+            "回收站保留天数",
+            min_value=0,
+            max_value=3650,
+            step=1,
+            value=int(s.get("trash_retention_days", 15)),
+            key="settings_trash_retention_days",
+            help="0 表示不自动清理。",
         )
-        default_image_language = st.selectbox(
-            "默认图片文案语言",
-            [item["code"] for item in TARGET_LANGUAGES],
-            index=[item["code"] for item in TARGET_LANGUAGES].index(
-                s.get("default_image_language", DEFAULT_TARGET_LANGUAGE)
-                if s.get("default_image_language", DEFAULT_TARGET_LANGUAGE)
-                in [item["code"] for item in TARGET_LANGUAGES]
-                else DEFAULT_TARGET_LANGUAGE
-            ),
-            format_func=format_target_language_option,
-            key="settings_default_image_language",
-            help="智能组图和快速出图里的图需、入图文案、图片提示词默认语言。",
-        )
-        compliance_mode = st.selectbox(
-            "默认合规模式",
-            [
-                k
-                for k, v in get_compliance().get("presets", {}).items()
-                if v.get("enabled", True)
-            ],
-            index=[
-                k
-                for k, v in get_compliance().get("presets", {}).items()
-                if v.get("enabled", True)
-            ].index(s.get("compliance_mode", "strict"))
-            if s.get("compliance_mode", "strict")
-            in [
-                k
-                for k, v in get_compliance().get("presets", {}).items()
-                if v.get("enabled", True)
-            ]
-            else 0,
-            format_func=lambda x: (
-                get_compliance().get("presets", {}).get(x, {}).get("name", x)
-            ),
-            key="settings_compliance_mode",
+        file_retention_days = st.number_input(
+            "文件保留天数",
+            min_value=0,
+            max_value=3650,
+            step=1,
+            value=int(s.get("file_retention_days", 7)),
+            key="settings_file_retention_days",
+            help="0 表示不自动清理临时文件。",
         )
     with c2:
         proxy_mode = st.selectbox(
             "代理模式",
             ["system", "manual", "none"],
             index=["system", "manual", "none"].index(s.get("proxy_mode", "system"))
-            if s.get("proxy_mode", "system") in ["system", "manual", "none"]
-            else 0,
-            format_func=lambda x: {
-                "system": "跟随系统",
-                "manual": "手动代理",
-                "none": "不使用代理",
-            }.get(x, x),
+            if s.get("proxy_mode", "system") in ["system", "manual", "none"] else 0,
+            format_func=lambda x: {"system": "跟随系统", "manual": "手动代理", "none": "不使用代理"}.get(x, x),
             key="settings_proxy_mode",
         )
         proxy_url = st.text_input(
             "手动代理地址",
             value=s.get("proxy_url", "http://127.0.0.1:10808"),
             key="settings_proxy_url",
-            help="例如 http://127.0.0.1:10808",
+            help="例如 http://127.0.0.1:10808；仅在手动代理时使用。",
         )
-        default_model = st.selectbox(
-            "默认出图模型",
-            list(MODELS.keys()),
-            index=list(MODELS.keys()).index(
-                s.get("default_model", "gemini-3.1-flash-image-preview")
-            )
-            if s.get("default_model", "gemini-3.1-flash-image-preview") in MODELS
-            else 0,
-            format_func=lambda x: MODELS[x]["name"],
-            key="settings_default_model",
+
+    current_output_dir = s.get("project_output_dir", _default_project_output_dir())
+    if runtime_supports_output_dir_editing():
+        project_output_dir = st.text_input(
+            "项目保存目录",
+            value=current_output_dir,
+            key="settings_project_output_dir",
+            help="标题、图片、ZIP 和错误日志都会按项目文件夹保存。",
         )
-        default_title_model = st.text_input(
-            "默认标题模型",
-            value=s.get("default_title_model", "gemini-3.1-flash-lite-preview"),
-            key="settings_default_title_model",
-        )
-        default_vision_model = st.text_input(
-            "默认视觉模型",
-            value=s.get("default_vision_model", "gemini-3.1-flash-lite-preview"),
-            key="settings_default_vision_model",
-        )
-        _model_info_for_default = MODELS.get(default_model, {})
-        _default_res_options = _model_info_for_default.get("resolutions", ["1K"])
-        default_resolution = st.selectbox(
-            "默认分辨率",
-            _default_res_options,
-            index=_default_res_options.index(s.get("default_resolution", "1K"))
-            if s.get("default_resolution", "1K") in _default_res_options
-            else 0,
-            key="settings_default_resolution",
-            help="出图页面打开时默认选中的分辨率，具体可选项仍取决于所选模型。",
-        )
-        default_aspect = st.selectbox(
-            "默认宽高比",
-            ASPECT_RATIOS,
-            index=ASPECT_RATIOS.index(s.get("default_aspect", "1:1"))
-            if s.get("default_aspect", "1:1") in ASPECT_RATIOS
-            else 0,
-            key="settings_default_aspect",
-        )
-        _default_thinking_options = ["low", "high"]
-        default_thinking_level = st.selectbox(
-            "默认推理深度",
-            _default_thinking_options,
-            index=_default_thinking_options.index(s.get("default_thinking_level", "high"))
-            if s.get("default_thinking_level", "high") in _default_thinking_options
-            else 0,
-            format_func=lambda x: THINKING_LEVEL_DESC.get(x, x),
-            key="settings_default_thinking_level",
-            help="仅对支持推理深度的模型（如 Nano Banana Pro）生效。",
-        )
-        current_output_dir = s.get("project_output_dir", _default_project_output_dir())
-        if runtime_supports_output_dir_editing():
-            project_output_dir = st.text_input(
-                "项目保存目录",
-                value=current_output_dir,
-                key="settings_project_output_dir",
-                help="标题、图片、ZIP 和错误日志都会按项目文件夹保存在这里。",
-            )
-        else:
-            project_output_dir = current_output_dir
-            st.text_input(
-                "服务器项目目录",
-                value=current_output_dir,
-                disabled=True,
-                key="settings_project_output_dir_server",
-                help="服务器版默认把项目保存在服务器项目中心，用户通过浏览器下载结果。",
-            )
-            st.caption(
-                "当前运行模式不会直接操作访问者电脑上的文件夹。结果会先进入服务器项目中心，再由用户下载。"
-            )
-        trash_retention_days = st.number_input(
-            "回收站保留天数",
-            min_value=0,
-            step=1,
-            value=int(s.get("trash_retention_days", 15)),
-            key="settings_trash_retention_days",
-            help="0 表示不自动清理；该值将用于后续回收站自动清理策略。",
-        )
-    if st.button("💾 保存全局默认", type="primary", key="save_global_defaults"):
-        s["default_title_language"] = default_title_language
-        s["default_image_language"] = default_image_language
-        s["compliance_mode"] = compliance_mode
-        s["default_model"] = default_model
-        s["default_resolution"] = default_resolution
-        s["default_aspect"] = default_aspect
-        s["default_thinking_level"] = default_thinking_level
-        s["default_title_model"] = default_title_model.strip()
-        s["default_vision_model"] = default_vision_model.strip()
-        s["project_output_dir"] = project_output_dir.strip()
+    else:
+        project_output_dir = current_output_dir
+        st.text_input("服务器项目目录", value=current_output_dir, disabled=True, key="settings_project_output_dir_server")
+        st.caption("当前运行模式不会直接操作访问者电脑上的文件夹，结果会进入服务器项目中心。")
+
+    st.markdown("---")
+    st.caption("保存后，新的任务会使用并发和队列上限；正在运行的任务不会被中断。")
+    if st.button("💾 应用运行设置", type="primary", key="save_runtime_settings"):
+        s["max_active_tasks"] = int(max_active_tasks)
+        s["max_task_queue"] = int(max_task_queue)
         s["trash_retention_days"] = int(trash_retention_days)
+        s["file_retention_days"] = int(file_retention_days)
+        s["project_output_dir"] = project_output_dir.strip()
         s["proxy_mode"] = proxy_mode
         s["proxy_url"] = proxy_url.strip()
         save_settings(s)
         apply_proxy_settings(s)
-        st.session_state.user_compliance_mode = compliance_mode
-        st.success("✅ 全局默认已保存")
+        st.success("✅ 运行设置已应用")
 
-    if st.button("🌐 测试 Gemini 连接", key="test_proxy_connectivity"):
-        apply_proxy_settings(s)
-        provider = get_active_provider()
-        if not provider or not provider.get("api_key"):
-            st.warning("请先配置可用 Provider/K。")
-        else:
-            try:
-                client = create_ai_client(provider)
-                reply = client.test_connection()
-                st.success(f"✅ 连接成功: {(reply or '').strip()[:60]}")
-            except Exception as e:
-                msg = str(e)
-                if (
-                    "FAILED_PRECONDITION" in msg
-                    or "User location is not supported" in msg
-                ):
-                    st.warning(
-                        "✅ 已连通 Google，但当前账号或地区不支持该 API 调用。请切换可用的账号、项目或代理出口。"
-                    )
-                else:
-                    st.error(f"连接失败: {sanitize_task_error(msg)}")
+
+def render_settings_defaults_tab():
+    s = get_settings()
+    st.markdown("### 🌐 内容默认")
+    st.caption("模型不再在这里维护；请到每个提供商卡片获取上游目录并绑定模型。")
+    c1, c2 = st.columns(2)
+    with c1:
+        title_language_options = [item["code"] for item in TARGET_LANGUAGES]
+        default_title_language = st.selectbox(
+            "默认标题语言",
+            title_language_options,
+            index=title_language_options.index(s.get("default_title_language", DEFAULT_TARGET_LANGUAGE))
+            if s.get("default_title_language", DEFAULT_TARGET_LANGUAGE) in title_language_options else 0,
+            format_func=format_target_language_option,
+            key="settings_default_title_language",
+            help="标题功能当前固定输出 TEMU 三语；此项保留用于兼容历史设置。",
+        )
+        default_image_language = st.selectbox(
+            "默认图片文案语言",
+            title_language_options,
+            index=title_language_options.index(s.get("default_image_language", DEFAULT_TARGET_LANGUAGE))
+            if s.get("default_image_language", DEFAULT_TARGET_LANGUAGE) in title_language_options else 0,
+            format_func=format_target_language_option,
+            key="settings_default_image_language",
+        )
+        enabled_modes = [k for k, v in get_compliance().get("presets", {}).items() if v.get("enabled", True)] or ["strict"]
+        compliance_mode = st.selectbox(
+            "默认合规模式",
+            enabled_modes,
+            index=enabled_modes.index(s.get("compliance_mode", "strict")) if s.get("compliance_mode", "strict") in enabled_modes else 0,
+            format_func=lambda x: get_compliance().get("presets", {}).get(x, {}).get("name", x),
+            key="settings_compliance_mode",
+        )
+    with c2:
+        default_aspect = st.selectbox(
+            "默认宽高比",
+            ASPECT_RATIOS,
+            index=ASPECT_RATIOS.index(s.get("default_aspect", "1:1")) if s.get("default_aspect", "1:1") in ASPECT_RATIOS else 0,
+            key="settings_default_aspect",
+        )
+        default_resolution = st.selectbox(
+            "默认分辨率",
+            ["1K", "2K", "4K"],
+            index=["1K", "2K", "4K"].index(s.get("default_resolution", "1K")) if s.get("default_resolution", "1K") in ["1K", "2K", "4K"] else 0,
+            help="具体可选项仍取决于当前提供商和出图模型。",
+            key="settings_default_resolution",
+        )
+        default_thinking_level = st.selectbox(
+            "默认推理深度",
+            ["low", "high"],
+            index=["low", "high"].index(s.get("default_thinking_level", "high")) if s.get("default_thinking_level", "high") in ["low", "high"] else 0,
+            format_func=lambda x: THINKING_LEVEL_DESC.get(x, x),
+            key="settings_default_thinking_level",
+            help="仅对支持推理深度的模型生效。",
+        )
+
+    st.markdown("---")
+    if st.button("💾 保存内容默认", type="primary", key="save_content_defaults"):
+        s["default_title_language"] = default_title_language
+        s["default_image_language"] = default_image_language
+        s["compliance_mode"] = compliance_mode
+        s["default_resolution"] = default_resolution
+        s["default_aspect"] = default_aspect
+        s["default_thinking_level"] = default_thinking_level
+        save_settings(s)
+        st.session_state.user_compliance_mode = compliance_mode
+        st.success("✅ 内容默认已保存")
 
 
 def render_settings_diagnostics_tab():
@@ -5725,16 +6752,12 @@ def render_settings_diagnostics_tab():
 
 def show_template_library():
     st.markdown('<div class="page-title">🧩 模板库</div>', unsafe_allow_html=True)
-    st.markdown(
-        "统一管理标题模板与图片模板资产。业务页面只负责选择并使用模板，模板资产统一在这里维护。"
-    )
+    st.markdown("统一管理图片生成与翻译模板。标题统一使用内置 TEMU 三语策略。")
 
     diagnostics = collect_template_library_diagnostics()
-    d1, d2, d3, d4 = st.columns(4)
-    d1.metric("标题模板", diagnostics["title_template_count"])
-    d2.metric("启用标题模板", diagnostics["enabled_title_template_count"])
-    d3.metric("图片模板", diagnostics["image_template_count"])
-    d4.metric("启用翻译模板", diagnostics["enabled_translation_count"])
+    d1, d2 = st.columns(2)
+    d1.metric("图片模板", diagnostics["image_template_count"])
+    d2.metric("启用翻译模板", diagnostics["enabled_translation_count"])
 
     if diagnostics["issues"]:
         st.warning("模板库健康检查发现潜在问题。建议修正后再交给业务页面使用。")
@@ -5743,13 +6766,7 @@ def show_template_library():
     else:
         st.success("模板库健康检查通过。当前模板结构与关键占位符完整。")
 
-    tabs = st.tabs(["🏷️ 标题模板", "🖼️ 图片模板"])
-
-    with tabs[0]:
-        render_title_template_management()
-
-    with tabs[1]:
-        render_image_template_management()
+    render_image_template_management()
 
 
 def render_image_template_management():
@@ -5839,12 +6856,12 @@ def render_output_settings_panel(prefix: str, provider: dict, s: dict) -> dict:
     st.markdown('<div class="settings-panel">', unsafe_allow_html=True)
     st.markdown("#### 🎛️ 这次出图设置")
 
-    model_keys = list(MODELS.keys())
+    model_keys = _provider_model_choices(provider, "image")
     provider_model = (provider.get("image_model") or "").strip()
     fallback_default = provider_model or s.get("default_model", "nano-banana")
-    if fallback_default not in MODELS:
-        fallback_default = model_keys[0] if model_keys else fallback_default
-        st.warning("当前提供商配置的模型名未识别，已使用默认模型")
+    if fallback_default not in model_keys:
+        model_keys.append(fallback_default)
+        st.warning("当前提供商配置了一个不在已获取目录中的模型，已保留该自定义值。")
 
     model_select_key = f"{prefix}_output_model"
     if model_select_key not in st.session_state or st.session_state[model_select_key] not in model_keys:
@@ -5852,13 +6869,13 @@ def render_output_settings_panel(prefix: str, provider: dict, s: dict) -> dict:
 
     c1, c2 = st.columns([2, 1])
     with c1:
+        model_labels = _provider_model_labels(provider, "image")
         model = st.selectbox(
             "🤖 出图模型",
             model_keys,
-            index=model_keys.index(st.session_state[model_select_key]),
-            format_func=lambda x: MODELS[x]["name"],
+            format_func=lambda x: model_labels.get(x, x),
             key=model_select_key,
-            help="默认取当前提供商配置的模型，也可以在这里临时切换。",
+            help="默认取当前提供商配置的模型，也可以在这里临时切换；列表优先来自上游模型目录。",
         )
     with c2:
         comp = get_compliance()
@@ -5990,21 +7007,36 @@ def display_generation_results(
     if results:
         st.markdown(f"### ✅ 成功生成 {len(results)} 张图片")
 
-        # 使用columns显示图片
-        cols = st.columns(min(len(results), 4))
+        # 固定网格列数：单张结果也保持缩略图尺寸，避免大图占满页面。
+        cols = st.columns(3)
         for i, item in enumerate(results):
-            with cols[i % 4]:
+            with cols[i % len(cols)]:
                 img = item.get("image")
                 label = item.get("label", f"图片{i + 1}")
                 filename = item.get("filename", f"image_{i + 1}.png")
 
                 if img:
-                    st.image(img, caption=label, use_container_width=True)
+                    st.image(img, caption=label, width="stretch")
                     st.caption(f"📁 {filename}")
 
         # 下载按钮
         st.markdown("---")
-        zip_bytes = create_zip_from_results(results, titles, target_language)
+        result_sig = hashlib.md5(
+            repr(
+                [
+                    (item.get("filename"), item.get("label"))
+                    for item in results
+                ]
+                + list(titles or [])
+                + [target_language, len(results)]
+            ).encode("utf-8")
+        ).hexdigest()
+        zip_cache = st.session_state.get(f"{prefix}_zip_cache")
+        if zip_cache and zip_cache[0] == result_sig:
+            zip_bytes = zip_cache[1]
+        else:
+            zip_bytes = create_zip_from_results(results, titles, target_language)
+            st.session_state[f"{prefix}_zip_cache"] = (result_sig, zip_bytes)
 
         col1, col2 = st.columns(2)
         with col1:
@@ -6014,16 +7046,24 @@ def display_generation_results(
                 file_name=f"images_{date.today()}.zip",
                 mime="application/zip",
                 type="primary",
-                use_container_width=True,
+                width="stretch",
             )
 
         with col2:
-            # 持久化存储
-            stype, retention, url, err = maybe_persist_and_upload(
-                zip_bytes, f"images_{date.today()}.zip"
-            )
+            # 持久化存储：同一批结果只上传一次
+            persist_cache = st.session_state.get(f"{prefix}_persisted_sig")
+            if persist_cache and persist_cache[0] == result_sig:
+                stype, retention, url, err = persist_cache[1]
+            else:
+                stype, retention, url, err = maybe_persist_and_upload(
+                    zip_bytes, f"images_{date.today()}.zip"
+                )
+                st.session_state[f"{prefix}_persisted_sig"] = (
+                    result_sig,
+                    (stype, retention, url, err),
+                )
             if url:
-                st.link_button("🌐 云端下载链接", url, use_container_width=True)
+                st.link_button("🌐 云端下载链接", url, width="stretch")
 
         if stype == "temp":
             st.caption("⚠️ 临时文件：请立即下载保存")
@@ -6078,7 +7118,8 @@ def _save_uploaded_images(files, prefix: str):
     return saved
 
 
-def _execute_title_task(task: dict):
+def _execute_title_task(execution: TaskExecution):
+    task = execution.task
     payload = task.get("payload", {})
     provider = (
         get_provider_by_id(payload.get("provider_id", "")) or get_active_provider()
@@ -6107,14 +7148,15 @@ def _execute_title_task(task: dict):
     if not result.get("success"):
         raise Exception(format_title_error(result))
     return {
-        "titles": result.get("titles", []),
+        "titles": merge_titles_and_issues(result),
         "errors": [],
         "files": [],
         "target_language": payload.get("title_language", DEFAULT_TARGET_LANGUAGE),
     }
 
 
-def _execute_smart_task(task: dict):
+def _execute_smart_task(execution: TaskExecution):
+    task = execution.task
     payload = task.get("payload", {})
     provider = (
         get_provider_by_id(payload.get("provider_id", "")) or get_active_provider()
@@ -6124,71 +7166,115 @@ def _execute_smart_task(task: dict):
     images = load_image_paths(payload.get("image_paths", []))
     if not images:
         raise Exception("任务图片已丢失，请重新上传")
-    templates = get_template_group("smart_types")
-    client = create_ai_client(
-        provider,
-        model=payload.get("model", provider.get("image_model", "")),
-        title_model=payload.get("title_model"),
-        vision_model=payload.get("vision_model"),
-    )
-    anchor = client.analyze_product(
-        images, payload.get("name", ""), payload.get("material", "")
-    )
-    selected_types = payload.get("selected_types", {})
     image_language = payload.get("image_language", DEFAULT_TARGET_LANGUAGE)
-    requirements = build_smart_requirements(selected_types, templates)
-    requirements = client.generate_en_copy(anchor, requirements, image_language)
-    req_map = {(req.get("type_key"), req.get("index")): req for req in requirements}
     results = []
     errors = []
-    done = 0
-    total = sum(selected_types.values())
-    for tk, cnt in selected_types.items():
-        info = templates[tk]
-        for idx in range(cnt):
-            ensure_task_not_cancelled(task["id"])
-            done += 1
-            update_task(task["id"], progress={"done": done, "total": total})
-            req = req_map.get(
-                (tk, idx + 1),
-                {
-                    "type_key": tk,
-                    "type_name": info["name"],
-                    "index": idx + 1,
-                    "topic": info.get("name", tk),
-                    "scene": info.get("desc", ""),
-                },
-            )
-            prompt = client.compose_image_prompt(
-                anchor, req, payload.get("aspect", "1:1"), image_language
-            )
-            try:
-                img = client.generate_image(
-                    images,
-                    prompt,
-                    payload.get("aspect", "1:1"),
-                    payload.get("size", "1K"),
-                    payload.get("thinking_level", "high"),
-                    image_language,
+    retry_items = payload.get("retry_items", []) or []
+    analysis_client = None
+    if retry_items:
+        item_jobs = [
+            {
+                "type_name": item.get("type_name", "图片"),
+                "index": item.get("index", index + 1),
+                "prompt": item.get("prompt", ""),
+            }
+            for index, item in enumerate(retry_items)
+            if item.get("prompt")
+        ]
+    else:
+        templates = get_template_group("smart_types")
+        analysis_client = create_ai_client(
+            provider,
+            model=payload.get("model", provider.get("image_model", "")),
+            title_model=payload.get("title_model"),
+            vision_model=payload.get("vision_model"),
+        )
+        anchor = analysis_client.analyze_product(
+            images, payload.get("name", ""), payload.get("material", "")
+        )
+        selected_types = payload.get("selected_types", {})
+        requirements = build_smart_requirements(selected_types, templates)
+        requirements = analysis_client.generate_en_copy(
+            anchor, requirements, image_language
+        )
+        req_map = {
+            (req.get("type_key"), req.get("index")): req for req in requirements
+        }
+        item_jobs = []
+        for tk, cnt in selected_types.items():
+            info = templates[tk]
+            for idx in range(cnt):
+                req = req_map.get(
+                    (tk, idx + 1),
+                    {
+                        "type_key": tk,
+                        "type_name": info["name"],
+                        "index": idx + 1,
+                        "topic": info.get("name", tk),
+                        "scene": info.get("desc", ""),
+                    },
                 )
-            except Exception as e:
-                logger.exception("task image generation failed (task_id=%s)", task.get("id"))
-                client.last_error = str(e)
-                img = None
-            if img:
-                filename = f"{task['id']}_{str(done).zfill(2)}_{info['name']}.png"
-                results.append(persist_image_for_task(img, filename))
-            else:
-                errors.append(client.get_last_error() or f"{info['name']} 生成失败")
+                prompt = analysis_client.compose_image_prompt(
+                    anchor, req, payload.get("aspect", "1:1"), image_language
+                )
+                item_jobs.append(
+                    {
+                        "type_name": info["name"],
+                        "index": idx + 1,
+                        "prompt": prompt,
+                    }
+                )
+    total = len(item_jobs)
+    if not total:
+        raise Exception("没有可执行的图片生成项")
+
+    # 每项只使用主体参考图，避免把全部上传图重复发送到每个上游请求。
+    refs = images[:1]
+    completed = 0
+    item_results = []
+
+    def generate_item(item):
+        execution.raise_if_stopped()
+        client = create_ai_client(provider, model=payload.get("model", provider.get("image_model", "")))
+        image = client.generate_image(refs, item["prompt"], payload.get("aspect", "1:1"), payload.get("size", "1K"), payload.get("thinking_level", "high"), image_language)
+        if not image:
+            raise RuntimeError(client.get_last_error() or f"{item['type_name']} 生成失败")
+        filename = f"{task['id']}_{item['index']:02d}_{item['type_name']}.png"
+        return item, persist_image_for_task(image, filename)
+
+    with ThreadPoolExecutor(max_workers=min(2, max(1, total))) as executor:
+        futures = {executor.submit(generate_item, item): item for item in item_jobs}
+        for future in as_completed(futures):
+            item = futures[future]
+            completed += 1
+            try:
+                finished_item, file_path = future.result()
+                results.append(file_path)
+                item_results.append({**finished_item, "status": "done", "file_path": file_path})
+            except Exception as error:
+                error_meta = classify_image_task_error(str(error))
+                errors.append(error_meta["error"])
+                item_results.append({**item, "status": "error", **error_meta})
+            execution.checkpoint(
+                progress={
+                    "done": completed,
+                    "total": total,
+                    "success": len(results),
+                    "failed": len(errors),
+                },
+                item_results=item_results,
+                result_files=results,
+                errors=errors,
+            )
     titles = []
-    if payload.get("enable_title") and payload.get("title_info"):
-        title_result = client.generate_titles(
+    if analysis_client and payload.get("enable_title") and payload.get("title_info"):
+        title_result = analysis_client.generate_titles(
             payload.get("title_info", ""),
             payload.get("template_prompt"),
             payload.get("title_language", DEFAULT_TARGET_LANGUAGE),
         )
         if title_result.get("success"):
-            titles = title_result.get("titles", [])
+            titles = merge_titles_and_issues(title_result)
         else:
             errors.append(format_title_error(title_result))
     if not results and errors:
@@ -6197,11 +7283,14 @@ def _execute_smart_task(task: dict):
         "titles": titles,
         "errors": errors,
         "files": results,
+        "item_results": item_results,
+        "partial": bool(errors),
         "target_language": payload.get("title_language", DEFAULT_TARGET_LANGUAGE),
     }
 
 
-def _execute_translate_task(task: dict):
+def _execute_translate_task(execution: TaskExecution):
+    task = execution.task
     payload = task.get("payload", {})
     provider = (
         get_provider_by_id(payload.get("provider_id", "")) or get_active_provider()
@@ -6224,10 +7313,11 @@ def _execute_translate_task(task: dict):
     )
     results = []
     errors = []
+    item_results = []
     total = len(images)
     for idx, image in enumerate(images):
-        ensure_task_not_cancelled(task["id"])
-        update_task(task["id"], progress={"done": idx + 1, "total": total})
+        execution.raise_if_stopped()
+        error_meta = None
         try:
             translated = client.generate_image(
                 [image],
@@ -6238,25 +7328,64 @@ def _execute_translate_task(task: dict):
                 image_language,
             )
         except Exception as e:
-            logger.exception("task image translation failed (task_id=%s)", task.get("id"))
-            client.last_error = str(e)
+            error_meta = classify_provider_image_task_error(str(e), provider)
+            safe_exception = RuntimeError(error_meta["error"]).with_traceback(
+                e.__traceback__
+            )
+            logger.error(
+                "task image translation failed (task_id=%s)",
+                task.get("id"),
+                exc_info=(RuntimeError, safe_exception, e.__traceback__),
+            )
+            client.last_error = error_meta["error"]
             translated = None
         if translated:
             filename = f"{task['id']}_{str(idx + 1).zfill(2)}_translated.png"
-            results.append(persist_image_for_task(translated, filename))
+            file_path = persist_image_for_task(translated, filename)
+            results.append(file_path)
+            item_results.append(
+                {
+                    "index": idx + 1,
+                    "type_name": "图片翻译",
+                    "status": "done",
+                    "file_path": file_path,
+                }
+            )
         else:
-            errors.append(client.get_last_error() or f"第{idx + 1}张翻译失败")
+            if error_meta is None:
+                error_meta = classify_provider_image_task_error(
+                    client.get_last_error() or f"第{idx + 1}张翻译失败",
+                    provider,
+                )
+            errors.append(error_meta["error"])
+            item_results.append(
+                {
+                    "index": idx + 1,
+                    "type_name": "图片翻译",
+                    "status": "error",
+                    **error_meta,
+                }
+            )
+        execution.checkpoint(
+            progress={"done": idx + 1, "total": total},
+            result_files=results,
+            errors=errors,
+            item_results=item_results,
+        )
     if not results and errors:
         raise Exception(errors[0])
     return {
         "titles": [],
         "errors": errors,
         "files": results,
+        "item_results": item_results,
+        "partial": bool(errors),
         "target_language": image_language,
     }
 
 
-def _execute_combo_task(task: dict):
+def _execute_combo_task(execution: TaskExecution):
+    task = execution.task
     payload = task.get("payload", {})
     provider = (
         get_provider_by_id(payload.get("provider_id", "")) or get_active_provider()
@@ -6276,10 +7405,10 @@ def _execute_combo_task(task: dict):
     )
     results = []
     errors = []
+    item_results = []
     total = len(reqs)
     for i, req in enumerate(reqs):
-        ensure_task_not_cancelled(task["id"])
-        update_task(task["id"], progress={"done": i + 1, "total": total})
+        execution.raise_if_stopped()
         prompt = client.compose_image_prompt(
             anchor,
             req,
@@ -6300,11 +7429,35 @@ def _execute_combo_task(task: dict):
             img = None
         if img:
             filename = f"{task['id']}_{str(i + 1).zfill(2)}_{req.get('type_name', 'image')}.png"
-            results.append(persist_image_for_task(img, filename))
+            file_path = persist_image_for_task(img, filename)
+            results.append(file_path)
+            item_results.append(
+                {
+                    "index": i + 1,
+                    "type_name": req.get("type_name", "图片"),
+                    "status": "done",
+                    "file_path": file_path,
+                }
+            )
         else:
-            errors.append(
+            error_message = (
                 client.get_last_error() or f"{req.get('type_name', '图片')} 生成失败"
             )
+            errors.append(error_message)
+            item_results.append(
+                {
+                    "index": i + 1,
+                    "type_name": req.get("type_name", "图片"),
+                    "status": "error",
+                    "error": error_message,
+                }
+            )
+        execution.checkpoint(
+            progress={"done": i + 1, "total": total},
+            result_files=results,
+            errors=errors,
+            item_results=item_results,
+        )
     titles = []
     if payload.get("enable_title") and payload.get("title_info"):
         title_result = client.generate_titles(
@@ -6313,7 +7466,7 @@ def _execute_combo_task(task: dict):
             payload.get("title_language", DEFAULT_TARGET_LANGUAGE),
         )
         if title_result.get("success"):
-            titles = title_result.get("titles", [])
+            titles = merge_titles_and_issues(title_result)
         else:
             errors.append(format_title_error(title_result))
     if not results and errors:
@@ -6322,138 +7475,417 @@ def _execute_combo_task(task: dict):
         "titles": titles,
         "errors": errors,
         "files": results,
+        "item_results": item_results,
+        "partial": bool(errors),
         "target_language": payload.get("title_language", DEFAULT_TARGET_LANGUAGE),
     }
 
 
-def run_task_worker(task_id: str):
-    task_threads = get_task_threads()
-    task = next((t for t in list_tasks() if t.get("id") == task_id), None)
-    if not task or task.get("status") != "queued":
-        return
-    update_task(task_id, status="running")
-    try:
-        ensure_task_not_cancelled(task_id)
-        if task.get("type") == "title":
-            result = _execute_title_task(task)
-        elif task.get("type") == "translate":
-            result = _execute_translate_task(task)
-        elif task.get("type") == "smart":
-            result = _execute_smart_task(task)
-        else:
-            result = _execute_combo_task(task)
-        if is_task_cancelled(task_id):
-            return
-        completed_task = update_task(
-            task_id,
-            status="done",
-            titles=result.get("titles", []),
-            errors=result.get("errors", []),
-            result_files=result.get("files", []),
-            result_title_language=result.get(
-                "target_language", DEFAULT_TARGET_LANGUAGE
-            ),
-        )
-        record_task_history(completed_task or task, result)
-    except Exception as e:
-        logger.exception("task %s failed (type=%s)", task_id, task.get("type"))
-        if is_task_cancelled(task_id):
-            return
-        failed_task = update_task(
-            task_id, status="error", errors=[sanitize_task_error(str(e))]
-        )
-        record_task_history(
-            failed_task or task,
-            {
-                "titles": [],
-                "errors": [sanitize_task_error(str(e))],
-                "files": [],
-                "target_language": task.get(
-                    "result_title_language", DEFAULT_TARGET_LANGUAGE
-                ),
-            },
-        )
-    finally:
-        task_threads.pop(task_id, None)
-        schedule_task_workers()
+def _execute_text_to_image_task(execution: TaskExecution):
+    task = execution.task
+    payload = task.get("payload", {}) or {}
+    provider = get_provider_by_id(payload.get("provider_id", "")) or get_active_provider()
+    if not provider or not provider.get("api_key"):
+        raise Exception("未配置可用的提供商")
+    client = create_ai_client(provider, model=payload.get("model", ""))
+    execution.checkpoint(progress={"done": 0, "total": 1})
+    image = client.generate_image(
+        [], payload.get("prompt", ""), payload.get("aspect", "1:1"),
+        payload.get("size", "1K"), payload.get("thinking_level", "high"), "zh",
+    )
+    if not image:
+        raise Exception(client.get_last_error() or "API 未返回图片数据")
+    filename = f"{task['id']}_text_to_image.png"
+    file_path = persist_image_for_task(image, filename)
+    item_results = [
+        {
+            "index": 1,
+            "type_name": "文生图",
+            "status": "done",
+            "file_path": file_path,
+        }
+    ]
+    execution.checkpoint(
+        progress={"done": 1, "total": 1},
+        result_files=[file_path],
+        item_results=item_results,
+    )
+    return {
+        "titles": [],
+        "errors": [],
+        "files": [file_path],
+        "item_results": item_results,
+        "target_language": "zh",
+    }
+
+
+def _validate_image_task_payload(payload: dict):
+    if not payload.get("image_paths"):
+        return ["任务图片已丢失，请重新上传"]
+    return []
+
+
+def _validate_combo_task_payload(payload: dict):
+    errors = list(_validate_image_task_payload(payload))
+    if not payload.get("reqs"):
+        errors.append("没有可执行的组图项目")
+    return errors
+
+
+def _validate_text_to_image_payload(payload: dict):
+    return [] if str(payload.get("prompt") or "").strip() else ["请输入图片描述"]
+
+
+def get_task_handlers():
+    return {
+        "title": TaskHandler(_execute_title_task),
+        "translate": TaskHandler(
+            _execute_translate_task, validate_payload=_validate_image_task_payload
+        ),
+        "smart": TaskHandler(
+            _execute_smart_task, validate_payload=_validate_image_task_payload
+        ),
+        "text_to_image": TaskHandler(
+            _execute_text_to_image_task,
+            validate_payload=_validate_text_to_image_payload,
+        ),
+        "combo": TaskHandler(
+            _execute_combo_task, validate_payload=_validate_combo_task_payload
+        ),
+    }
 
 
 CLEANUP_INTERVAL_SECONDS = 60 * 60  # 1 hour
+_TASK_CLEANUP_LOCK = threading.RLock()
+_TASK_LAST_CLEANUP_TS = 0.0
 
 
 def maybe_run_periodic_cleanup():
-    """Piggyback on task scheduling (which runs on every rerun/poll) to run
-    the trashed-records cleanup on a schedule, not just at session start."""
-    runtime = get_task_runtime()
-    last_ts = runtime.get("last_cleanup_ts", 0.0) or 0.0
+    """Run trashed-record cleanup on the task engine's maintenance cadence."""
+    global _TASK_LAST_CLEANUP_TS
     now_ts = time.time()
-    if now_ts - last_ts < CLEANUP_INTERVAL_SECONDS:
-        return
-    runtime["last_cleanup_ts"] = now_ts
+    with _TASK_CLEANUP_LOCK:
+        if now_ts - _TASK_LAST_CLEANUP_TS < CLEANUP_INTERVAL_SECONDS:
+            return
+        _TASK_LAST_CLEANUP_TS = now_ts
     try:
         cleanup_expired_trashed_records()
     except Exception:
         logger.exception("periodic cleanup_expired_trashed_records() failed")
 
 
-def schedule_task_workers():
+def _run_task_maintenance():
     maybe_run_periodic_cleanup()
-    normalize_running_tasks()
-    task_threads = get_task_threads()
-    running_threads = {tid: th for tid, th in task_threads.items() if th.is_alive()}
-    task_threads.clear()
-    task_threads.update(running_threads)
-    available = MAX_ACTIVE_TASKS - len(task_threads)
-    if available <= 0:
-        return
-    for task in sorted(list_tasks(), key=lambda x: x.get("created_at", "")):
-        if available <= 0:
-            break
-        if task.get("status") != "queued":
+    repair_unarchived_task_history()
+
+
+@st.cache_resource(show_spinner=False)
+def get_task_engine():
+    return TaskEngine(
+        TASK_REPOSITORY,
+        get_task_handlers(),
+        runner_id=_task_runner_id(),
+        max_running=lambda: get_task_limits()[0],
+        terminal_callback=record_task_history,
+        maintenance_callback=_run_task_maintenance,
+        error_sanitizer=sanitize_task_error,
+        lease_seconds=TASK_RUNNER_LEASE_SECONDS,
+        heartbeat_seconds=TASK_RUNNER_HEARTBEAT_SECONDS,
+        supervisor_interval_seconds=TASK_SUPERVISOR_INTERVAL_SECONDS,
+        logger=logger,
+    )
+
+
+def run_task_worker(task_id: str, claim_token: str):
+    return get_task_engine().run_claimed(task_id, claim_token)
+
+
+def schedule_task_workers():
+    return get_task_engine().schedule()
+
+
+def ensure_task_supervisor():
+    return get_task_engine().start()
+
+
+def build_task_item_views(task: dict) -> list:
+    task = task or {}
+    raw_items = task.get("item_results", []) or []
+    result_files = [str(path) for path in task.get("result_files", []) or [] if path]
+    progress = task.get("progress", {}) or {}
+    try:
+        declared_total = max(0, int(progress.get("total") or 0))
+    except (TypeError, ValueError):
+        declared_total = 0
+
+    task_status = str(task.get("status") or "queued")
+    missing_status = {
+        "running": "pending",
+        "done": "done",
+        "partial": "error",
+        "error": "error",
+        "cancelled": "cancelled",
+        "expired": "expired",
+    }.get(task_status, "pending")
+    status_aliases = {
+        "success": "done",
+        "completed": "done",
+        "failed": "error",
+        "failure": "error",
+        "queued": "pending",
+    }
+    allowed_statuses = {
+        "pending",
+        "running",
+        "done",
+        "error",
+        "cancelled",
+        "expired",
+    }
+
+    items_by_index = {}
+    represented_files = set()
+    next_index = 1
+    for position, raw_item in enumerate(raw_items, start=1):
+        item = raw_item if isinstance(raw_item, dict) else {}
+        try:
+            index = int(item.get("index") or position)
+        except (TypeError, ValueError):
+            index = position
+        if index <= 0 or index in items_by_index:
+            while next_index in items_by_index:
+                next_index += 1
+            index = next_index
+        raw_status = str(item.get("status") or missing_status).strip().lower()
+        status = status_aliases.get(raw_status, raw_status)
+        if status not in allowed_statuses:
+            status = missing_status
+        file_path = str(item.get("file_path") or "")
+        if file_path:
+            represented_files.add(file_path)
+        items_by_index[index] = {
+            "index": index,
+            "label": str(item.get("type_name") or item.get("label") or f"第 {index} 项"),
+            "status": status,
+            "file_path": file_path,
+            "error": str(item.get("error") or ""),
+        }
+
+    for file_number, file_path in enumerate(result_files, start=1):
+        if file_path in represented_files:
             continue
-        th = threading.Thread(
-            target=run_task_worker, args=(task.get("id"),), daemon=True
+        index = 1
+        while index in items_by_index:
+            index += 1
+        items_by_index[index] = {
+            "index": index,
+            "label": f"图片 {file_number}",
+            "status": "done",
+            "file_path": file_path,
+            "error": "",
+        }
+
+    highest_index = max(items_by_index, default=0)
+    total = max(declared_total, highest_index)
+    for index in range(1, total + 1):
+        items_by_index.setdefault(
+            index,
+            {
+                "index": index,
+                "label": f"第 {index} 项",
+                "status": missing_status,
+                "file_path": "",
+                "error": "",
+            },
         )
-        task_threads[task.get("id")] = th
-        th.start()
-        available -= 1
+    return [items_by_index[index] for index in sorted(items_by_index)]
+
+
+def render_task_item_results(task: dict, show_images: bool) -> None:
+    items = build_task_item_views(task)
+    if not items:
+        return
+    status_labels = {
+        "pending": "等待中",
+        "running": "处理中",
+        "done": "成功",
+        "error": "失败",
+        "cancelled": "已取消",
+        "expired": "已中断",
+    }
+    if not show_images:
+        st.caption(
+            "逐项："
+            + " · ".join(
+                f"{item['label']} {status_labels.get(item['status'], item['status'])}"
+                for item in items
+            )
+        )
+        return
+
+    for start in range(0, len(items), 4):
+        columns = st.columns(4)
+        for column, item in zip(columns, items[start : start + 4]):
+            with column:
+                status_label = status_labels.get(item["status"], item["status"])
+                file_path = item.get("file_path", "")
+                if file_path and Path(file_path).exists():
+                    st.image(
+                        file_path,
+                        caption=f"{status_label} · {item['label']}",
+                        width="stretch",
+                    )
+                else:
+                    st.caption(f"{status_label} · {item['label']}")
+                    if item["status"] == "done" and file_path:
+                        st.caption("结果文件暂不可用")
+                if item.get("error"):
+                    st.caption("原因：" + sanitize_task_error(item["error"]))
 
 
 def render_task_center():
     tasks = list_tasks_for_display()
-    records = list_active_history_records()
-    trashed_records = list_trashed_history_records()
-    st.markdown("#### 📚 项目中心概览")
+    records = list_active_history_records(owner_id=get_session_owner_id())
+    trashed_records = list_trashed_history_records(owner_id=get_session_owner_id())
+    st.markdown("#### 📡 任务状态")
     if not tasks and not records and not trashed_records:
-        st.caption("暂无项目")
+        st.caption("当前没有任务")
         return
-    active = [t for t in tasks if t.get("status") in {"queued", "running"}]
+    queued = sum(task.get("status") == "queued" for task in tasks)
+    running = sum(task.get("status") == "running" for task in tasks)
     completed_records = [r for r in records if r.get("status") == "done"]
-    st.caption(
-        f"进行中 {len(active)} · 历史 {len(records)} · 回收站 {len(trashed_records)}"
-    )
-    if active:
-        for task in active[:3]:
-            total = task.get("progress", {}).get("total", 0)
-            done = task.get("progress", {}).get("done", 0)
-            st.caption(
-                f"• {task.get('summary', task.get('type', 'task'))} · {done}/{total}"
-            )
+    if queued or running:
+        st.caption(f"运行中 {running} · 排队中 {queued}")
     elif completed_records:
-        st.caption(f"最近已完成项目 {len(completed_records)} 个")
+        st.caption(f"当前无活动任务 · 已完成 {len(completed_records)}")
     else:
-        st.caption("暂无进行中的任务")
+        st.caption("当前没有活动任务")
+
+
+def show_task_center():
+    st.markdown('<div class="page-title">📡 任务中心</div>', unsafe_allow_html=True)
+    submission_notice = st.session_state.pop("task_submission_notice", "")
+    if submission_notice:
+        st.success(submission_notice)
+    st.caption("提交后的任务会在后台继续执行。你可以随时离开本页并开始新任务，结果完成后会自动归档到项目中心。")
+    if st.button("刷新进度", key="task_center_refresh"):
+        st.rerun()
+    tasks = list_tasks_for_display()
+    active = [task for task in tasks if build_task_center_state(task)["can_cancel"]]
+    terminal = [task for task in tasks if task.get("status") in TASK_TERMINAL_STATUSES]
+    queued = sum(task.get("status") == "queued" for task in active)
+    running = sum(task.get("status") == "running" for task in active)
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("运行中", running)
+    m2.metric("排队中", queued)
+    m3.metric("最近完成", sum(task.get("status") == "done" for task in terminal))
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        if st.button("✨ 新建文字生图", type="primary", width="stretch"):
+            set_nav_page("✨ 文字生图")
+            st.rerun()
+    with c2:
+        if st.button("🎨 新建素材出图", width="stretch"):
+            set_nav_page("🎨 快速出图 / 图片翻译")
+            st.rerun()
+    with c3:
+        if st.button("📚 查看项目结果", width="stretch"):
+            set_nav_page(PROJECT_CENTER_PAGE)
+            st.rerun()
+
+    active_tab, recent_tab = st.tabs(["🚧 进行中与排队", "🕘 最近任务"])
+    with active_tab:
+        if not active:
+            st.info("当前没有运行或排队中的任务。可以直接开始一个新任务。")
+        for task in active:
+            progress = task.get("progress", {}) or {}
+            total = max(1, int(progress.get("total") or 1))
+            done = min(total, int(progress.get("done") or 0))
+            provider = get_provider_by_id((task.get("payload") or {}).get("provider_id", ""))
+            with st.container(border=True):
+                left, right = st.columns([5, 1])
+                with left:
+                    st.markdown(f"**{_task_status_label(task.get('status'))} · {task.get('summary') or task.get('type', '任务')}**")
+                    if task.get("status") == "running":
+                        st.progress(done / total, text=f"进度 {done}/{total}")
+                    else:
+                        st.caption("等待可用执行槽位")
+                    st.caption(f"提供商：{provider.get('name', '未找到')} · 任务 ID：{task.get('id', '')}")
+                    if task.get("item_results"):
+                        render_task_item_results(task, show_images=False)
+                with right:
+                    if st.button("取消", key=f"task_center_cancel_{task.get('id')}", width="stretch"):
+                        cancel_task(task.get("id"))
+                        st.rerun()
+    with recent_tab:
+        if not terminal:
+            st.info("提交过的任务会显示在这里。")
+        for task in terminal[:12]:
+            item_views = build_task_item_views(task)
+            progress = task.get("progress", {}) or {}
+            success_count = sum(item["status"] == "done" for item in item_views)
+            failed_count = sum(item["status"] == "error" for item in item_views)
+            if not item_views:
+                success_count = int(
+                    progress.get("success") or len(task.get("result_files", []) or [])
+                )
+                failed_count = int(
+                    progress.get("failed") or len(task.get("errors", []) or [])
+                )
+            with st.container(border=True):
+                st.caption(f"{_task_status_label(task.get('status'))} · {task.get('summary') or task.get('type', '任务')} · {task.get('updated_at', '')}")
+                if success_count or failed_count:
+                    st.caption(f"结果：成功 {success_count} · 失败 {failed_count}")
+                if task.get("errors"):
+                    st.caption(
+                        "原因：" + format_task_error_summary(task.get("errors"), 1)
+                    )
+                render_task_item_results(task, show_images=True)
+                task_center_state = build_task_center_state(task)
+                if task_center_state["can_retry_failed_items"]:
+                    retryable_items = [
+                        item
+                        for item in task.get("item_results", []) or []
+                        if is_retryable_failed_item(item)
+                    ]
+                    wait_seconds = failed_item_retry_wait_seconds(task)
+                    if wait_seconds:
+                        st.caption(f"上游正在冷却，约 {wait_seconds} 秒后可重试失败项。")
+                    else:
+                        st.caption("冷却已结束，可以仅重试失败项，不会重跑成功图片。")
+                    if st.button(
+                        f"重试失败项 ({len(retryable_items)})",
+                        key=f"task_center_retry_failed_{task.get('id')}",
+                        disabled=bool(wait_seconds),
+                    ):
+                        retry_task, error = retry_failed_task_items(task.get("id"))
+                        if retry_task:
+                            open_submitted_task(retry_task)
+                        else:
+                            st.error(error or "创建重试任务失败")
+
+    show_footer()
 
 
 def set_nav_page(page: str):
     st.session_state["nav_page"] = page
 
 
+def open_submitted_task(task: dict):
+    """Use one post-submit path so every workflow lands in the task center."""
+    st.session_state["task_submission_notice"] = (
+        f"任务已提交并在后台运行：{task.get('id', '')}"
+    )
+    set_nav_page(TASK_CENTER_PAGE)
+    st.rerun()
+
+
 def get_nav_page():
     current = st.session_state.get("nav_page", MAIN_NAV_ITEMS[0])
     if current == "🎨 快速出图":
         current = "🎨 快速出图 / 图片翻译"
-    allowed = set(MAIN_NAV_ITEMS + MANAGEMENT_NAV_ITEMS + [PROJECT_CENTER_PAGE])
+    allowed = set(MAIN_NAV_ITEMS + MANAGEMENT_NAV_ITEMS + [PROJECT_CENTER_PAGE, TASK_CENTER_PAGE])
     if current not in allowed:
         current = MAIN_NAV_ITEMS[0]
     st.session_state["nav_page"] = current
@@ -6465,7 +7897,10 @@ def render_sidebar_nav_section(title: str, items: list, current_page: str):
     next_page = current_page
     for item in items:
         button_type = "primary" if item == current_page else "secondary"
-        if st.button(item, key=f"nav_{title}_{item}", use_container_width=True, type=button_type):
+        if st.button(item, key=f"nav_{title}_{item}", width="stretch", type=button_type):
+            if item != current_page:
+                set_nav_page(item)
+                st.rerun()
             next_page = item
     return next_page
 
@@ -6473,11 +7908,11 @@ def render_sidebar_nav_section(title: str, items: list, current_page: str):
 def render_status_center_content():
     tasks = list_tasks_for_display()
     active_tasks = [task for task in tasks if task.get("status") in {"queued", "running"}]
-    active_records = list_active_history_records()
+    active_records = list_active_history_records(owner_id=get_session_owner_id())
     recent_done = [record for record in active_records if record.get("status") == "done"][:3]
     recent_error = [record for record in active_records if record.get("status") == "error"][:3]
 
-    st.caption(f"进行中 {len(active_tasks)} · 历史 {len(active_records)} · 回收站 {len(list_trashed_history_records())}")
+    st.caption(f"进行中 {len(active_tasks)} · 历史 {len(active_records)} · 回收站 {len(list_trashed_history_records(owner_id=get_session_owner_id()))}")
     if active_tasks:
         st.markdown("**进行中任务**")
         for task in active_tasks[:4]:
@@ -6498,25 +7933,25 @@ def render_status_center_content():
         for record in recent_error:
             st.caption(f"• {record.get('summary', record.get('task_type', '任务'))}")
 
-    if st.button("打开完整项目中心", key="status_center_open_project", use_container_width=True):
+    if st.button("打开完整项目中心", key="status_center_open_project", width="stretch"):
         set_nav_page(PROJECT_CENTER_PAGE)
         st.rerun()
 
 
 def render_global_toolbar(current_page: str):
-    left, mid, right = st.columns([6, 1.4, 1.6])
+    left, mid, right = st.columns([5, 2, 2])
     with left:
         page_label = current_page if current_page != PROJECT_CENTER_PAGE else "📡 状态中心 / 项目中心"
         st.caption(f"当前区域: {page_label}")
     with mid:
         if hasattr(st, "popover"):
-            with st.popover("📡 状态中心", use_container_width=True):
+            with st.popover("📡 状态中心", width="stretch"):
                 render_status_center_content()
-        elif st.button("📡 状态中心", key="status_center_fallback", use_container_width=True):
+        elif st.button("📡 状态中心", key="status_center_fallback", width="stretch"):
             set_nav_page(PROJECT_CENTER_PAGE)
             st.rerun()
     with right:
-        if st.button("📚 项目中心", key="toolbar_project_center", use_container_width=True):
+        if st.button("📚 项目中心", key="toolbar_project_center", width="stretch"):
             set_nav_page(PROJECT_CENTER_PAGE)
             st.rerun()
 
@@ -6524,6 +7959,7 @@ def render_global_toolbar(current_page: str):
 def _record_status_label(status: str):
     return {
         "done": "🟢 已完成",
+        "partial": "🟠 部分完成",
         "error": "🔴 失败",
         "cancelled": "⚫ 已取消",
         "expired": "🟠 已过期",
@@ -6535,6 +7971,7 @@ def _task_status_label(status: str):
         "queued": "🟡 排队中",
         "running": "🔵 执行中",
         "done": "🟢 已完成",
+        "partial": "🟠 部分完成",
         "error": "🔴 失败",
         "cancelled": "⚫ 已取消",
         "expired": "🟠 已过期",
@@ -6571,20 +8008,29 @@ def render_history_record_block(record: dict, in_trash: bool = False):
         if file_summary["missing_count"]:
             st.warning(f"检测到 {file_summary['missing_count']} 个文件缺失，建议到文件管理页检查。")
         if record.get("errors"):
-            st.warning("; ".join(record.get("errors", [])[:3]))
+            st.warning(format_task_error_summary(record.get("errors"), 3))
 
         if zip_path and Path(zip_path).exists() and not in_trash:
-            try:
-                zip_bytes = Path(zip_path).read_bytes()
-                st.download_button(
-                    "⬇️ 下载本地 ZIP",
-                    data=zip_bytes,
-                    file_name=Path(zip_path).name,
-                    mime="application/zip",
-                    key=f"hist_zip_{record.get('task_id')}",
-                )
-            except Exception:
-                st.caption("ZIP 文件暂时不可读取")
+            zip_prep_key = f"zipprep_{record.get('task_id')}"
+            if not st.session_state.get(zip_prep_key):
+                if st.button(
+                    "📦 准备下载 ZIP",
+                    key=f"hist_zip_prep_{record.get('task_id')}",
+                ):
+                    st.session_state[zip_prep_key] = True
+                    st.rerun()
+            else:
+                try:
+                    zip_bytes = Path(zip_path).read_bytes()
+                    st.download_button(
+                        "⬇️ 下载本地 ZIP",
+                        data=zip_bytes,
+                        file_name=Path(zip_path).name,
+                        mime="application/zip",
+                        key=f"hist_zip_{record.get('task_id')}",
+                    )
+                except Exception:
+                    st.caption("ZIP 文件暂时不可读取")
 
         if in_trash:
             column_weights = [1, 1, 1] if runtime_supports_local_file_access() else [1, 1]
@@ -6593,6 +8039,9 @@ def render_history_record_block(record: dict, in_trash: bool = False):
             purge_key = f"purge_hist_{record.get('task_id')}"
             with columns[0]:
                 if st.button("♻️ 恢复", key=f"{restore_key}_trigger"):
+                    if not record_owned_by_session(record):
+                        st.warning("该记录属于其他会话，无法操作")
+                        st.stop()
                     restored = restore_history_record(record.get("task_id"))
                     if restored:
                         st.success("已恢复到历史项目")
@@ -6616,6 +8065,9 @@ def render_history_record_block(record: dict, in_trash: bool = False):
                 "彻底删除会移除该记录及其本地文件，执行后不可恢复。",
                 confirm_label="确认彻底删除",
             ):
+                if not record_owned_by_session(record):
+                    st.warning("该记录属于其他会话，无法操作")
+                    st.stop()
                 purged_record = purge_trashed_history_record(record.get("task_id"))
                 if purged_record:
                     st.success("已彻底删除")
@@ -6643,8 +8095,7 @@ def render_history_record_block(record: dict, in_trash: bool = False):
                         record.get("task_id")
                     )
                     if relaunched_task:
-                        st.success(f"已重新发起：{relaunched_task.get('id')}")
-                        st.rerun()
+                        open_submitted_task(relaunched_task)
                     else:
                         st.error(relaunch_err or "重新发起失败")
             with trash_col:
@@ -6658,6 +8109,9 @@ def render_history_record_block(record: dict, in_trash: bool = False):
                 "删除后会进入回收站，可在回收站恢复；本地文件会先保留。",
                 confirm_label="确认移入回收站",
             ):
+                if not record_owned_by_session(record):
+                    st.warning("该记录属于其他会话，无法操作")
+                    st.stop()
                 trashed = trash_history_record(record.get("task_id"))
                 if trashed:
                     st.success("已移入回收站")
@@ -6667,7 +8121,8 @@ def render_history_record_block(record: dict, in_trash: bool = False):
             st.caption(f"可重发素材: {len(record.get('input_file_paths', []))} 个")
 
         if files:
-            preview_cols = st.columns(min(4, len(files)))
+            # 历史项目也使用固定预览网格，避免一张大图撑满展开区域。
+            preview_cols = st.columns(4)
             for idx, file_path in enumerate(files[:4]):
                 p = Path(file_path)
                 if p.exists():
@@ -6676,25 +8131,28 @@ def render_history_record_block(record: dict, in_trash: bool = False):
                             st.image(
                                 Image.open(p),
                                 caption=p.name,
-                                use_container_width=True,
+                                width="stretch",
                             )
                         except Exception:
                             st.caption(p.name)
 
         if titles:
             st.markdown("##### 标题内容")
-            st.code("\n".join(titles), language="text")
+            st.code(format_titles_text(titles), language="text")
 
 
 def render_file_management_tab(records: list):
     if startup_notice := st.session_state.pop("startup_maintenance_notice", ""):
         st.success(startup_notice)
     if not records:
-        st.info("暂无可管理的项目文件。")
+        st.info("还没有可管理的项目文件。完成一次出图后，结果文件会出现在这里。")
     orphan_dirs = find_orphan_project_dirs(records)
-    total_size = sum(summarize_record_files(record)["size_bytes"] for record in records)
+    summaries = {
+        id(record): summarize_record_files(record) for record in records
+    }
+    total_size = sum(s["size_bytes"] for s in summaries.values())
     missing_records = [
-        record for record in records if summarize_record_files(record)["missing_count"]
+        record for record in records if summaries[id(record)]["missing_count"]
     ]
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("项目数", len(records))
@@ -6751,7 +8209,7 @@ def render_file_management_tab(records: list):
                         st.error("删除失败，请检查目录权限。")
 
     for record in records:
-        summary = summarize_record_files(record)
+        summary = summaries.get(id(record)) or summarize_record_files(record)
         title = record.get("summary") or record.get("task_type", "任务")
         rebuild_zip_key = f"rebuild_zip_{record.get('task_id')}"
         with st.expander(
@@ -6797,8 +8255,8 @@ def show_project_center():
     )
 
     tasks = list_tasks_for_display()
-    active_records = list_active_history_records()
-    trashed_records = list_trashed_history_records()
+    active_records = list_active_history_records(owner_id=get_session_owner_id())
+    trashed_records = list_trashed_history_records(owner_id=get_session_owner_id())
     active_tasks = [t for t in tasks if t.get("status") in {"queued", "running"}]
     completed_records = [r for r in active_records if r.get("status") == "done"]
 
@@ -6827,7 +8285,7 @@ def show_project_center():
                 if provider:
                     st.caption(f"使用提供商: {provider.get('name', '')}")
                 if task.get("errors"):
-                    st.warning("; ".join(task.get("errors", [])[:3]))
+                    st.warning(format_task_error_summary(task.get("errors"), 3))
                 if st.button(
                     f"取消任务 {task.get('id')}", key=f"project_cancel_{task.get('id')}"
                 ):
@@ -6851,7 +8309,7 @@ def show_project_center():
                 f"将把 {len(completed_records)} 条已完成项目移入回收站，失败和取消项目不会受影响。",
                 confirm_label="确认清理",
             ):
-                removed_tasks = clear_terminal_tasks()
+                removed_tasks = clear_completed_tasks()
                 moved_records = len(trash_history_records_by_status({"done"}))
                 st.session_state["project_center_notice"] = (
                     f"已清理 {removed_tasks} 条队列记录，并将 {moved_records} 条已完成项目移入回收站。"
@@ -6860,7 +8318,7 @@ def show_project_center():
         if notice := st.session_state.pop("project_center_notice", ""):
             st.success(notice)
         if not active_records:
-            st.info("暂无历史项目。任务完成或失败后会自动出现在这里。")
+            st.info("还没有历史项目。出图任务完成或失败后会自动出现在这里，可随时回来下载结果。")
         else:
             render_batch_record_actions(active_records, mode="history")
         for record in active_records:
@@ -6917,6 +8375,59 @@ def show_project_center():
 
 
 # ==================== 智能组图页面 ====================
+def consume_combo_generation_request(provider, model_key, state=None):
+    state = st.session_state if state is None else state
+    if not state.get("combo_generating"):
+        return None, ""
+
+    state["combo_generating"] = False
+    reqs = state.get("combo_reqs", [])
+    combo_images = state.get("combo_images", [])
+    image_paths = []
+    upload_dir = DATA_DIR / "task_uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    for idx, img in enumerate(combo_images):
+        filename = f"combo_{int(time.time())}_{idx + 1}.png"
+        path = upload_dir / filename
+        try:
+            img.save(path, format="PNG")
+            image_paths.append(str(path))
+        except Exception:
+            continue
+
+    default_title_model = resolve_default_title_vision_model(
+        provider.get("title_model") or provider.get("vision_model", "")
+    )
+    return create_task(
+        "combo",
+        {
+            "provider_id": provider.get("id", ""),
+            "anchor": state.get("combo_anchor"),
+            "reqs": reqs,
+            "image_paths": image_paths,
+            "total": len(reqs),
+            "image_language": state.get(
+                "combo_image_language", DEFAULT_TARGET_LANGUAGE
+            ),
+            "model": state.get("combo_output_model", model_key),
+            "aspect": state.get("combo_aspect", "1:1"),
+            "size": state.get("combo_size", "1K"),
+            "thinking_level": state.get("combo_thinking_level", "high"),
+            "enable_title": state.get("combo_enable_title", False),
+            "title_info": state.get("combo_title_info", ""),
+            "template_prompt": "",
+            "title_language": state.get(
+                "combo_title_language", DEFAULT_TARGET_LANGUAGE
+            ),
+            "title_model": state.get("combo_title_vision_model", default_title_model),
+            "vision_model": state.get(
+                "combo_title_vision_model", default_title_model
+            ),
+            "summary": f"智能组图任务 · {len(reqs)}张",
+        },
+    )
+
+
 def show_combo_page():
     st.markdown(
         '<div class="page-title">🚀 智能组图工作流</div>', unsafe_allow_html=True
@@ -6942,7 +8453,7 @@ def show_combo_page():
         if st.session_state.combo_anchor:
             a = st.session_state.combo_anchor
             st.markdown(
-                f'<div class="success-card" style="font-size:13px"><strong>🎯 {a.get("product_name_zh", "商品")}</strong><br><span style="color:#64748b">品类: {a.get("primary_category", "未识别")}</span></div>',
+                f'<div class="success-card" style="font-size:13px"><strong>🎯 {esc(a.get("product_name_zh", "商品"))}</strong><br><span style="color:#64748b">品类: {esc(a.get("primary_category", "未识别"))}</span></div>',
                 unsafe_allow_html=True,
             )
         else:
@@ -6968,7 +8479,7 @@ def show_combo_page():
             ),
         )
 
-        if st.button("🔄 开始新任务", type="primary", use_container_width=True):
+        if st.button("🔄 开始新任务", type="primary", width="stretch"):
             # 重置状态
             st.session_state.combo_anchor = None
             st.session_state.combo_reqs = []
@@ -7007,16 +8518,18 @@ def show_combo_page():
             label_visibility="collapsed",
             key="combo_upload_unique",
         )
+        st.caption("支持 PNG / JPG / WEBP，可多选。上传后系统会先分析商品，再按所选类型批量出图。")
 
         if files:
             images = []
             display_count = min(len(files), 6)
-            cols = st.columns(display_count)
+            # 固定预览网格，单张上传不会占满整个内容区。
+            cols = st.columns(min(max(display_count, 3), 6))
             for i, f in enumerate(files[:display_count]):
                 img = Image.open(f).convert("RGB")
                 images.append(img)
                 with cols[i]:
-                    st.image(img, caption=f"图{i + 1}", use_container_width=True)
+                    st.image(img, caption=f"图{i + 1}", width="stretch")
             for f in files[display_count:MAX_IMAGES]:
                 images.append(Image.open(f).convert("RGB"))
             st.session_state.combo_images = images
@@ -7048,7 +8561,7 @@ def show_combo_page():
         if st.button(
             "🔍 AI分析商品",
             type="primary",
-            use_container_width=True,
+            width="stretch",
             disabled=btn_disabled,
         ):
             with st.spinner("🤖 AI正在分析..."):
@@ -7105,7 +8618,7 @@ def show_combo_page():
             if st.button(
                 "📝 AI生成图需文案",
                 type="primary",
-                use_container_width=True,
+                width="stretch",
                 disabled=not can_generate,
             ):
                 with st.spinner("🤖 生成中..."):
@@ -7214,7 +8727,7 @@ def show_combo_page():
                 st.success("✅ 全部通过合规检测")
 
             if st.button(
-                "🚀 确认并开始生成图片", type="primary", use_container_width=True
+                "🚀 确认并开始出图", type="primary", width="stretch"
             ):
                 st.session_state.combo_generating = True
                 st.rerun()
@@ -7229,82 +8742,71 @@ def show_combo_page():
             if st.session_state.get("combo_enable_title") and st.session_state.get(
                 "combo_title_info"
             ):
-                target_label = get_target_language(
-                    st.session_state.get(
-                        "combo_title_language", DEFAULT_TARGET_LANGUAGE
-                    )
-                )["label"]
-                task_desc += (
-                    " + **纯英文标题**"
-                    if st.session_state.get(
-                        "combo_title_language", DEFAULT_TARGET_LANGUAGE
-                    )
-                    == "en"
-                    else f" + **英文 + {target_label} 标题**"
-                )
+                task_desc += " + **TEMU 三语标题（中/西/法）**"
             st.markdown(task_desc)
-            if st.button("🚀 确认开始生成", type="primary", use_container_width=True):
-                template_key = st.session_state.get("combo_title_template", "default")
-                template_prompt = get_title_template_prompt(template_key)
-                combo_images = st.session_state.get("combo_images", [])
-                image_paths = []
-                upload_dir = DATA_DIR / "task_uploads"
-                upload_dir.mkdir(parents=True, exist_ok=True)
-                for idx, img in enumerate(combo_images):
-                    filename = f"combo_{int(time.time())}_{idx + 1}.png"
-                    path = upload_dir / filename
-                    try:
-                        img.save(path, format="PNG")
-                        image_paths.append(str(path))
-                    except Exception:
-                        continue
-                task, err = create_task(
-                    "combo",
-                    {
-                        "provider_id": provider.get("id", ""),
-                        "anchor": st.session_state.combo_anchor,
-                        "reqs": reqs,
-                        "image_paths": image_paths,
-                        "total": len(reqs),
-                        "image_language": st.session_state.get(
-                            "combo_image_language", DEFAULT_TARGET_LANGUAGE
-                        ),
-                        "model": st.session_state.get("combo_output_model", model_key),
-                        "aspect": st.session_state.get("combo_aspect", "1:1"),
-                        "size": st.session_state.get("combo_size", "1K"),
-                        "thinking_level": st.session_state.get(
-                            "combo_thinking_level", "high"
-                        ),
-                        "enable_title": st.session_state.get(
-                            "combo_enable_title", False
-                        ),
-                        "title_info": st.session_state.get("combo_title_info", ""),
-                        "template_prompt": template_prompt,
-                        "title_language": st.session_state.get(
-                            "combo_title_language", DEFAULT_TARGET_LANGUAGE
-                        ),
-                        "title_model": st.session_state.get(
-                            "combo_title_vision_model",
-                            resolve_default_title_vision_model(
-                                provider.get("title_model")
-                                or provider.get("vision_model", "")
-                            ),
-                        ),
-                        "vision_model": st.session_state.get(
-                            "combo_title_vision_model",
-                            resolve_default_title_vision_model(
-                                provider.get("title_model")
-                                or provider.get("vision_model", "")
-                            ),
-                        ),
-                        "summary": f"智能组图任务 · {len(reqs)}张",
-                    },
-                )
-                if task:
-                    schedule_task_workers()
-                    st.success(f"✅ 已加入任务中心：{task['id']}")
-                else:
-                    st.error(err)
+            if st.button("🚀 确认开始生成", type="primary", width="stretch"):
+                st.session_state.combo_generating = True
+                st.rerun()
+        else:
+            task, err = consume_combo_generation_request(provider, model_key)
+            if task:
+                open_submitted_task(task)
+            else:
+                st.error(err or "任务提交失败，请重试。")
+
+    show_footer()
+
+
+# ==================== 快速出图页面 ====================
+def show_text_to_image_page():
+    st.markdown('<div class="page-title">✨ 文字生图</div>', unsafe_allow_html=True)
+
+    s = get_settings()
+    provider = get_active_provider()
+    if not provider or not provider.get("api_key"):
+        st.error("⚠️ 未配置可用的提供商，请先在「提供商设置」中添加")
+        return
+
+    st.caption("输入提示词后直接生成图片，无需上传商品素材。")
+    prompt = st.text_area(
+        "图片提示词",
+        key="text_to_image_prompt",
+        max_chars=3000,
+        height=180,
+        placeholder="例如：一只戴着红色围巾的橘猫，坐在雨后的东京街头，电影感灯光，高细节",
+    )
+    st.caption("建议说明主体、场景、构图、光线、风格，以及图片中需要出现的文字。")
+
+    output_settings = render_output_settings_panel("text_to_image", provider, s)
+    model = output_settings["model"]
+    aspect = output_settings["aspect"]
+    size = output_settings["resolution"]
+    thinking_level = output_settings["thinking_level"]
+
+    generate = st.button(
+        "✨ 提交生成任务",
+        type="primary",
+        width="stretch",
+        disabled=not prompt.strip(),
+    )
+    if generate:
+        task, error = create_task(
+            "text_to_image",
+            {
+                "provider_id": provider.get("id", ""),
+                "prompt": prompt.strip(),
+                "model": model,
+                "aspect": aspect,
+                "size": size,
+                "thinking_level": thinking_level,
+                "total": 1,
+                "summary": f"文字生图任务 · {prompt.strip()[:28]}",
+            },
+        )
+        if task:
+            open_submitted_task(task)
+        else:
+            st.error(error)
 
     show_footer()
 
@@ -7340,7 +8842,7 @@ def show_smart_page():
             ),
         )
 
-        if st.button("🔄 开始新任务", type="primary", use_container_width=True):
+        if st.button("🔄 开始新任务", type="primary", width="stretch"):
             st.session_state.smart_results = []
             st.session_state.smart_errors = []
             st.session_state.smart_titles = []
@@ -7375,6 +8877,7 @@ def show_smart_page():
         label_visibility="collapsed",
         key="smart_upload_unique",
     )
+    st.caption("支持 PNG / JPG / WEBP，可多选。上传后选择出图类型即可开始。")
 
     images = []
     if files:
@@ -7470,11 +8973,10 @@ def show_smart_page():
     if st.button(
         "🚀 开始翻译" if workflow_mode == "translate" else "🚀 开始生成",
         type="primary",
-        use_container_width=True,
+        width="stretch",
         disabled=not can_gen,
     ):
         image_paths = _save_uploaded_images(files or [], f"smart_{int(time.time())}")
-        template_prompt = get_title_template_prompt(title_template)
         task, err = create_task(
             "translate" if workflow_mode == "translate" else "smart",
             {
@@ -7492,7 +8994,7 @@ def show_smart_page():
                 "enable_title": enable_title,
                 "title_info": title_info,
                 "title_template": title_template,
-                "template_prompt": template_prompt,
+                "template_prompt": "",
                 "title_language": title_language,
                 "title_model": title_vision_model,
                 "vision_model": title_vision_model,
@@ -7506,8 +9008,7 @@ def show_smart_page():
             },
         )
         if task:
-            schedule_task_workers()
-            st.success(f"✅ 已加入任务中心：{task['id']}")
+            open_submitted_task(task)
         else:
             st.error(err)
 
@@ -7531,51 +9032,39 @@ def show_title_page():
     title_model = provider.get("title_model", "")
     vision_model = provider.get("vision_model", "")
 
-    title_templates = get_title_templates()
-
     st.markdown(
         f"""<div class="help-section">
-        <h4>🎯 输出规则</h4>
+        <h4>🎯 输出规则（TEMU 三语标题）</h4>
         <ul>
-            <li><b>默认英文优先</b> - 可输出纯英文，或英文 + 所选目标语言</li>
-            <li><b>英文字符</b> - {MIN_TITLE_EN_CHARS}-{MAX_TITLE_EN_CHARS}字符</li>
-            <li><b>三种策略</b> - 搜索优化/转化优化/差异化</li>
+            <li><b>固定三语</b> - 每次输出 🇨🇳 中文 / 🇪🇸 Español / 🇫🇷 Français 各一条</li>
+            <li><b>字符区间</b> - 中文 {TITLE_CHAR_RANGES["zh"][0]}-{TITLE_CHAR_RANGES["zh"][1]} 字符；西语/法语 {TITLE_CHAR_RANGES["es"][0]}-{TITLE_CHAR_RANGES["es"][1]} 字符（含空格）</li>
+            <li><b>中文回译</b> - 西语/法语标题附中文回译，方便核对</li>
+            <li><b>合规自查</b> - 按 TEMU 三层合规框架幕后自查后输出</li>
         </ul>
     </div>""",
         unsafe_allow_html=True,
     )
 
-    title_language = render_target_language_selector(
-        "standalone_title",
-        "target_language",
-        "🌐 标题目标语言",
-        "标题默认优先英文；若选择英语，则输出纯英文标题。",
-    )
+    title_language = DEFAULT_TARGET_LANGUAGE  # 三语标题固定输出 zh/es/fr
 
     st.markdown("### 🧠 标题生成模型")
-    default_title_vision_model = resolve_default_title_vision_model(
+    default_title_vision_model = title_model or vision_model or resolve_default_title_vision_model(
         title_model or vision_model
     )
-    selected_title_vision_model = st.selectbox(
+    selected_title_vision_model = render_provider_model_select(
         "选择用于识图/生成标题的模型",
-        options=TITLE_VISION_MODEL_ORDER,
-        index=TITLE_VISION_MODEL_ORDER.index(default_title_vision_model),
-        format_func=format_title_vision_model,
+        provider,
+        "vision",
+        default_title_vision_model,
         key="standalone_title_vision_model",
-        help="标题生成一般用能识图的模型即可，GPT/Gemini/Grok 均可选择。"
-        "注意：模型需与当前提供商的协议匹配（OpenAI 协议提供商选 GPT/Grok 系列，"
-        "Gemini 协议提供商选 Gemini 系列），选错会在生成时报错。",
+        allow_unset=False,
     )
+    st.caption("模型列表优先来自当前提供商已获取的上游目录。")
     st.caption(
         f"ℹ️ 当前提供商协议：{provider.get('provider_type', 'gemini')}；"
         f"提供商默认配置：文字生成模型 {title_model or '未配置'} · 图片理解模型 {vision_model or '未配置'}"
     )
-    if title_language == "en":
-        st.caption("当前输出: 🇺🇸 纯英文标题")
-    else:
-        st.caption(
-            f"当前输出: 🇺🇸 English + {get_title_language_caption(title_language)}"
-        )
+    st.caption("当前输出: 🇨🇳 中文 + 🇪🇸 Español + 🇫🇷 Français（TEMU 三语标题）")
 
     # 输入模式
     st.markdown("### 📥 输入方式")
@@ -7598,6 +9087,7 @@ def show_title_page():
             label_visibility="collapsed",
             key="title_image_upload",
         )
+        st.caption("支持 PNG / JPG / WEBP，可多选。AI 会先识别图中商品信息，再进行标题生成。")
 
         if title_files:
             cols = st.columns(min(len(title_files), 5))
@@ -7621,47 +9111,8 @@ def show_title_page():
         if product_info:
             st.caption(f"已输入 {len(product_info)}/{MAX_TITLE_INFO_CHARS} 字符")
 
-    st.markdown("---")
-    st.markdown("### 📋 选择标题模板")
-
-    enabled_templates, template_options, template_names = (
-        build_title_template_selector_options(
-            input_mode=input_mode, include_custom=(input_mode != "🖼️ 图片分析")
-        )
-    )
-
-    default_idx = 0
-    if input_mode == "🖼️ 图片分析" and "image_analysis" in template_options:
-        default_idx = 0
-
-    selected_template = st.selectbox(
-        "模板",
-        options=template_options,
-        index=default_idx,
-        format_func=lambda x: template_names.get(x, x),
-        key="title_template_select",
-        label_visibility="collapsed",
-    )
-
-    if selected_template == "custom":
-        st.markdown("#### ✏️ 自定义提示词")
-        custom_prompt = st.text_area(
-            "提示词 ({product_info} 为占位符，可选 {target_language_name})",
-            height=200,
-            key="custom_title_prompt",
-            placeholder="Generate titles in English or English plus {target_language_name} for: {product_info}",
-        )
-        final_prompt = (
-            custom_prompt
-            if custom_prompt
-            else DEFAULT_TITLE_TEMPLATES["default"]["prompt"]
-        )
-    else:
-        template_info = enabled_templates.get(selected_template, {})
-        st.info(f"📝 {template_info.get('desc', '')}")
-        final_prompt = template_info.get(
-            "prompt", DEFAULT_TITLE_TEMPLATES["default"]["prompt"]
-        )
+    final_prompt = ""
+    st.caption("标题策略：内置 TEMU 三语生成与合规自查")
 
     # 生成按钮
     can_generate = False
@@ -7677,7 +9128,7 @@ def show_title_page():
     if st.button(
         "🚀 生成标题",
         type="primary",
-        use_container_width=True,
+        width="stretch",
         disabled=not can_generate,
     ):
         image_paths = _save_uploaded_images(
@@ -7693,12 +9144,11 @@ def show_title_page():
                 "image_paths": image_paths,
                 "title_model": selected_title_vision_model,
                 "vision_model": selected_title_vision_model,
-                "summary": f"标题任务 · {get_target_language(title_language)['label']}",
+                "summary": "标题任务 · TEMU 三语(中/西/法)",
             },
         )
         if task:
-            schedule_task_workers()
-            st.success(f"✅ 已加入任务中心：{task['id']}")
+            open_submitted_task(task)
         else:
             st.error(err)
 
@@ -7707,11 +9157,10 @@ def show_title_page():
 
 # ==================== 主应用 ====================
 def main_app():
-    schedule_task_workers()
     st.session_state["_footer_rendered"] = False
     current_page = get_nav_page()
     with st.sidebar:
-        st.markdown(f"### 🍌 {APP_NAME}")
+        st.markdown(TULITE_LOGO_HTML, unsafe_allow_html=True)
         st.markdown("---")
         render_demo_admin_panel()
         if demo_mode_enabled():
@@ -7725,20 +9174,33 @@ def main_app():
         st.markdown("---")
         render_task_center()
 
-        if st.button("🚪 退出", use_container_width=True):
+        if st.button("🚪 退出", width="stretch"):
             for k in list(st.session_state.keys()):
                 del st.session_state[k]
             st.rerun()
 
     set_nav_page(current_page)
+    if demo_mode_enabled() and SERVER_MODE:
+        if not st.session_state.get("_demo_server_warned"):
+            logger.warning(
+                "XIAOBAITU_DEMO_MODE 在 server 模式下开启：演示面板对所有访问者可见，生产环境请关闭"
+            )
+            st.session_state["_demo_server_warned"] = True
+        st.warning(
+            "⚠️ 演示模式（XIAOBAITU_DEMO_MODE）已在服务器环境开启：演示管理面板对所有访问者可见，生产环境请设置 XIAOBAITU_DEMO_MODE=0。"
+        )
     render_global_toolbar(current_page)
 
     if current_page == "🚀 智能组图":
         show_combo_page()
+    elif current_page == "✨ 文字生图":
+        show_text_to_image_page()
     elif current_page == "🎨 快速出图 / 图片翻译":
         show_smart_page()
     elif current_page == "🏷️ 标题生成":
         show_title_page()
+    elif current_page == TASK_CENTER_PAGE:
+        show_task_center()
     elif current_page == PROJECT_CENTER_PAGE:
         show_project_center()
     elif current_page == "🧩 模板库":
@@ -7750,17 +9212,64 @@ def main_app():
 
     show_footer()
 
+def require_access_password() -> None:
+    """Require authentication, and fail closed for server deployments."""
+    expected = os.getenv("APP_ACCESS_PASSWORD", "")
+    if not expected:
+        if SERVER_MODE:
+            st.error(
+                "服务器模式缺少 APP_ACCESS_PASSWORD，已停止访问。"
+                "请设置高强度访问口令后重启服务。"
+            )
+            st.stop()
+        return
+    if st.session_state.get("auth_ok") is True:
+        return
+    _, mid, _ = st.columns([1, 1.2, 1])
+    with mid:
+        st.markdown(
+            """
+<div style="border:1px solid #e2e8f0;border-radius:16px;background:#f8fafc;
+            padding:22px 24px 6px 24px;margin-top:14vh;text-align:center;">
+"""
+            + TULITE_LOGO_HTML.replace(
+                'display:flex;align-items:center;', "display:flex;align-items:center;justify-content:center;"
+            )
+            + """
+  <div style="font-size:13px;color:#64748B;margin:2px 0 4px 0;">输入访问口令以继续</div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+        pwd = st.text_input(
+            "访问口令",
+            type="password",
+            key="_access_pwd_input",
+            label_visibility="collapsed",
+            placeholder="访问口令",
+        )
+        if st.button("进入 TuLite", width="stretch", type="primary"):
+            if hmac.compare_digest(str(pwd or ""), expected):
+                st.session_state["auth_ok"] = True
+                st.rerun()
+            else:
+                st.error("口令不正确，请重试。")
+    st.stop()
+
 
 # ==================== 主入口 ====================
 def main():
     st.set_page_config(
-        page_title=APP_NAME,
+        page_title=BRAND_TITLE,
         page_icon="🍌",
         layout="wide",
         initial_sidebar_state="expanded",
     )
     apply_style()
     apply_proxy_settings()
+    if os.getenv("TULITE_BOOTSTRAP_SUPERVISOR", "") != "1":
+        ensure_task_supervisor()
+    require_access_password()
     init_session()
 
     main_app()

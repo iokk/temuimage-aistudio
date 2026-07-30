@@ -17,6 +17,13 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements-web.txt
 
 COPY app.py .
+COPY task_engine.py .
+COPY task_store.py .
+COPY task_status.py .
+COPY run_tulite.py .
+COPY provider_acceptance.py .
+COPY scripts/verify_provider.py ./scripts/verify_provider.py
+COPY .streamlit/ ./.streamlit/
 
 ENV APP_RUNTIME=server
 ENV ECOMMERCE_WORKBENCH_DATA_DIR=/app/data
@@ -30,4 +37,4 @@ EXPOSE 8501
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl --fail http://localhost:8501/_stcore/health || exit 1
 
-ENTRYPOINT ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true", "--browser.gatherUsageStats=false"]
+ENTRYPOINT ["python", "run_tulite.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true", "--browser.gatherUsageStats=false"]
