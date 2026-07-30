@@ -178,6 +178,7 @@ INSTANCE_FILE = DATA_DIR / "instance.json"
 
 KEYCHAIN_SERVICE = "ecommerce-image-workbench"
 MAX_TASK_QUEUE = 5
+MAX_HISTORY_RECORDS = 300
 MAX_ACTIVE_TASKS = 2
 HISTORY_RECORD_ACTIVE = "active"
 HISTORY_RECORD_TRASHED = "trashed"
@@ -2369,9 +2370,29 @@ def _record_task_history(task: dict, result: dict):
 
     records = [r for r in data.get("records", []) if r.get("task_id") != task_id]
     records.append(manifest)
+    pruned_records = []
+    # Only purge records the user already moved to trash. Active project history
+    # is durable user data even when the soft history limit is exceeded.
+    if len(records) > MAX_HISTORY_RECORDS:
+        overflow = len(records) - MAX_HISTORY_RECORDS
+        pruned_records = [
+            candidate
+            for candidate in sorted(records, key=_history_sort_key)
+            if (
+                candidate.get("record_state") or HISTORY_RECORD_ACTIVE
+            )
+            == HISTORY_RECORD_TRASHED
+            and candidate.get("task_id") != task_id
+        ][:overflow]
+        removed_ids = {candidate.get("task_id") for candidate in pruned_records}
+        records = [r for r in records if r.get("task_id") not in removed_ids]
     data["records"] = records
     if not save_history_data(data):
         return None
+    for candidate in pruned_records:
+        candidate_dir = candidate.get("artifact_dir")
+        if candidate_dir:
+            shutil.rmtree(candidate_dir, ignore_errors=True)
     if persisted_task:
         TASK_REPOSITORY.update(
             task_id,
@@ -9212,6 +9233,7 @@ def main_app():
 
     show_footer()
 
+
 def require_access_password() -> None:
     """Require authentication, and fail closed for server deployments."""
     expected = os.getenv("APP_ACCESS_PASSWORD", "")
@@ -9266,10 +9288,10 @@ def main():
         initial_sidebar_state="expanded",
     )
     apply_style()
+    require_access_password()
     apply_proxy_settings()
     if os.getenv("TULITE_BOOTSTRAP_SUPERVISOR", "") != "1":
         ensure_task_supervisor()
-    require_access_password()
     init_session()
 
     main_app()

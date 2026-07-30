@@ -508,6 +508,97 @@ class TaskHistoryArchivingTests(unittest.TestCase):
         self.assertEqual(len(saved_records), existing_record_count + 1)
         self.assertIn("existing-000", {item["task_id"] for item in saved_records})
 
+    def test_archiving_prunes_trashed_history_only_after_index_commit(self):
+        trashed_directory = self.directory / "oldest-trashed-project"
+        trashed_directory.mkdir()
+        marker = trashed_directory / "remove-after-commit.txt"
+        marker.write_text("trash", encoding="utf-8")
+        records = [
+            {
+                "task_id": f"existing-{index:03d}",
+                "status": "done",
+                "record_state": (
+                    app.HISTORY_RECORD_TRASHED
+                    if index == 0
+                    else app.HISTORY_RECORD_ACTIVE
+                ),
+                "completed_at": f"{index:04d}",
+                "artifact_dir": str(trashed_directory) if index == 0 else "",
+            }
+            for index in range(app.MAX_HISTORY_RECORDS)
+        ]
+        saved_data = []
+
+        def save_history(data):
+            self.assertTrue(marker.exists(), "artifacts must survive until index commit")
+            saved_data.append(data)
+            return True
+
+        with (
+            patch.object(app, "TASK_REPOSITORY", self.repository),
+            patch.object(app, "get_history_data", return_value={"records": records}),
+            patch.object(
+                app,
+                "_history_record_dir",
+                return_value=self.directory / "new-project-history",
+            ),
+            patch.object(
+                app, "_copy_input_files_for_history", return_value=({}, [])
+            ),
+            patch.object(app, "_write_project_text_files"),
+            patch.object(app, "_write_history_zip", return_value=""),
+            patch.object(app, "save_history_data", side_effect=save_history),
+        ):
+            manifest = app.record_task_history(self.task, {})
+
+        self.assertIsNotNone(manifest)
+        self.assertFalse(marker.exists())
+        self.assertEqual(len(saved_data[0]["records"]), app.MAX_HISTORY_RECORDS)
+        self.assertNotIn(
+            "existing-000",
+            {item["task_id"] for item in saved_data[0]["records"]},
+        )
+
+    def test_failed_history_commit_preserves_prunable_trashed_artifacts(self):
+        trashed_directory = self.directory / "failed-commit-trash"
+        trashed_directory.mkdir()
+        marker = trashed_directory / "keep-on-failure.txt"
+        marker.write_text("trash", encoding="utf-8")
+        records = [
+            {
+                "task_id": f"existing-{index:03d}",
+                "status": "done",
+                "record_state": (
+                    app.HISTORY_RECORD_TRASHED
+                    if index == 0
+                    else app.HISTORY_RECORD_ACTIVE
+                ),
+                "completed_at": f"{index:04d}",
+                "artifact_dir": str(trashed_directory) if index == 0 else "",
+            }
+            for index in range(app.MAX_HISTORY_RECORDS)
+        ]
+
+        with (
+            patch.object(app, "TASK_REPOSITORY", self.repository),
+            patch.object(app, "get_history_data", return_value={"records": records}),
+            patch.object(
+                app,
+                "_history_record_dir",
+                return_value=self.directory / "new-project-history",
+            ),
+            patch.object(
+                app, "_copy_input_files_for_history", return_value=({}, [])
+            ),
+            patch.object(app, "_write_project_text_files"),
+            patch.object(app, "_write_history_zip", return_value=""),
+            patch.object(app, "save_history_data", return_value=False),
+        ):
+            manifest = app.record_task_history(self.task, {})
+
+        self.assertIsNone(manifest)
+        self.assertTrue(marker.exists())
+
     def test_clear_completed_tasks_removes_only_archived_done_tasks(self):
         archived = make_task("archived-done", "2026-07-29T10:01:00")
         archived.update(

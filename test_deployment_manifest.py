@@ -213,6 +213,26 @@ class DeploymentManifestTests(unittest.TestCase):
                 self.assertNotIn("compose down", commands)
                 self.assertNotIn("compose build --no-cache", commands)
 
+    def test_windows_deploy_validates_compose_before_starting(self):
+        lines = [
+            line.strip()
+            for line in (REPOSITORY_ROOT / "deploy.bat")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        self.assertIn("docker compose version >nul 2>&1", lines)
+        self.assertIn("docker compose config --quiet", lines)
+        self.assertIn("docker compose up -d --build", lines)
+        version_index = lines.index("docker compose version >nul 2>&1")
+        config_index = lines.index("docker compose config --quiet")
+        start_index = lines.index("docker compose up -d --build")
+
+        self.assertLess(version_index, config_index)
+        self.assertLess(config_index, start_index)
+        config_failure_block = "\n".join(lines[config_index:start_index])
+        self.assertIn(".env", config_failure_block)
+        self.assertIn("APP_ACCESS_PASSWORD", config_failure_block)
+
     def test_dockerfiles_run_from_only_their_explicit_python_copies(self):
         for dockerfile_name in ("Dockerfile", "Dockerfile.web"):
             with self.subTest(dockerfile=dockerfile_name):
