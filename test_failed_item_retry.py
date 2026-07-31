@@ -41,6 +41,22 @@ class FailedItemRetryTests(unittest.TestCase):
         self.assertEqual(result["error_type"], "upstream_timeout")
         self.assertTrue(result["retryable"])
 
+    def test_classifies_sanitized_connection_failure_as_retryable(self):
+        now = datetime(2026, 7, 30, 20, 36, 18)
+
+        result = app.classify_image_task_error(
+            "提供商连接失败，请检查 Base URL、代理或网络。",
+            now=now,
+        )
+
+        self.assertEqual(result["error_type"], "provider_connection")
+        self.assertTrue(result["retryable"])
+        self.assertEqual(
+            result["retry_after_at"],
+            (now + timedelta(seconds=app.IMAGE_RETRY_COOLDOWN_SECONDS)).isoformat(),
+        )
+        self.assertIn("仅重试失败项", result["error"])
+
     def test_sanitizer_removes_markup_credentials_and_explicit_secret(self):
         opaque_secret = "opaque-explicit-secret"
         result = app.sanitize_task_error(
@@ -208,6 +224,53 @@ class FailedItemRetryTests(unittest.TestCase):
 
         self.assertEqual(wait, app.IMAGE_RETRY_COOLDOWN_SECONDS - 30)
 
+    def test_retry_wait_migrates_legacy_sanitized_rate_limit_item(self):
+        failed_at = datetime(2026, 7, 29, 10, 0, 0)
+        item = {
+            "status": "error",
+            "prompt": "retry this legacy item",
+            "error": "请求过于频繁，请稍后重试或降低并发任务数。",
+        }
+        task = {
+            "type": "smart",
+            "updated_at": failed_at.isoformat(),
+            "item_results": [item],
+        }
+
+        self.assertTrue(app.is_retryable_failed_item(item))
+        self.assertEqual(
+            app.failed_item_retry_wait_seconds(
+                task,
+                now=failed_at + timedelta(seconds=30),
+            ),
+            app.IMAGE_RETRY_COOLDOWN_SECONDS - 30,
+        )
+
+    def test_migrates_pre_fix_connection_item_marked_non_retryable(self):
+        failed_at = datetime(2026, 7, 30, 20, 36, 18)
+        item = {
+            "status": "error",
+            "prompt": "preserve the reference product",
+            "error": "提供商连接失败，请检查 Base URL、代理或网络。",
+            "error_type": "upstream_error",
+            "retryable": False,
+            "retry_after_at": "",
+        }
+        task = {
+            "type": "smart",
+            "updated_at": failed_at.isoformat(),
+            "item_results": [item],
+        }
+
+        self.assertTrue(app.is_retryable_failed_item(item))
+        self.assertEqual(
+            app.failed_item_retry_wait_seconds(
+                task,
+                now=failed_at + timedelta(seconds=30),
+            ),
+            app.IMAGE_RETRY_COOLDOWN_SECONDS - 30,
+        )
+
     def test_builds_payload_from_failed_items_only(self):
         task = {
             "id": "task-123",
@@ -257,6 +320,123 @@ class FailedItemRetryTests(unittest.TestCase):
         self.assertFalse(payload["enable_title"])
         self.assertEqual(payload["title_info"], "")
         self.assertEqual(payload["provider_id"], "provider-1")
+
+    def test_builds_combo_payload_from_failed_items_only(self):
+        task = {
+            "id": "combo-123",
+            "type": "combo",
+            "status": "partial",
+            "summary": "智能组图任务 · 2张",
+            "ended_at": "2026-07-29T10:00:00",
+            "payload": {
+                "provider_id": "provider-1",
+                "image_paths": ["input.png"],
+                "reqs": [
+                    {"type_name": "主图白底", "index": 1, "topic": "main"},
+                    {"type_name": "功能卖点图", "index": 1, "topic": "feature"},
+                ],
+                "enable_title": True,
+                "title_info": "product title",
+                "total": 2,
+            },
+            "item_results": [
+                {
+                    "type_name": "主图白底",
+                    "index": 1,
+                    "status": "done",
+                    "file_path": "done.png",
+                },
+                {
+                    "type_name": "功能卖点图",
+                    "index": 2,
+                    "status": "error",
+                    "error": "504 Gateway Time-out",
+                },
+            ],
+        }
+
+        payload, error = app.build_failed_item_retry_payload(task)
+
+        self.assertEqual(error, "")
+        self.assertEqual(payload["total"], 1)
+        self.assertEqual(payload["retry_parent_id"], "combo-123")
+        self.assertEqual(len(payload["reqs"]), 1)
+        self.assertEqual(payload["reqs"][0]["type_name"], "功能卖点图")
+        self.assertEqual(payload["reqs"][0]["_batch_index"], 2)
+        self.assertEqual(payload["summary"], "重试失败项 · 智能组图任务 · 1张")
+        self.assertFalse(payload["enable_title"])
+        self.assertEqual(payload["title_info"], "")
+        self.assertTrue(app.has_retryable_failed_items(task))
+        self.assertTrue(
+            app.build_task_center_state(task)["can_retry_failed_items"]
+        )
+
+    def test_retry_action_preserves_combo_task_type(self):
+        task = {
+            "id": "combo-retry",
+            "type": "combo",
+            "summary": "智能组图任务 · 1张",
+            "ended_at": "2026-07-29T10:00:00",
+            "payload": {
+                "provider_id": "provider-1",
+                "image_paths": ["input.png"],
+                "reqs": [{"type_name": "功能卖点图", "index": 1}],
+            },
+            "item_results": [
+                {
+                    "type_name": "功能卖点图",
+                    "index": 1,
+                    "status": "error",
+                    "error": "504 Gateway Time-out",
+                }
+            ],
+        }
+
+        with (
+            patch.object(app.TASK_REPOSITORY, "get", return_value=task),
+            patch.object(
+                app,
+                "create_task",
+                return_value=({"id": "combo-retry-child"}, ""),
+            ) as create_task,
+        ):
+            retry_task, error = app.retry_failed_task_items("combo-retry")
+
+        self.assertEqual(error, "")
+        self.assertEqual(retry_task["id"], "combo-retry-child")
+        self.assertEqual(create_task.call_args.args[0], "combo")
+
+    def test_retry_summary_does_not_stack_prefixes(self):
+        task = {
+            "id": "task-retried-twice",
+            "type": "smart",
+            "summary": "重试失败项 · 重试失败项 · 五张商品组图",
+            "payload": {"provider_id": "provider-1"},
+            "item_results": [
+                {
+                    "status": "error",
+                    "prompt": "retry this image",
+                    "retryable": True,
+                }
+            ],
+        }
+
+        payload, error = app.build_failed_item_retry_payload(task)
+
+        self.assertEqual(error, "")
+        self.assertEqual(payload["summary"], "重试失败项 · 五张商品组图")
+
+    def test_normalizes_stored_retry_summary_for_display(self):
+        self.assertEqual(
+            app.normalize_failed_item_retry_summary(
+                "重试失败项 · 重试失败项 · 五张商品组图"
+            ),
+            "重试失败项 · 五张商品组图",
+        )
+        self.assertEqual(
+            app.normalize_failed_item_retry_summary("五张商品组图"),
+            "五张商品组图",
+        )
 
     def test_retry_payload_and_action_share_mixed_item_eligibility(self):
         task = {
@@ -377,6 +557,112 @@ class FailedItemRetryTests(unittest.TestCase):
         self.assertEqual(failed["error_type"], "upstream_timeout")
         self.assertTrue(failed["retryable"])
         self.assertEqual(execution.checkpoint.call_count, 2)
+
+    def test_combo_execution_classifies_timeout_and_keeps_retry_context(self):
+        class FakeClient:
+            def __init__(self):
+                self.calls = 0
+                self.last_error = ""
+
+            def compose_image_prompt(self, anchor, req, *args):
+                return f"prompt for {req['type_name']}"
+
+            def generate_image(self, refs, prompt, *args):
+                self.calls += 1
+                if self.calls == 2:
+                    raise RuntimeError("<html>504 Gateway Time-out</html>")
+                return Image.new("RGB", (32, 32), "white")
+
+            def get_last_error(self):
+                return self.last_error
+
+        task = {
+            "id": "combo-timeout",
+            "type": "combo",
+            "payload": {
+                "provider_id": "provider-1",
+                "image_paths": ["input.png"],
+                "reqs": [
+                    {"type_name": "主图白底", "index": 1},
+                    {"type_name": "功能卖点图", "index": 1},
+                ],
+                "image_language": "zh",
+            },
+        }
+        provider = {"api_key": "test-secret", "image_model": "gpt-image-2"}
+        execution = Mock()
+        execution.task = task
+
+        with (
+            patch.object(app, "get_provider_by_id", return_value=provider),
+            patch.object(
+                app,
+                "load_image_paths",
+                return_value=[Image.new("RGB", (32, 32), "gray")],
+            ),
+            patch.object(app, "create_ai_client", return_value=FakeClient()),
+            patch.object(app, "persist_image_for_task", return_value="result.png"),
+        ):
+            result = app._execute_combo_task(execution)
+
+        self.assertTrue(result["partial"])
+        self.assertEqual(result["files"], ["result.png"])
+        failed = next(
+            item for item in result["item_results"] if item["status"] == "error"
+        )
+        self.assertEqual(failed["index"], 2)
+        self.assertEqual(failed["prompt"], "prompt for 功能卖点图")
+        self.assertEqual(failed["error_type"], "upstream_timeout")
+        self.assertTrue(failed["retryable"])
+        self.assertNotIn("<html>", failed["error"])
+        self.assertEqual(execution.checkpoint.call_count, 2)
+
+    def test_combo_execution_returns_partial_when_every_image_fails(self):
+        class FakeClient:
+            last_error = ""
+
+            def compose_image_prompt(self, anchor, req, *args):
+                return f"prompt for {req['type_name']}"
+
+            def generate_image(self, refs, prompt, *args):
+                raise RuntimeError("<html>504 Gateway Time-out</html>")
+
+            def get_last_error(self):
+                return self.last_error
+
+        task = {
+            "id": "combo-all-timeout",
+            "type": "combo",
+            "payload": {
+                "provider_id": "provider-1",
+                "image_paths": ["input.png"],
+                "reqs": [{"type_name": "功能卖点图", "index": 1}],
+                "image_language": "zh",
+            },
+        }
+        provider = {"api_key": "test-secret", "image_model": "gpt-image-2"}
+        execution = Mock()
+        execution.task = task
+
+        with (
+            patch.object(app, "get_provider_by_id", return_value=provider),
+            patch.object(
+                app,
+                "load_image_paths",
+                return_value=[Image.new("RGB", (32, 32), "gray")],
+            ),
+            patch.object(app, "create_ai_client", return_value=FakeClient()),
+        ):
+            result = app._execute_combo_task(execution)
+
+        self.assertTrue(result["partial"])
+        self.assertEqual(result["files"], [])
+        self.assertEqual(len(result["item_results"]), 1)
+        self.assertTrue(result["item_results"][0]["retryable"])
+        self.assertEqual(
+            result["errors"],
+            ["请求超时，请检查网络、代理或模型响应速度。"],
+        )
 
     def test_openai_image_calls_disable_immediate_retries(self):
         client = app.OpenAIClient("test-key", model="gpt-image-2")

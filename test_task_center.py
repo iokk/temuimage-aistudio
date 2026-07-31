@@ -114,13 +114,87 @@ class TaskCenterItemViewTests(unittest.TestCase):
             ],
         )
 
-    def test_only_smart_tasks_offer_failed_item_retry(self):
+    def test_unsupported_tasks_do_not_offer_failed_item_retry(self):
         task = {
             "type": "text_to_image",
             "item_results": [{"status": "error", "prompt": "retry me"}],
         }
 
         self.assertFalse(app.has_retryable_failed_items(task))
+
+    def test_combo_retryable_item_count_uses_recoverable_requests(self):
+        task = {
+            "type": "combo",
+            "status": "partial",
+            "payload": {
+                "reqs": [
+                    {"type_name": "主图白底"},
+                    {"type_name": "功能卖点图"},
+                ]
+            },
+            "item_results": [
+                {
+                    "index": 1,
+                    "status": "done",
+                    "type_name": "主图白底",
+                    "file_path": "done.png",
+                },
+                {
+                    "index": 2,
+                    "status": "error",
+                    "type_name": "功能卖点图",
+                    "error": "请求超时，请检查网络、代理或模型响应速度。",
+                },
+            ],
+        }
+
+        retryable_items = app.get_retryable_failed_items(task)
+
+        self.assertEqual(len(retryable_items), 1)
+        self.assertEqual(retryable_items[0]["index"], 2)
+
+    def test_retry_child_with_original_batch_index_has_one_item_view(self):
+        task = {
+            "type": "combo",
+            "status": "partial",
+            "progress": {"done": 1, "total": 1},
+            "item_results": [
+                {
+                    "index": 2,
+                    "type_name": "功能卖点图",
+                    "status": "error",
+                    "error": "请求超时，请检查网络、代理或模型响应速度。",
+                }
+            ],
+        }
+
+        self.assertEqual(
+            app.build_task_item_views(task),
+            [
+                {
+                    "index": 1,
+                    "label": "功能卖点图",
+                    "status": "error",
+                    "file_path": "",
+                    "error": "请求超时，请检查网络、代理或模型响应速度。",
+                }
+            ],
+        )
+
+    def test_retry_child_summary_uses_child_total(self):
+        task = {
+            "summary": "重试失败项 · 智能组图任务 · 2张",
+            "payload": {
+                "retry_parent_id": "parent-task",
+                "total": 1,
+            },
+            "progress": {"done": 1, "total": 1},
+        }
+
+        self.assertEqual(
+            app.build_task_display_summary(task),
+            "重试失败项 · 智能组图任务 · 1张",
+        )
 
     def test_renderer_uses_four_columns_and_full_width_images(self):
         active_columns = []

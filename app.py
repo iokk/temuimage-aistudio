@@ -191,6 +191,10 @@ GEMINI_IMAGE_REQUEST_TIMEOUT_SECONDS = int(
 IMAGE_RETRY_COOLDOWN_SECONDS = int(
     os.getenv("IMAGE_RETRY_COOLDOWN_SECONDS", "90")
 )
+RETRYABLE_IMAGE_ERROR_TYPES = frozenset(
+    {"upstream_timeout", "provider_connection", "rate_limited"}
+)
+FAILED_ITEM_RETRY_SUMMARY_PREFIX = "重试失败项 · "
 TASK_RUNNER_LEASE_SECONDS = max(
     15, int(os.getenv("TASK_RUNNER_LEASE_SECONDS", "30"))
 )
@@ -2959,68 +2963,147 @@ def create_task(task_type: str, payload: dict):
         )
 
 
-def is_retryable_failed_item(item: dict) -> bool:
+def is_retryable_failed_item(item: dict, require_prompt: bool = True) -> bool:
     if not isinstance(item, dict):
         return False
-    if item.get("status") != "error" or not item.get("prompt"):
+    if item.get("status") != "error":
         return False
-    if "retryable" in item:
-        return item.get("retryable") is True
+    if require_prompt and not item.get("prompt"):
+        return False
+    if item.get("retryable") is True:
+        return True
     error_type = str(item.get("error_type") or "").lower()
-    message = str(item.get("error") or "").lower()
-    return bool(
-        error_type in {"upstream_timeout", "rate_limited"}
-        or "timeout" in message
-        or "timed out" in message
-        or "time-out" in message
-        or "请求超时" in message
-        or "rate limit" in message
-        or "too many requests" in message
-        or "请求过于频繁" in message
-        or re.search(r"\b(?:429|502|503|504)\b", message)
+    if error_type in RETRYABLE_IMAGE_ERROR_TYPES:
+        return True
+    return classify_image_task_error(item.get("error", "")).get("retryable") is True
+
+
+def normalize_failed_item_retry_summary(summary: str) -> str:
+    base = str(summary or "").strip()
+    if not base.startswith(FAILED_ITEM_RETRY_SUMMARY_PREFIX):
+        return base
+    while base.startswith(FAILED_ITEM_RETRY_SUMMARY_PREFIX):
+        base = base[len(FAILED_ITEM_RETRY_SUMMARY_PREFIX):].strip()
+    return f"{FAILED_ITEM_RETRY_SUMMARY_PREFIX}{base or '智能组图'}"
+
+
+def build_failed_item_retry_summary(summary: str, retry_total: int = 0) -> str:
+    normalized = normalize_failed_item_retry_summary(summary or "智能组图")
+    if retry_total:
+        normalized = re.sub(r" · \d+张$", f" · {retry_total}张", normalized)
+    if normalized.startswith(FAILED_ITEM_RETRY_SUMMARY_PREFIX):
+        return normalized
+    return f"{FAILED_ITEM_RETRY_SUMMARY_PREFIX}{normalized}"
+
+
+def build_task_display_summary(task: dict) -> str:
+    task = task or {}
+    summary = normalize_failed_item_retry_summary(
+        task.get("summary") or task.get("type", "任务")
     )
+    payload = task.get("payload", {}) or {}
+    if not payload.get("retry_parent_id"):
+        return summary
+    progress = task.get("progress", {}) or {}
+    try:
+        retry_total = int(progress.get("total") or payload.get("total") or 0)
+    except (TypeError, ValueError):
+        return summary
+    if retry_total:
+        return re.sub(r" · \d+张$", f" · {retry_total}张", summary)
+    return summary
+
+
+def get_combo_retry_request(task: dict, item: dict):
+    stored_req = item.get("req")
+    if isinstance(stored_req, dict):
+        retry_req = copy.deepcopy(stored_req)
+        retry_req["_batch_index"] = int(
+            item.get("index") or retry_req.get("_batch_index") or 1
+        )
+        return retry_req
+
+    try:
+        batch_index = int(item.get("index") or 0)
+    except (TypeError, ValueError):
+        return None
+    reqs = (task.get("payload", {}) or {}).get("reqs", []) or []
+    if batch_index < 1 or batch_index > len(reqs):
+        return None
+    retry_req = copy.deepcopy(reqs[batch_index - 1])
+    retry_req["_batch_index"] = batch_index
+    return retry_req
+
+
+def get_retryable_failed_items(task: dict) -> list:
+    task_type = str((task or {}).get("type") or "")
+    items = task.get("item_results", []) or []
+    if task_type in {"", "smart"}:
+        return [item for item in items if is_retryable_failed_item(item)]
+    if task_type == "combo":
+        return [
+            item
+            for item in items
+            if is_retryable_failed_item(item, require_prompt=False)
+            and get_combo_retry_request(task, item)
+        ]
+    return []
 
 
 def build_failed_item_retry_payload(task: dict):
-    if not task or task.get("type") != "smart":
-        return None, "仅智能组图任务支持按失败项重试。"
+    task_type = str((task or {}).get("type") or "")
+    if task_type not in {"smart", "combo"}:
+        return None, "仅智能组图和快速出图任务支持按失败项重试。"
     wait_seconds = failed_item_retry_wait_seconds(task)
     if wait_seconds:
         return None, f"上游仍在冷却，请等待 {wait_seconds} 秒后再重试失败项。"
-    failed_items = [
-        {
-            "type_name": item.get("type_name", "图片"),
-            "index": item.get("index", index + 1),
-            "prompt": item.get("prompt", ""),
-        }
-        for index, item in enumerate(task.get("item_results", []) or [])
-        if is_retryable_failed_item(item)
-    ]
-    if not failed_items:
-        return None, "该任务没有可重试的失败项。"
     payload = copy.deepcopy(task.get("payload", {}) or {})
+    retryable_items = get_retryable_failed_items(task)
+    if task_type == "smart":
+        failed_items = [
+            {
+                "type_name": item.get("type_name", "图片"),
+                "index": item.get("index", index + 1),
+                "prompt": item.get("prompt", ""),
+            }
+            for index, item in enumerate(retryable_items)
+        ]
+        if not failed_items:
+            return None, "该任务没有可重试的失败项。"
+        retry_fields = {
+            "retry_items": failed_items,
+            "total": len(failed_items),
+        }
+    else:
+        failed_reqs = [
+            retry_req
+            for item in retryable_items
+            for retry_req in [get_combo_retry_request(task, item)]
+            if retry_req
+        ]
+        if not failed_reqs:
+            return None, "该任务没有可重试的失败项。"
+        retry_fields = {
+            "reqs": failed_reqs,
+            "total": len(failed_reqs),
+        }
     payload.update(
         {
-            "retry_items": failed_items,
+            **retry_fields,
             "retry_parent_id": task.get("id", ""),
-            "total": len(failed_items),
             "enable_title": False,
             "title_info": "",
-            "summary": f"重试失败项 · {task.get('summary') or '智能组图'}",
+            "summary": build_failed_item_retry_summary(
+                task.get("summary", ""),
+                retry_fields["total"],
+            ),
         }
     )
     return payload, ""
 
 
 def has_retryable_failed_items(task: dict) -> bool:
-    return bool(
-        task
-        and task.get("type") == "smart"
-        and any(
-            is_retryable_failed_item(item)
-            for item in task.get("item_results", []) or []
-        )
-    )
+    return bool(get_retryable_failed_items(task))
 
 
 def build_task_center_state(task: dict) -> dict:
@@ -3045,7 +3128,7 @@ def retry_failed_task_items(task_id: str):
     payload, error = build_failed_item_retry_payload(task)
     if not payload:
         return None, error
-    return create_task("smart", payload)
+    return create_task(task.get("type", "smart"), payload)
 
 
 def cancel_task(task_id: str):
@@ -3111,13 +3194,22 @@ def persist_image_for_task(img: Image.Image, filename: str):
     return str(path)
 
 
+class ReferenceImageLoadError(RuntimeError):
+    pass
+
+
 def load_image_paths(paths: list):
     images = []
-    for path in paths or []:
+    for raw_path in paths or []:
+        display_name = Path(str(raw_path)).name or "未命名文件"
         try:
-            images.append(Image.open(path).convert("RGB"))
-        except Exception:
-            continue
+            with Image.open(raw_path) as source:
+                source.load()
+                images.append(source.convert("RGB"))
+        except Exception as error:
+            raise ReferenceImageLoadError(
+                f"参考图无法读取：{display_name}。请重新上传后重试。"
+            ) from error
     return images
 
 
@@ -4269,6 +4361,17 @@ def format_task_error_summary(errors, limit: int = 3) -> str:
     )
 
 
+def _image_retry_result(error: str, error_type: str, current: datetime) -> dict:
+    return {
+        "error": error,
+        "error_type": error_type,
+        "retryable": True,
+        "retry_after_at": (
+            current + timedelta(seconds=IMAGE_RETRY_COOLDOWN_SECONDS)
+        ).isoformat(),
+    }
+
+
 def classify_image_task_error(message: str, now: datetime = None) -> dict:
     raw = str(message or "")
     low = raw.lower()
@@ -4283,21 +4386,37 @@ def classify_image_task_error(message: str, now: datetime = None) -> dict:
         or re.search(r"\b50[234]\b", low)
     )
     if is_upstream_timeout:
-        retry_after = current + timedelta(seconds=IMAGE_RETRY_COOLDOWN_SECONDS)
-        return {
-            "error": "上游图片生成超时或网关异常（502/503/504），成功图片已保留。请稍后仅重试失败项。",
-            "error_type": "upstream_timeout",
-            "retryable": True,
-            "retry_after_at": retry_after.isoformat(),
-        }
-    if "too many requests" in low or "rate limit" in low or "429" in low:
-        retry_after = current + timedelta(seconds=IMAGE_RETRY_COOLDOWN_SECONDS)
-        return {
-            "error": "上游请求过于频繁，成功图片已保留。请稍后仅重试失败项。",
-            "error_type": "rate_limited",
-            "retryable": True,
-            "retry_after_at": retry_after.isoformat(),
-        }
+        return _image_retry_result(
+            "上游图片生成超时或网关异常（502/503/504），成功图片已保留。请稍后仅重试失败项。",
+            "upstream_timeout",
+            current,
+        )
+    is_provider_connection = bool(
+        "connection" in low
+        or "connect" in low
+        or "dns" in low
+        or "refused" in low
+        or "unreachable" in low
+        or "提供商连接失败" in raw
+        or "网络连接失败" in raw
+    )
+    if is_provider_connection:
+        return _image_retry_result(
+            "提供商连接失败，成功图片已保留。请稍后仅重试失败项。",
+            "provider_connection",
+            current,
+        )
+    if (
+        "too many requests" in low
+        or "rate limit" in low
+        or "429" in low
+        or "请求过于频繁" in raw
+    ):
+        return _image_retry_result(
+            "上游请求过于频繁，成功图片已保留。请稍后仅重试失败项。",
+            "rate_limited",
+            current,
+        )
     return {
         "error": sanitize_task_error(raw),
         "error_type": "upstream_error",
@@ -4318,12 +4437,9 @@ def classify_provider_image_task_error(message: str, provider: dict) -> dict:
 def failed_item_retry_wait_seconds(task: dict, now: datetime = None) -> int:
     current = now or datetime.now()
     waits = []
-    for item in task.get("item_results", []) or []:
-        if not is_retryable_failed_item(item):
-            continue
+    for item in get_retryable_failed_items(task):
         retry_after_at = item.get("retry_after_at", "")
-        legacy_transient = "retryable" not in item
-        if not retry_after_at and legacy_transient:
+        if not retry_after_at:
             task_failed_at = task.get("ended_at") or task.get("updated_at") or ""
             try:
                 retry_after_at = (
@@ -7430,13 +7546,16 @@ def _execute_combo_task(execution: TaskExecution):
     total = len(reqs)
     for i, req in enumerate(reqs):
         execution.raise_if_stopped()
-        prompt = client.compose_image_prompt(
-            anchor,
-            req,
-            payload.get("aspect", "1:1"),
-            payload.get("image_language", DEFAULT_TARGET_LANGUAGE),
-        )
+        item_index = int(req.get("_batch_index") or i + 1)
+        prompt = ""
+        error_meta = None
         try:
+            prompt = client.compose_image_prompt(
+                anchor,
+                req,
+                payload.get("aspect", "1:1"),
+                payload.get("image_language", DEFAULT_TARGET_LANGUAGE),
+            )
             img = client.generate_image(
                 refs,
                 prompt,
@@ -7446,31 +7565,46 @@ def _execute_combo_task(execution: TaskExecution):
                 payload.get("image_language", DEFAULT_TARGET_LANGUAGE),
             )
         except Exception as e:
-            client.last_error = str(e)
+            error_meta = classify_provider_image_task_error(str(e), provider)
+            safe_exception = RuntimeError(error_meta["error"]).with_traceback(
+                e.__traceback__
+            )
+            logger.error(
+                "task combo image generation failed (task_id=%s, item=%s)",
+                task.get("id"),
+                item_index,
+                exc_info=(RuntimeError, safe_exception, e.__traceback__),
+            )
+            client.last_error = error_meta["error"]
             img = None
         if img:
-            filename = f"{task['id']}_{str(i + 1).zfill(2)}_{req.get('type_name', 'image')}.png"
+            filename = f"{task['id']}_{str(item_index).zfill(2)}_{req.get('type_name', 'image')}.png"
             file_path = persist_image_for_task(img, filename)
             results.append(file_path)
             item_results.append(
                 {
-                    "index": i + 1,
+                    "index": item_index,
                     "type_name": req.get("type_name", "图片"),
                     "status": "done",
                     "file_path": file_path,
                 }
             )
         else:
-            error_message = (
-                client.get_last_error() or f"{req.get('type_name', '图片')} 生成失败"
-            )
-            errors.append(error_message)
+            if error_meta is None:
+                error_meta = classify_provider_image_task_error(
+                    client.get_last_error()
+                    or f"{req.get('type_name', '图片')} 生成失败",
+                    provider,
+                )
+            errors.append(error_meta["error"])
             item_results.append(
                 {
-                    "index": i + 1,
+                    "index": item_index,
                     "type_name": req.get("type_name", "图片"),
+                    "prompt": prompt,
+                    "req": copy.deepcopy(req),
                     "status": "error",
-                    "error": error_message,
+                    **error_meta,
                 }
             )
         execution.checkpoint(
@@ -7490,8 +7624,6 @@ def _execute_combo_task(execution: TaskExecution):
             titles = merge_titles_and_issues(title_result)
         else:
             errors.append(format_title_error(title_result))
-    if not results and errors:
-        raise Exception(errors[0])
     return {
         "titles": titles,
         "errors": errors,
@@ -7707,6 +7839,15 @@ def build_task_item_views(task: dict) -> list:
         }
 
     highest_index = max(items_by_index, default=0)
+    if declared_total and highest_index > declared_total:
+        items_by_index = {
+            display_index: {**item, "index": display_index}
+            for display_index, item in enumerate(
+                (items_by_index[index] for index in sorted(items_by_index)),
+                start=1,
+            )
+        }
+        highest_index = max(items_by_index, default=0)
     total = max(declared_total, highest_index)
     for index in range(1, total + 1):
         items_by_index.setdefault(
@@ -7824,10 +7965,13 @@ def show_task_center():
             total = max(1, int(progress.get("total") or 1))
             done = min(total, int(progress.get("done") or 0))
             provider = get_provider_by_id((task.get("payload") or {}).get("provider_id", ""))
+            task_summary = build_task_display_summary(task)
             with st.container(border=True):
                 left, right = st.columns([5, 1])
                 with left:
-                    st.markdown(f"**{_task_status_label(task.get('status'))} · {task.get('summary') or task.get('type', '任务')}**")
+                    st.markdown(
+                        f"**{_task_status_label(task.get('status'))} · {task_summary}**"
+                    )
                     if task.get("status") == "running":
                         st.progress(done / total, text=f"进度 {done}/{total}")
                     else:
@@ -7845,6 +7989,7 @@ def show_task_center():
         for task in terminal[:12]:
             item_views = build_task_item_views(task)
             progress = task.get("progress", {}) or {}
+            task_summary = build_task_display_summary(task)
             success_count = sum(item["status"] == "done" for item in item_views)
             failed_count = sum(item["status"] == "error" for item in item_views)
             if not item_views:
@@ -7855,7 +8000,10 @@ def show_task_center():
                     progress.get("failed") or len(task.get("errors", []) or [])
                 )
             with st.container(border=True):
-                st.caption(f"{_task_status_label(task.get('status'))} · {task.get('summary') or task.get('type', '任务')} · {task.get('updated_at', '')}")
+                st.caption(
+                    f"{_task_status_label(task.get('status'))} · {task_summary} · "
+                    f"{task.get('updated_at', '')}"
+                )
                 if success_count or failed_count:
                     st.caption(f"结果：成功 {success_count} · 失败 {failed_count}")
                 if task.get("errors"):
@@ -7865,11 +8013,7 @@ def show_task_center():
                 render_task_item_results(task, show_images=True)
                 task_center_state = build_task_center_state(task)
                 if task_center_state["can_retry_failed_items"]:
-                    retryable_items = [
-                        item
-                        for item in task.get("item_results", []) or []
-                        if is_retryable_failed_item(item)
-                    ]
+                    retryable_items = get_retryable_failed_items(task)
                     wait_seconds = failed_item_retry_wait_seconds(task)
                     if wait_seconds:
                         st.caption(f"上游正在冷却，约 {wait_seconds} 秒后可重试失败项。")
