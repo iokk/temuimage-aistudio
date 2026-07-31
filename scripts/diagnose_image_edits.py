@@ -2,6 +2,7 @@
 """Run controlled GPT Image edit probes against the active provider."""
 
 import argparse
+import copy
 import json
 import time
 import types
@@ -25,6 +26,8 @@ def parse_args(argv=None):
         help="Acknowledge that this diagnostic issues paid image requests.",
     )
     parser.add_argument("--image", required=True)
+    parser.add_argument("--provider-id", default="")
+    parser.add_argument("--model", default="")
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--requests", type=int, default=1)
     parser.add_argument("--max-dimension", type=int, default=2048)
@@ -44,6 +47,22 @@ def parse_args(argv=None):
     return args
 
 
+def resolve_probe_provider(args):
+    provider = (
+        app.get_provider_by_id(args.provider_id)
+        if args.provider_id
+        else app.get_active_provider()
+    )
+    if not provider or not provider.get("api_key"):
+        raise SystemExit("No selected provider with an API key")
+    provider = copy.deepcopy(provider)
+    if args.model:
+        provider["image_model"] = args.model
+    if not provider.get("image_model"):
+        raise SystemExit("The selected provider has no image model")
+    return provider
+
+
 def build_start_event(provider, source_size, args):
     return {
         "event": "start",
@@ -59,9 +78,7 @@ def build_start_event(provider, source_size, args):
 
 def main():
     args = parse_args()
-    provider = app.get_active_provider()
-    if not provider or not provider.get("api_key"):
-        raise SystemExit("No active provider with an API key")
+    provider = resolve_probe_provider(args)
 
     source = Image.open(args.image).convert("RGB")
     if max(source.size) > args.max_dimension:

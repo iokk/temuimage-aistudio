@@ -573,6 +573,36 @@ class SqliteTaskStoreTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in expired], [task["id"]])
         self.assertEqual(store.get(task["id"])["status"], "expired")
 
+    def test_prunes_only_runner_leases_older_than_retention_window(self):
+        store = self.make_store()
+        stale_heartbeat = datetime(2026, 7, 29, 10, 0, 0)
+        recent_heartbeat = datetime(2026, 7, 29, 11, 45, 0)
+        store.heartbeat_runner(
+            "stale-runner",
+            lease_seconds=30,
+            now=stale_heartbeat,
+        )
+        store.heartbeat_runner(
+            "recent-runner",
+            lease_seconds=30,
+            now=recent_heartbeat,
+        )
+
+        pruned = store.prune_expired_runners(
+            now=datetime(2026, 7, 29, 12, 0, 0),
+            retention_seconds=60 * 60,
+        )
+
+        with sqlite3.connect(str(self.database_path)) as connection:
+            runner_ids = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT id FROM task_runners ORDER BY id"
+                ).fetchall()
+            }
+        self.assertEqual(pruned, 1)
+        self.assertEqual(runner_ids, {"recent-runner"})
+
     def test_legacy_tasks_json_is_migrated_once(self):
         legacy_path = self.directory / "tasks.json"
         legacy_tasks = [

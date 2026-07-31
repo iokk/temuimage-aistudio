@@ -3050,7 +3050,11 @@ def get_retryable_failed_items(task: dict) -> list:
     return []
 
 
-def build_failed_item_retry_payload(task: dict):
+def build_failed_item_retry_payload(
+    task: dict,
+    provider_id: str = "",
+    model: str = "",
+):
     task_type = str((task or {}).get("type") or "")
     if task_type not in {"smart", "combo"}:
         return None, "仅智能组图和快速出图任务支持按失败项重试。"
@@ -3099,6 +3103,10 @@ def build_failed_item_retry_payload(task: dict):
             ),
         }
     )
+    if provider_id:
+        payload["provider_id"] = provider_id
+    if model:
+        payload["model"] = model
     return payload, ""
 
 
@@ -3119,13 +3127,102 @@ def build_task_center_state(task: dict) -> dict:
     }
 
 
-def retry_failed_task_items(task_id: str):
+def build_task_timeout_diagnostic(task: dict) -> str:
+    task = task or {}
+    timeout_items = [
+        item
+        for item in (task.get("item_results", []) or [])
+        if isinstance(item, dict)
+        and item.get("status") == "error"
+        and item.get("error_type") == "upstream_timeout"
+    ]
+    if not timeout_items:
+        return ""
+    elapsed_values = []
+    for item in timeout_items:
+        try:
+            elapsed = float(item.get("elapsed_seconds"))
+        except (TypeError, ValueError):
+            continue
+        if elapsed >= 0:
+            elapsed_values.append(round(elapsed, 1))
+    if not elapsed_values:
+        try:
+            started_at = datetime.fromisoformat(str(task.get("started_at") or ""))
+            ended_at = datetime.fromisoformat(str(task.get("ended_at") or ""))
+            elapsed_values.append(
+                round(max(0.0, (ended_at - started_at).total_seconds()), 1)
+            )
+        except (TypeError, ValueError):
+            return ""
+    elapsed_text = (
+        f"{elapsed_values[0]:.1f} 秒"
+        if len(elapsed_values) == 1
+        else f"{min(elapsed_values):.1f}–{max(elapsed_values):.1f} 秒"
+    )
+    local_timeout = float(GEMINI_IMAGE_REQUEST_TIMEOUT_SECONDS)
+    ambiguity_margin = max(5.0, min(30.0, local_timeout * 0.02))
+    if max(elapsed_values) >= local_timeout - ambiguity_margin:
+        return (
+            f"诊断：请求约 {elapsed_text}后结束，已接近本地等待上限 "
+            f"{GEMINI_IMAGE_REQUEST_TIMEOUT_SECONDS} 秒；现有日志无法仅凭耗时判断"
+            "是上游网关还是 TuLite 本地等待超时。"
+        )
+    return (
+        f"诊断：请求在上游约 {elapsed_text}后结束；TuLite 本地等待上限为 "
+        f"{GEMINI_IMAGE_REQUEST_TIMEOUT_SECONDS} 秒，因此不是本地等待超时。"
+    )
+
+
+def build_task_route_summary(task: dict) -> str:
+    task = task or {}
+    payload = task.get("payload", {}) or {}
+    provider = get_provider_by_id(str(payload.get("provider_id") or "")) or {}
+    provider_name = str(provider.get("name") or "未找到")
+    model = str(payload.get("model") or provider.get("image_model") or "未配置")
+    return (
+        f"提供商：{provider_name} · 模型：{model} · "
+        f"任务 ID：{task.get('id', '')}"
+    )
+
+
+def get_retry_image_providers() -> list:
+    providers = []
+    for saved_provider in get_providers().get("providers", []):
+        if not saved_provider.get("enabled", True):
+            continue
+        provider = get_provider_by_id(saved_provider.get("id", ""))
+        if provider and provider.get("api_key"):
+            providers.append(provider)
+    return providers
+
+
+def retry_failed_task_items(
+    task_id: str,
+    provider_id: str = "",
+    model: str = "",
+):
     task = TASK_REPOSITORY.get(
         task_id,
         scope_owner_id=get_session_owner_id(),
         include_unowned=True,
     )
-    payload, error = build_failed_item_retry_payload(task)
+    if provider_id:
+        provider = get_provider_by_id(provider_id)
+        if (
+            not provider
+            or not provider.get("enabled", True)
+            or not provider.get("api_key")
+        ):
+            return None, "所选重试提供商不可用，请检查启用状态和 API Key。"
+        model = (model or provider.get("image_model") or "").strip()
+        if not model:
+            return None, "所选重试提供商尚未配置出图模型。"
+    payload, error = build_failed_item_retry_payload(
+        task,
+        provider_id=provider_id,
+        model=model,
+    )
     if not payload:
         return None, error
     return create_task(task.get("type", "smart"), payload)
@@ -7372,26 +7469,69 @@ def _execute_smart_task(execution: TaskExecution):
 
     def generate_item(item):
         execution.raise_if_stopped()
-        client = create_ai_client(provider, model=payload.get("model", provider.get("image_model", "")))
-        image = client.generate_image(refs, item["prompt"], payload.get("aspect", "1:1"), payload.get("size", "1K"), payload.get("thinking_level", "high"), image_language)
-        if not image:
-            raise RuntimeError(client.get_last_error() or f"{item['type_name']} 生成失败")
-        filename = f"{task['id']}_{item['index']:02d}_{item['type_name']}.png"
-        return item, persist_image_for_task(image, filename)
+        started_at = time.monotonic()
+        try:
+            client = create_ai_client(
+                provider,
+                model=payload.get("model", provider.get("image_model", "")),
+            )
+            image = client.generate_image(
+                refs,
+                item["prompt"],
+                payload.get("aspect", "1:1"),
+                payload.get("size", "1K"),
+                payload.get("thinking_level", "high"),
+                image_language,
+            )
+            if not image:
+                raise RuntimeError(
+                    client.get_last_error() or f"{item['type_name']} 生成失败"
+                )
+            filename = f"{task['id']}_{item['index']:02d}_{item['type_name']}.png"
+            return (
+                item,
+                persist_image_for_task(image, filename),
+                round(time.monotonic() - started_at, 1),
+                None,
+            )
+        except Exception as error:
+            return (
+                item,
+                "",
+                round(time.monotonic() - started_at, 1),
+                error,
+            )
 
     with ThreadPoolExecutor(max_workers=min(2, max(1, total))) as executor:
         futures = {executor.submit(generate_item, item): item for item in item_jobs}
         for future in as_completed(futures):
             item = futures[future]
             completed += 1
-            try:
-                finished_item, file_path = future.result()
+            finished_item, file_path, elapsed_seconds, item_error = future.result()
+            if item_error is None:
                 results.append(file_path)
-                item_results.append({**finished_item, "status": "done", "file_path": file_path})
-            except Exception as error:
-                error_meta = classify_image_task_error(str(error))
+                item_results.append(
+                    {
+                        **finished_item,
+                        "status": "done",
+                        "file_path": file_path,
+                        "elapsed_seconds": elapsed_seconds,
+                    }
+                )
+            else:
+                error_meta = classify_provider_image_task_error(
+                    str(item_error),
+                    provider,
+                )
                 errors.append(error_meta["error"])
-                item_results.append({**item, "status": "error", **error_meta})
+                item_results.append(
+                    {
+                        **item,
+                        "status": "error",
+                        "elapsed_seconds": elapsed_seconds,
+                        **error_meta,
+                    }
+                )
             execution.checkpoint(
                 progress={
                     "done": completed,
@@ -7414,8 +7554,6 @@ def _execute_smart_task(execution: TaskExecution):
             titles = merge_titles_and_issues(title_result)
         else:
             errors.append(format_title_error(title_result))
-    if not results and errors:
-        raise Exception(errors[0])
     return {
         "titles": titles,
         "errors": errors,
@@ -7724,7 +7862,11 @@ def maybe_run_periodic_cleanup():
     try:
         cleanup_expired_trashed_records()
     except Exception:
-        logger.exception("periodic cleanup_expired_trashed_records() failed")
+        logger.exception("periodic trashed-record cleanup failed")
+    try:
+        TASK_REPOSITORY.prune_expired_runners()
+    except Exception:
+        logger.exception("periodic task-runner cleanup failed")
 
 
 def _run_task_maintenance():
@@ -7924,6 +8066,93 @@ def render_task_center():
         st.caption("当前没有活动任务")
 
 
+def render_failed_task_retry_controls(
+    task: dict,
+    retry_providers: list,
+    active_provider_id: str,
+) -> None:
+    retryable_items = get_retryable_failed_items(task)
+    wait_seconds = failed_item_retry_wait_seconds(task)
+    if wait_seconds:
+        st.caption(f"上游正在冷却，约 {wait_seconds} 秒后可重试失败项。")
+    else:
+        st.caption("冷却已结束，可以仅重试失败项，不会重跑成功图片。")
+
+    selected_provider_id = ""
+    selected_model = ""
+    if retry_providers:
+        provider_ids = [provider.get("id", "") for provider in retry_providers]
+        payload = task.get("payload") or {}
+        task_provider_id = str(payload.get("provider_id") or "")
+        default_provider_id = active_provider_id
+        if default_provider_id not in provider_ids:
+            default_provider_id = (
+                task_provider_id
+                if task_provider_id in provider_ids
+                else provider_ids[0]
+            )
+        provider_key = f"task_center_retry_provider_{task.get('id')}"
+        if st.session_state.get(provider_key) not in provider_ids:
+            st.session_state[provider_key] = default_provider_id
+        selected_provider_id = st.selectbox(
+            "重试提供商",
+            provider_ids,
+            key=provider_key,
+            format_func=lambda provider_id: next(
+                (
+                    provider.get("name", provider_id)
+                    for provider in retry_providers
+                    if provider.get("id") == provider_id
+                ),
+                provider_id,
+            ),
+            help="失败任务原本固定使用提交时的接口；这里可以明确改用当前或备用提供商。",
+        )
+        selected_provider = next(
+            (
+                provider
+                for provider in retry_providers
+                if provider.get("id") == selected_provider_id
+            ),
+            {},
+        )
+        model_choices = _provider_model_choices(selected_provider, "image")
+        task_model = str(payload.get("model") or "")
+        default_model = str(selected_provider.get("image_model") or "")
+        if selected_provider_id == task_provider_id and task_model:
+            default_model = task_model
+        if default_model and default_model not in model_choices:
+            model_choices.append(default_model)
+        if model_choices:
+            model_key = f"task_center_retry_model_{task.get('id')}"
+            if st.session_state.get(model_key) not in model_choices:
+                st.session_state[model_key] = default_model or model_choices[0]
+            model_labels = _provider_model_labels(selected_provider, "image")
+            selected_model = st.selectbox(
+                "重试出图模型",
+                model_choices,
+                key=model_key,
+                format_func=lambda model_id: model_labels.get(model_id, model_id),
+            )
+    else:
+        st.warning("没有已启用且配置了 API Key 的出图提供商。")
+
+    if st.button(
+        f"重试失败项 ({len(retryable_items)})",
+        key=f"task_center_retry_failed_{task.get('id')}",
+        disabled=bool(wait_seconds) or not selected_provider_id,
+    ):
+        retry_task, error = retry_failed_task_items(
+            task.get("id"),
+            provider_id=selected_provider_id,
+            model=selected_model,
+        )
+        if retry_task:
+            open_submitted_task(retry_task)
+        else:
+            st.error(error or "创建重试任务失败")
+
+
 def show_task_center():
     st.markdown('<div class="page-title">📡 任务中心</div>', unsafe_allow_html=True)
     submission_notice = st.session_state.pop("task_submission_notice", "")
@@ -7964,7 +8193,6 @@ def show_task_center():
             progress = task.get("progress", {}) or {}
             total = max(1, int(progress.get("total") or 1))
             done = min(total, int(progress.get("done") or 0))
-            provider = get_provider_by_id((task.get("payload") or {}).get("provider_id", ""))
             task_summary = build_task_display_summary(task)
             with st.container(border=True):
                 left, right = st.columns([5, 1])
@@ -7976,7 +8204,7 @@ def show_task_center():
                         st.progress(done / total, text=f"进度 {done}/{total}")
                     else:
                         st.caption("等待可用执行槽位")
-                    st.caption(f"提供商：{provider.get('name', '未找到')} · 任务 ID：{task.get('id', '')}")
+                    st.caption(build_task_route_summary(task))
                     if task.get("item_results"):
                         render_task_item_results(task, show_images=False)
                 with right:
@@ -7986,6 +8214,10 @@ def show_task_center():
     with recent_tab:
         if not terminal:
             st.info("提交过的任务会显示在这里。")
+        retry_providers = get_retry_image_providers()
+        active_retry_provider_id = str(
+            (get_active_provider() or {}).get("id") or ""
+        )
         for task in terminal[:12]:
             item_views = build_task_item_views(task)
             progress = task.get("progress", {}) or {}
@@ -8004,31 +8236,23 @@ def show_task_center():
                     f"{_task_status_label(task.get('status'))} · {task_summary} · "
                     f"{task.get('updated_at', '')}"
                 )
+                st.caption(build_task_route_summary(task))
                 if success_count or failed_count:
                     st.caption(f"结果：成功 {success_count} · 失败 {failed_count}")
                 if task.get("errors"):
                     st.caption(
                         "原因：" + format_task_error_summary(task.get("errors"), 1)
                     )
+                if timeout_diagnostic := build_task_timeout_diagnostic(task):
+                    st.caption(timeout_diagnostic)
                 render_task_item_results(task, show_images=True)
                 task_center_state = build_task_center_state(task)
                 if task_center_state["can_retry_failed_items"]:
-                    retryable_items = get_retryable_failed_items(task)
-                    wait_seconds = failed_item_retry_wait_seconds(task)
-                    if wait_seconds:
-                        st.caption(f"上游正在冷却，约 {wait_seconds} 秒后可重试失败项。")
-                    else:
-                        st.caption("冷却已结束，可以仅重试失败项，不会重跑成功图片。")
-                    if st.button(
-                        f"重试失败项 ({len(retryable_items)})",
-                        key=f"task_center_retry_failed_{task.get('id')}",
-                        disabled=bool(wait_seconds),
-                    ):
-                        retry_task, error = retry_failed_task_items(task.get("id"))
-                        if retry_task:
-                            open_submitted_task(retry_task)
-                        else:
-                            st.error(error or "创建重试任务失败")
+                    render_failed_task_retry_controls(
+                        task,
+                        retry_providers,
+                        active_retry_provider_id,
+                    )
 
     show_footer()
 

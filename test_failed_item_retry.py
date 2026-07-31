@@ -321,6 +321,38 @@ class FailedItemRetryTests(unittest.TestCase):
         self.assertEqual(payload["title_info"], "")
         self.assertEqual(payload["provider_id"], "provider-1")
 
+    def test_retry_payload_can_override_provider_and_model(self):
+        task = {
+            "id": "task-provider-failover",
+            "type": "smart",
+            "payload": {
+                "provider_id": "provider-1",
+                "model": "gpt-image-2",
+                "image_paths": ["input.png"],
+            },
+            "item_results": [
+                {
+                    "type_name": "场景图",
+                    "index": 1,
+                    "prompt": "retry with a longer-lived gateway",
+                    "status": "error",
+                    "retryable": True,
+                }
+            ],
+        }
+
+        payload, error = app.build_failed_item_retry_payload(
+            task,
+            provider_id="provider-2",
+            model="gpt-image-1.5",
+        )
+
+        self.assertEqual(error, "")
+        self.assertEqual(payload["provider_id"], "provider-2")
+        self.assertEqual(payload["model"], "gpt-image-1.5")
+        self.assertEqual(task["payload"]["provider_id"], "provider-1")
+        self.assertEqual(task["payload"]["model"], "gpt-image-2")
+
     def test_builds_combo_payload_from_failed_items_only(self):
         task = {
             "id": "combo-123",
@@ -405,6 +437,55 @@ class FailedItemRetryTests(unittest.TestCase):
         self.assertEqual(error, "")
         self.assertEqual(retry_task["id"], "combo-retry-child")
         self.assertEqual(create_task.call_args.args[0], "combo")
+
+    def test_retry_action_uses_selected_provider_and_model(self):
+        task = {
+            "id": "smart-retry-provider",
+            "type": "smart",
+            "payload": {
+                "provider_id": "provider-1",
+                "model": "gpt-image-2",
+                "image_paths": ["input.png"],
+            },
+            "item_results": [
+                {
+                    "type_name": "场景图",
+                    "index": 1,
+                    "prompt": "retry this image",
+                    "status": "error",
+                    "retryable": True,
+                }
+            ],
+        }
+        selected_provider = {
+            "id": "provider-2",
+            "enabled": True,
+            "api_key": "test-key",
+            "image_model": "gpt-image-1.5",
+        }
+
+        with (
+            patch.object(app.TASK_REPOSITORY, "get", return_value=task),
+            patch.object(
+                app, "get_provider_by_id", return_value=selected_provider
+            ),
+            patch.object(
+                app,
+                "create_task",
+                return_value=({"id": "smart-retry-child"}, ""),
+            ) as create_task,
+        ):
+            retry_task, error = app.retry_failed_task_items(
+                "smart-retry-provider",
+                provider_id="provider-2",
+                model="gpt-image-1.5",
+            )
+
+        self.assertEqual(error, "")
+        self.assertEqual(retry_task["id"], "smart-retry-child")
+        retry_payload = create_task.call_args.args[1]
+        self.assertEqual(retry_payload["provider_id"], "provider-2")
+        self.assertEqual(retry_payload["model"], "gpt-image-1.5")
 
     def test_retry_summary_does_not_stack_prefixes(self):
         task = {
@@ -557,6 +638,51 @@ class FailedItemRetryTests(unittest.TestCase):
         self.assertEqual(failed["error_type"], "upstream_timeout")
         self.assertTrue(failed["retryable"])
         self.assertEqual(execution.checkpoint.call_count, 2)
+
+    def test_smart_execution_returns_partial_when_every_image_fails(self):
+        class FakeClient:
+            def generate_image(self, refs, prompt, *args):
+                raise RuntimeError("<html>504 Gateway Time-out</html>")
+
+        task = {
+            "id": "smart-all-timeout",
+            "type": "smart",
+            "payload": {
+                "provider_id": "provider-1",
+                "image_paths": ["input.png"],
+                "retry_items": [
+                    {
+                        "type_name": "功能卖点图",
+                        "index": 1,
+                        "prompt": "slow reference image edit",
+                    }
+                ],
+                "image_language": "zh",
+            },
+        }
+        provider = {"api_key": "test-secret", "image_model": "gpt-image-2"}
+        execution = Mock()
+        execution.task = task
+
+        with (
+            patch.object(app, "get_provider_by_id", return_value=provider),
+            patch.object(
+                app,
+                "load_image_paths",
+                return_value=[Image.new("RGB", (32, 32), "gray")],
+            ),
+            patch.object(app, "create_ai_client", return_value=FakeClient()),
+            patch.object(app.time, "monotonic", side_effect=[10.0, 72.4]),
+        ):
+            result = app._execute_smart_task(execution)
+
+        self.assertTrue(result["partial"])
+        self.assertEqual(result["files"], [])
+        self.assertEqual(len(result["item_results"]), 1)
+        failed = result["item_results"][0]
+        self.assertEqual(failed["error_type"], "upstream_timeout")
+        self.assertTrue(failed["retryable"])
+        self.assertEqual(failed["elapsed_seconds"], 62.4)
 
     def test_combo_execution_classifies_timeout_and_keeps_retry_context(self):
         class FakeClient:

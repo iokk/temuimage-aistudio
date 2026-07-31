@@ -49,6 +49,106 @@ class TaskCenterItemViewTests(unittest.TestCase):
         self.assertNotIn("<b>", summary)
         self.assertNotIn("Bearer", summary)
         self.assertNotIn("sk-hidden-token-123", summary)
+
+    def test_timeout_diagnostic_distinguishes_upstream_from_local_limit(self):
+        task = {
+            "item_results": [
+                {
+                    "status": "error",
+                    "error_type": "upstream_timeout",
+                    "elapsed_seconds": 62.4,
+                }
+            ]
+        }
+
+        diagnostic = app.build_task_timeout_diagnostic(task)
+
+        self.assertIn("62.4 秒", diagnostic)
+        self.assertIn("上游", diagnostic)
+        self.assertIn(
+            f"{app.GEMINI_IMAGE_REQUEST_TIMEOUT_SECONDS} 秒",
+            diagnostic,
+        )
+
+    def test_timeout_diagnostic_is_ambiguous_near_local_limit(self):
+        task = {
+            "item_results": [
+                {
+                    "status": "error",
+                    "error_type": "upstream_timeout",
+                    "elapsed_seconds": (
+                        app.GEMINI_IMAGE_REQUEST_TIMEOUT_SECONDS - 0.5
+                    ),
+                }
+            ]
+        }
+
+        diagnostic = app.build_task_timeout_diagnostic(task)
+
+        self.assertIn("接近本地等待上限", diagnostic)
+        self.assertIn("无法仅凭耗时判断", diagnostic)
+        self.assertNotIn("因此不是本地等待超时", diagnostic)
+
+    def test_periodic_cleanup_prunes_runners_when_history_cleanup_fails(self):
+        with (
+            patch.object(app, "_TASK_LAST_CLEANUP_TS", 0.0),
+            patch.object(app.time, "time", return_value=10_000.0),
+            patch.object(
+                app,
+                "cleanup_expired_trashed_records",
+                side_effect=RuntimeError("history cleanup failed"),
+            ),
+            patch.object(
+                app.TASK_REPOSITORY,
+                "prune_expired_runners",
+            ) as prune_expired_runners,
+        ):
+            app.maybe_run_periodic_cleanup()
+
+        prune_expired_runners.assert_called_once_with()
+
+    def test_task_route_summary_shows_provider_model_and_task_id(self):
+        task = {
+            "id": "retry-task-123",
+            "payload": {
+                "provider_id": "provider-backup",
+                "model": "gpt-image-2",
+            },
+        }
+
+        with patch.object(
+            app,
+            "get_provider_by_id",
+            return_value={
+                "id": "provider-backup",
+                "name": "备用出图接口",
+                "image_model": "fallback-model",
+            },
+        ):
+            summary = app.build_task_route_summary(task)
+
+        self.assertEqual(
+            summary,
+            "提供商：备用出图接口 · 模型：gpt-image-2 · 任务 ID：retry-task-123",
+        )
+
+    def test_task_route_summary_survives_a_deleted_provider(self):
+        task = {
+            "id": "legacy-task-456",
+            "payload": {
+                "provider_id": "deleted-provider",
+                "model": "gpt-image-1.5",
+            },
+        }
+
+        with patch.object(app, "get_provider_by_id", return_value=None):
+            summary = app.build_task_route_summary(task)
+
+        self.assertEqual(
+            summary,
+            "提供商：未找到 · 模型：gpt-image-1.5 · 任务 ID：legacy-task-456",
+        )
+
     def test_mixed_results_are_ordered_and_missing_items_are_pending(self):
         task = {
             "status": "running",

@@ -277,6 +277,22 @@ class SqliteTaskStore:
             )
         return lease_expires_at
 
+    def prune_expired_runners(
+        self,
+        now: Optional[datetime] = None,
+        retention_seconds: int = 60 * 60,
+    ) -> int:
+        cutoff = (
+            (now or datetime.now())
+            - timedelta(seconds=max(0, int(retention_seconds)))
+        ).isoformat()
+        with self._lock, self._transaction() as connection:
+            cursor = connection.execute(
+                "DELETE FROM task_runners WHERE lease_expires_at < ?",
+                (cutoff,),
+            )
+            return cursor.rowcount
+
     def clear_terminal(
         self,
         terminal_statuses: Iterable[str],
