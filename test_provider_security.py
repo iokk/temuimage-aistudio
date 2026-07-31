@@ -74,6 +74,55 @@ class ProviderSecretPersistenceTests(unittest.TestCase):
                 )
                 self.assertTrue(errors)
 
+    def test_openai_root_base_url_is_normalized_to_v1(self):
+        self.assertEqual(
+            app.normalize_provider_base_url(
+                "openai",
+                "https://relay.example",
+            ),
+            "https://relay.example/v1",
+        )
+        self.assertEqual(
+            app.normalize_provider_base_url(
+                "openai",
+                "https://relay.example/v1",
+            ),
+            "https://relay.example/v1",
+        )
+        self.assertEqual(
+            app.normalize_provider_base_url(
+                "openai",
+                "https://relay.example/custom/openai",
+            ),
+            "https://relay.example/custom/openai",
+        )
+
+    def test_existing_openai_root_base_url_is_migrated_when_loaded(self):
+        provider = self.make_provider()
+        provider["base_url"] = "https://relay.example"
+
+        normalized = app._normalize_provider_entry(provider)
+
+        self.assertEqual(normalized["base_url"], "https://relay.example/v1")
+
+    def test_openai_root_base_url_is_normalized_before_save(self):
+        provider = self.make_provider()
+        provider["base_url"] = "https://relay.example"
+
+        with patch.object(app, "resolve_provider_api_key", return_value="old-secret"):
+            prepared, errors, _ = app.prepare_provider_for_save(provider)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(prepared["base_url"], "https://relay.example/v1")
+
+    def test_openai_client_normalizes_root_base_url_for_runtime_calls(self):
+        client = app.OpenAIClient(
+            api_key="test-key",
+            base_url="https://relay.example",
+        )
+
+        self.assertEqual(client.base_url, "https://relay.example/v1")
+
     def test_new_secret_persistence_fails_closed_without_secure_storage(self):
         provider = self.make_provider()
 

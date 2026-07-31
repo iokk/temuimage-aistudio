@@ -1476,6 +1476,22 @@ def _new_provider_id():
     ).hexdigest()[:10]
 
 
+def normalize_provider_base_url(provider_type: str, base_url: str) -> str:
+    normalized_type = (provider_type or "").strip().lower()
+    normalized_base = (base_url or "").strip()
+    if normalized_type != "openai" or not normalized_base:
+        return normalized_base
+    try:
+        parsed = urllib.parse.urlsplit(normalized_base)
+    except ValueError:
+        return normalized_base
+    if not parsed.scheme or not parsed.netloc or parsed.path not in ("", "/"):
+        return normalized_base
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, "/v1", parsed.query, parsed.fragment)
+    )
+
+
 def _normalize_provider_entry(entry):
     if not isinstance(entry, dict):
         return None
@@ -1483,7 +1499,10 @@ def _normalize_provider_entry(entry):
     name = (entry.get("name") or "").strip() or "个人提供商"
     provider_type = (entry.get("provider_type") or "gemini").strip().lower()
     api_key = (entry.get("api_key") or "").strip()
-    base_url = (entry.get("base_url") or "").strip()
+    base_url = normalize_provider_base_url(
+        provider_type,
+        entry.get("base_url") or "",
+    )
     title_model = (entry.get("title_model") or "").strip()
     vision_model = (entry.get("vision_model") or "").strip()
     image_model = (entry.get("image_model") or "").strip()
@@ -1798,6 +1817,10 @@ def prepare_provider_for_save(provider: dict, replacement_secret: str = ""):
     if errors:
         return None, errors, False
     prepared = copy.deepcopy(provider)
+    prepared["base_url"] = normalize_provider_base_url(
+        prepared.get("provider_type", "gemini"),
+        prepared.get("base_url", ""),
+    )
     if replacement_secret:
         prepared, stored_securely = persist_provider_secret(
             prepared, replacement_secret
@@ -5352,8 +5375,9 @@ class OpenAIClient(GeminiClient):
     ):
         self.api_key = api_key
         self.model = (model or "").strip() or OPENAI_DEFAULT_IMAGE_MODEL
-        self.base_url = (
-            (base_url or "").strip() or OPENAI_DEFAULT_BASE_URL
+        self.base_url = normalize_provider_base_url(
+            "openai",
+            (base_url or "").strip() or OPENAI_DEFAULT_BASE_URL,
         ).rstrip("/")
         self.title_model = (title_model or "").strip() or OPENAI_DEFAULT_TEXT_MODEL
         self.vision_model = (vision_model or "").strip() or self.title_model
@@ -5411,8 +5435,12 @@ class OpenAIClient(GeminiClient):
                 self.last_error = self._sanitize_client_error(
                     detail or f"HTTP {e.code}"
                 )
-                if e.code in (401, 403):
-                    raise Exception("API Key 无效或没有访问权限")
+                if e.code == 401:
+                    raise Exception("API Key 无效或未配置")
+                if e.code == 403:
+                    raise Exception(
+                        "提供商拒绝访问该模型或接口，请检查模型权限和接口地址"
+                    )
                 if e.code == 402 or (
                     "insufficient" in low and ("balance" in low or "quota" in low)
                 ):

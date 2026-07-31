@@ -33,6 +33,49 @@ class FailedItemRetryTests(unittest.TestCase):
 
         self.assertEqual(result, "请求超时，请检查网络、代理或模型响应速度。")
 
+    def test_sanitize_task_error_distinguishes_forbidden_from_invalid_key(self):
+        self.assertEqual(
+            app.sanitize_task_error(
+                "提供商拒绝访问该模型或接口，请检查模型权限和接口地址。"
+            ),
+            "提供商拒绝访问该模型或接口，请检查模型权限和接口地址。",
+        )
+        self.assertEqual(
+            app.sanitize_task_error("API Key 无效或未配置"),
+            "API Key 无效或未配置。",
+        )
+
+    def test_openai_http_401_and_403_have_distinct_messages(self):
+        client = app.OpenAIClient(
+            "opaque-provider-secret",
+            base_url="https://relay.example/v1",
+        )
+        expected_messages = {
+            401: "API Key 无效或未配置",
+            403: "提供商拒绝访问该模型或接口",
+        }
+
+        for status, expected_message in expected_messages.items():
+            error = urllib.error.HTTPError(
+                "https://relay.example/v1/images/edits",
+                status,
+                "request rejected",
+                {},
+                io.BytesIO(b'{"error":{"message":"request rejected"}}'),
+            )
+            with self.subTest(status=status):
+                with patch.object(
+                    app.urllib.request,
+                    "urlopen",
+                    side_effect=error,
+                ):
+                    with self.assertRaisesRegex(Exception, expected_message):
+                        client._openai_call(
+                            "/images/edits",
+                            {},
+                            retries=1,
+                        )
+
     def test_classifies_sanitized_timeout_as_retryable(self):
         result = app.classify_image_task_error(
             "请求超时，请检查网络、代理或模型响应速度。"
