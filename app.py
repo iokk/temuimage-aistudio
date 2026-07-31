@@ -2937,6 +2937,9 @@ def update_task(
 
 
 def create_task(task_type: str, payload: dict):
+    payload = copy.deepcopy(payload or {})
+    if task_type == "smart" and not payload.get("retry_items"):
+        payload.setdefault("compliance_user_id", get_user_id())
     handler = get_task_handlers().get(str(task_type or ""))
     validation_errors = (
         [f"不支持的任务类型：{task_type or 'unknown'}"]
@@ -4040,7 +4043,33 @@ def get_user_id():
 
 
 # ==================== 合规检测 ====================
-def check_compliance(text, mode=None):
+def _matches_compliance_term(text_lower: str, term: str) -> bool:
+    normalized_term = str(term or "").strip().lower()
+    if not normalized_term:
+        return False
+    if normalized_term.isascii() and any(char.isalpha() for char in normalized_term):
+        return bool(
+            re.search(
+                rf"(?<![a-z0-9]){re.escape(normalized_term)}(?![a-z0-9])",
+                text_lower,
+            )
+        )
+    return normalized_term in text_lower
+
+
+def _find_concatenated_compliance_terms(text_lower: str, terms: set[str]) -> set[str]:
+    latin_terms = [
+        term for term in terms if term.isascii() and term.isalpha()
+    ]
+    matches = set()
+    for prefix in latin_terms:
+        for suffix in latin_terms:
+            if f"{prefix}{suffix}" in text_lower:
+                matches.update((prefix, suffix))
+    return matches
+
+
+def check_compliance(text, mode=None, user_id=None):
     if not text:
         return True, text, ""
     if mode is None:
@@ -4049,15 +4078,24 @@ def check_compliance(text, mode=None):
     preset = comp["presets"].get(mode, comp["presets"]["strict"])
     blacklist = set(w.lower() for w in preset.get("blacklist", []))
     blacklist.update(w.lower() for w in comp.get("custom_blacklist", []))
-    uid = get_user_id()
+    uid = get_user_id() if user_id is None else str(user_id or "")
     user_custom = comp.get("user_custom", {}).get(uid, {})
     blacklist.update(w.lower() for w in user_custom.get("blacklist", []))
     whitelist = set(w.lower() for w in comp.get("whitelist", []))
     whitelist.update(w.lower() for w in user_custom.get("whitelist", []))
     text_lower = text.lower()
-    issues = [w for w in blacklist if w in text_lower and w not in whitelist]
+    issues = {
+        word
+        for word in blacklist
+        if word not in whitelist and _matches_compliance_term(text_lower, word)
+    }
+    issues.update(
+        word
+        for word in _find_concatenated_compliance_terms(text_lower, blacklist)
+        if word not in whitelist
+    )
     if issues:
-        return False, text, f"风险词: {', '.join(issues[:5])}"
+        return False, text, f"风险词: {', '.join(sorted(issues)[:5])}"
     return True, text, ""
 
 
@@ -7360,6 +7398,63 @@ def build_smart_requirements(selected_types: dict, templates: dict) -> list:
     return requirements
 
 
+def can_submit_smart_generation(images, workflow_mode: str, total_count: int) -> bool:
+    return bool(images) and (workflow_mode == "translate" or total_count > 0)
+
+
+def build_smart_task_summary(
+    workflow_mode: str, product_name: str, total_count: int, image_count: int
+) -> str:
+    name = str(product_name or "").strip()
+    if workflow_mode == "translate":
+        return f"组图翻译任务 · {name or '未命名项目'} · {image_count}张"
+    return f"快速出图任务 · {name or 'AI识图'} · {total_count}张"
+
+
+def append_smart_generation_instruction(
+    base_prompt: str, user_instruction: str
+) -> str:
+    instruction = str(user_instruction or "").strip()
+    if not instruction:
+        return base_prompt
+    return (
+        f"{base_prompt}\n\n"
+        "USER CREATIVE DIRECTION:\n"
+        f"{instruction}\n\n"
+        "Keep the product identity faithful to the reference image; do not alter "
+        "its shape, color, material, branding, or logo unless the reference "
+        "image itself supports it."
+    )
+
+
+def append_smart_generation_compliance_rules(
+    base_prompt: str, compliance_mode: str
+) -> str:
+    rules = str(get_compliance_prompt(compliance_mode) or "").strip()
+    if not rules:
+        return base_prompt
+    return (
+        f"{base_prompt}\n\n"
+        "MANDATORY COMPLIANCE RULES:\n"
+        f"{rules}\n"
+        "These rules override any user creative direction and must be followed."
+    )
+
+
+def validate_smart_generation_instruction(
+    user_instruction: str, compliance_mode: str, user_id=None
+) -> tuple[str, str]:
+    instruction = str(user_instruction or "").strip()
+    if not instruction:
+        return "", ""
+    allowed, cleaned_instruction, note = check_compliance(
+        instruction, compliance_mode, user_id=user_id
+    )
+    if not allowed:
+        return "", f"补充提示词未通过合规检测：{note or '请调整后重试。'}"
+    return str(cleaned_instruction or instruction).strip(), ""
+
+
 def _save_uploaded_images(files, prefix: str):
     saved = []
     upload_dir = DATA_DIR / "task_uploads"
@@ -7432,6 +7527,15 @@ def _execute_smart_task(execution: TaskExecution):
     results = []
     errors = []
     retry_items = payload.get("retry_items", []) or []
+    user_instruction = ""
+    if not retry_items:
+        user_instruction, instruction_error = validate_smart_generation_instruction(
+            payload.get("user_instruction", ""),
+            str(payload.get("compliance_mode") or "strict"),
+            user_id=str(payload.get("compliance_user_id") or ""),
+        )
+        if instruction_error:
+            raise ValueError(instruction_error)
     analysis_client = None
     if retry_items:
         item_jobs = [
@@ -7479,6 +7583,13 @@ def _execute_smart_task(execution: TaskExecution):
                 prompt = analysis_client.compose_image_prompt(
                     anchor, req, payload.get("aspect", "1:1"), image_language
                 )
+                prompt = append_smart_generation_instruction(
+                    prompt, user_instruction
+                )
+                if user_instruction:
+                    prompt = append_smart_generation_compliance_rules(
+                        prompt, payload.get("compliance_mode", "strict")
+                    )
                 item_jobs.append(
                     {
                         "type_name": info["name"],
@@ -7844,6 +7955,20 @@ def _validate_image_task_payload(payload: dict):
     return []
 
 
+def _validate_smart_task_payload(payload: dict):
+    errors = list(_validate_image_task_payload(payload))
+    if payload.get("retry_items"):
+        return errors
+    _, instruction_error = validate_smart_generation_instruction(
+        payload.get("user_instruction", ""),
+        str(payload.get("compliance_mode") or "strict"),
+        user_id=payload.get("compliance_user_id"),
+    )
+    if instruction_error:
+        errors.append(instruction_error)
+    return errors
+
+
 def _validate_combo_task_payload(payload: dict):
     errors = list(_validate_image_task_payload(payload))
     if not payload.get("reqs"):
@@ -7862,7 +7987,7 @@ def get_task_handlers():
             _execute_translate_task, validate_payload=_validate_image_task_payload
         ),
         "smart": TaskHandler(
-            _execute_smart_task, validate_payload=_validate_image_task_payload
+            _execute_smart_task, validate_payload=_validate_smart_task_payload
         ),
         "text_to_image": TaskHandler(
             _execute_text_to_image_task,
@@ -9320,15 +9445,34 @@ def show_smart_page():
     st.markdown("---")
     c1, c2 = st.columns(2)
     with c1:
-        name = st.text_input("商品名称 *", key="smart_name")
+        name = st.text_input(
+            "商品名称（可选）",
+            key="smart_name",
+            placeholder="不填写时由 AI 根据商品图识别",
+            help="仅在商品型号、品类或名称不易从图片识别时填写。",
+        )
     with c2:
-        material = st.text_input("材质", key="smart_material")
+        material = st.text_input(
+            "材质（可选）",
+            key="smart_material",
+            placeholder="例如：304 不锈钢",
+        )
+    user_instruction = ""
+    name = name.strip()
+    material = material.strip()
 
     st.markdown("---")
 
     if workflow_mode == "creative":
         selected_types, total_count = render_type_selector(
             templates, prefix="smart", max_per_type=5, max_total=20
+        )
+        user_instruction = st.text_area(
+            "补充提示词（可选）",
+            key="smart_user_instruction",
+            max_chars=MAX_TITLE_INFO_CHARS,
+            placeholder="例如：强调杯盖密封，使用干净的厨房台面场景，画面不添加额外文案",
+            help="会附加到本次每一张出图的提示词中；商品本体仍以参考图为准。",
         )
         enable_title, title_info, title_template, title_language, title_vision_model = (
             render_title_gen_option("smart", provider)
@@ -9383,9 +9527,7 @@ def show_smart_page():
     thinking_level = output_settings["thinking_level"]
     compliance_mode = output_settings["compliance_mode"]
 
-    can_gen = bool(images) and (
-        workflow_mode == "translate" or (name and total_count > 0)
-    )
+    can_gen = can_submit_smart_generation(images, workflow_mode, total_count)
 
     if st.button(
         "🚀 开始翻译" if workflow_mode == "translate" else "🚀 开始生成",
@@ -9393,6 +9535,13 @@ def show_smart_page():
         width="stretch",
         disabled=not can_gen,
     ):
+        user_instruction, instruction_error = validate_smart_generation_instruction(
+            user_instruction if workflow_mode == "creative" else "",
+            compliance_mode,
+        )
+        if instruction_error:
+            st.error(instruction_error)
+            return
         image_paths = _save_uploaded_images(files or [], f"smart_{int(time.time())}")
         task, err = create_task(
             "translate" if workflow_mode == "translate" else "smart",
@@ -9401,6 +9550,7 @@ def show_smart_page():
                 "image_paths": image_paths,
                 "name": name,
                 "material": material or "",
+                "user_instruction": user_instruction.strip(),
                 "selected_types": selected_types,
                 "total": total_count,
                 "image_language": image_language,
@@ -9417,10 +9567,11 @@ def show_smart_page():
                 "vision_model": title_vision_model,
                 "translation_template": translation_template,
                 "compliance_mode": compliance_mode,
-                "summary": (
-                    f"组图翻译任务 · {name or '未命名项目'} · {len(images)}张"
-                    if workflow_mode == "translate"
-                    else f"快速出图任务 · {name} · {total_count}张"
+                "summary": build_smart_task_summary(
+                    workflow_mode,
+                    name,
+                    total_count=total_count,
+                    image_count=len(images),
                 ),
             },
         )

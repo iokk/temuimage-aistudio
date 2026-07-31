@@ -86,6 +86,389 @@ class ComboSubmissionTests(unittest.TestCase):
         self.assertEqual(payload["model"], "fallback-model")
 
 
+class SmartGenerationInputTests(unittest.TestCase):
+    def test_creative_submission_requires_images_and_selected_type_not_product_name(self):
+        self.assertTrue(app.can_submit_smart_generation([object()], "creative", 1))
+        self.assertFalse(app.can_submit_smart_generation([], "creative", 1))
+        self.assertFalse(app.can_submit_smart_generation([object()], "creative", 0))
+        self.assertTrue(app.can_submit_smart_generation([object()], "translate", 0))
+
+    def test_optional_instruction_is_appended_without_replacing_reference_identity(self):
+        self.assertEqual(
+            app.append_smart_generation_instruction("base prompt", ""),
+            "base prompt",
+        )
+        prompt = app.append_smart_generation_instruction(
+            "base prompt", "强调杯盖密封性能"
+        )
+        self.assertIn("base prompt", prompt)
+        self.assertIn("强调杯盖密封性能", prompt)
+        self.assertIn("reference image", prompt)
+
+    def test_task_summary_treats_whitespace_only_product_name_as_ai_recognition(self):
+        self.assertEqual(
+            app.build_smart_task_summary(
+                "creative", "   ", total_count=2, image_count=1
+            ),
+            "快速出图任务 · AI识图 · 2张",
+        )
+        self.assertEqual(
+            app.build_smart_task_summary(
+                "translate", "   ", total_count=0, image_count=1
+            ),
+            "组图翻译任务 · 未命名项目 · 1张",
+        )
+
+    def test_compliance_rules_are_final_and_override_user_direction(self):
+        with patch.object(
+            app, "get_compliance_prompt", return_value="Avoid unsupported claims."
+        ):
+            prompt = app.append_smart_generation_compliance_rules(
+                "base prompt\nUSER CREATIVE DIRECTION:\nAdd a claim", "strict"
+            )
+
+        self.assertIn("MANDATORY COMPLIANCE RULES", prompt)
+        self.assertIn("Avoid unsupported claims.", prompt)
+        self.assertGreater(
+            prompt.index("MANDATORY COMPLIANCE RULES"),
+            prompt.index("USER CREATIVE DIRECTION"),
+        )
+        self.assertIn("override any user creative direction", prompt)
+
+    def test_instruction_validation_rejects_noncompliant_direction_before_queueing(self):
+        with patch.object(
+            app,
+            "check_compliance",
+            return_value=(False, "unsafe claim", "风险词: cure"),
+        ):
+            instruction, error = app.validate_smart_generation_instruction(
+                "unsafe claim", "strict"
+            )
+
+        self.assertEqual(instruction, "")
+        self.assertIn("补充提示词未通过合规检测", error)
+        self.assertIn("风险词: cure", error)
+
+    def test_compliance_uses_word_matching_for_english_terms(self):
+        with (
+            patch.object(app, "get_compliance", return_value=app.DEFAULT_COMPLIANCE),
+            patch.object(app, "get_user_id", return_value="test-user"),
+        ):
+            allowed, _, _ = app.check_compliance(
+                "Use a secure lid on a clean kitchen counter scene", "strict"
+            )
+            blocked, _, note = app.check_compliance("CE certified", "strict")
+
+        self.assertTrue(allowed)
+        self.assertFalse(blocked)
+        self.assertIn("ce", note)
+
+    def test_compliance_blocks_concatenated_english_blacklist_terms(self):
+        with (
+            patch.object(app, "get_compliance", return_value=app.DEFAULT_COMPLIANCE),
+            patch.object(app, "get_user_id", return_value="test-user"),
+        ):
+            fda_allowed, _, fda_note = app.check_compliance("FDAapproved", "strict")
+            medical_allowed, _, medical_note = app.check_compliance(
+                "medicalcure", "strict"
+            )
+
+        self.assertFalse(fda_allowed)
+        self.assertIn("fda", fda_note)
+        self.assertFalse(medical_allowed)
+        self.assertIn("medical", medical_note)
+
+    def test_smart_task_handler_rejects_noncompliant_instruction_at_queue_boundary(self):
+        payload = {
+            "image_paths": ["reference.png"],
+            "user_instruction": "unsafe claim",
+            "compliance_mode": "strict",
+        }
+
+        with patch.object(
+            app,
+            "check_compliance",
+            return_value=(False, "unsafe claim", "风险词: cure"),
+        ):
+            errors = app.get_task_handlers()["smart"].validate_payload(payload)
+
+        self.assertTrue(any("补充提示词未通过合规检测" in error for error in errors))
+        self.assertTrue(any("风险词: cure" in error for error in errors))
+
+    def test_smart_retry_does_not_revalidate_ignored_user_instruction(self):
+        payload = {
+            "image_paths": ["reference.png"],
+            "user_instruction": "unsafe claim",
+            "retry_items": [{"prompt": "stored final prompt"}],
+            "compliance_mode": "strict",
+        }
+
+        with patch.object(
+            app,
+            "check_compliance",
+            return_value=(False, "unsafe claim", "风险词: cure"),
+        ):
+            errors = app.get_task_handlers()["smart"].validate_payload(payload)
+
+        self.assertEqual(errors, [])
+
+    def test_create_smart_task_persists_compliance_user_context(self):
+        payload = {"image_paths": ["reference.png"], "selected_types": {"S1": 1}}
+
+        with (
+            patch.object(app, "get_user_id", return_value="task-user"),
+            patch.object(app, "get_session_owner_id", return_value="workspace-owner"),
+            patch.object(app, "get_task_limits", return_value=(1, 20)),
+            patch.object(
+                app.TASK_REPOSITORY,
+                "create",
+                side_effect=lambda task, **_kwargs: task,
+            ),
+        ):
+            task, error = app.create_task("smart", payload)
+
+        self.assertEqual(error, "")
+        self.assertEqual(task["payload"]["compliance_user_id"], "task-user")
+        self.assertNotIn("compliance_user_id", payload)
+
+
+class SmartGenerationInstructionTests(unittest.TestCase):
+    def test_execution_uses_persisted_compliance_user_without_session_access(self):
+        task = {
+            "id": "smart-compliance-owner",
+            "type": "smart",
+            "payload": {
+                "provider_id": "provider-1",
+                "image_paths": ["reference.png"],
+                "selected_types": {},
+                "user_instruction": "unsafe claim",
+                "compliance_mode": "strict",
+                "compliance_user_id": "task-user",
+            },
+        }
+        compliance = {
+            "presets": {"strict": {"blacklist": []}},
+            "custom_blacklist": [],
+            "whitelist": [],
+            "user_custom": {
+                "task-user": {"blacklist": ["unsafe"], "whitelist": []}
+            },
+        }
+        execution = Mock()
+        execution.task = task
+
+        with (
+            patch.object(
+                app, "get_provider_by_id", return_value={"api_key": "test-key"}
+            ),
+            patch.object(app, "get_active_provider", return_value=None),
+            patch.object(app, "load_image_paths", return_value=[object()]),
+            patch.object(app, "get_compliance", return_value=compliance),
+            patch.object(
+                app,
+                "get_user_id",
+                side_effect=AssertionError("worker must not read Streamlit session state"),
+            ),
+            patch.object(app, "create_ai_client") as create_ai_client,
+        ):
+            with self.assertRaisesRegex(ValueError, "风险词: unsafe"):
+                app._execute_smart_task(execution)
+
+        create_ai_client.assert_not_called()
+
+    def test_execution_rejects_unvalidated_noncompliant_instruction(self):
+        task = {
+            "id": "unsafe-smart-task",
+            "type": "smart",
+            "payload": {
+                "provider_id": "provider-1",
+                "image_paths": ["reference.png"],
+                "selected_types": {},
+                "user_instruction": "unsafe claim",
+                "compliance_mode": "strict",
+            },
+        }
+        execution = Mock()
+        execution.task = task
+
+        with (
+            patch.object(
+                app, "get_provider_by_id", return_value={"api_key": "test-key"}
+            ),
+            patch.object(app, "get_active_provider", return_value=None),
+            patch.object(app, "load_image_paths", return_value=[object()]),
+            patch.object(
+                app,
+                "check_compliance",
+                return_value=(False, "unsafe claim", "风险词: cure"),
+            ),
+            patch.object(app, "create_ai_client") as create_ai_client,
+        ):
+            with self.assertRaisesRegex(ValueError, "补充提示词未通过合规检测"):
+                app._execute_smart_task(execution)
+
+        create_ai_client.assert_not_called()
+
+    def test_task_appends_optional_instruction_to_generated_image_prompt(self):
+        class CapturingClient:
+            def __init__(self):
+                self.image_prompts = []
+
+            def analyze_product(self, *_args):
+                return {
+                    "product_name_en": "Travel Mug",
+                    "product_name_zh": "保温杯",
+                    "primary_category": "Drinkware",
+                    "visual_attrs": ["stainless steel"],
+                }
+
+            def generate_en_copy(self, _anchor, requirements, _language):
+                return requirements
+
+            def compose_image_prompt(self, *_args):
+                return "base image prompt"
+
+            def generate_image(self, _refs, prompt, *_args):
+                self.image_prompts.append(prompt)
+                return object()
+
+            def get_last_error(self):
+                return ""
+
+        task = {
+            "id": "smart-user-instruction",
+            "type": "smart",
+            "payload": {
+                "provider_id": "provider-1",
+                "image_paths": ["reference.png"],
+                "selected_types": {"S1": 2},
+                "user_instruction": "Use a clean kitchen counter scene",
+                "image_language": "zh",
+            },
+        }
+        provider = {"id": "provider-1", "api_key": "test-key"}
+        client = CapturingClient()
+        execution = Mock()
+        execution.task = task
+        templates = {
+            "S1": {"name": "卖点图", "desc": "突出商品核心优势", "hint": "clean"}
+        }
+
+        with (
+            patch.object(app, "get_provider_by_id", return_value=provider),
+            patch.object(app, "get_active_provider", return_value=None),
+            patch.object(app, "load_image_paths", return_value=[object()]),
+            patch.object(app, "get_template_group", return_value=templates),
+            patch.object(app, "create_ai_client", return_value=client),
+            patch.object(app, "persist_image_for_task", return_value="result.png"),
+            patch.object(
+                app,
+                "get_compliance_prompt",
+                return_value="Avoid unsupported claims.",
+            ),
+        ):
+            result = app._execute_smart_task(execution)
+
+        self.assertEqual(result["files"], ["result.png", "result.png"])
+        self.assertEqual(len(client.image_prompts), 2)
+        for prompt in client.image_prompts:
+            self.assertIn("Use a clean kitchen counter scene", prompt)
+            self.assertIn("shape, color, material, branding, or logo", prompt)
+            self.assertIn("MANDATORY COMPLIANCE RULES", prompt)
+            self.assertIn("Avoid unsupported claims.", prompt)
+
+    def test_legacy_task_without_instruction_keeps_existing_prompt(self):
+        class CapturingClient:
+            def __init__(self):
+                self.image_prompts = []
+
+            def analyze_product(self, *_args):
+                return {"product_name_en": "Travel Mug"}
+
+            def generate_en_copy(self, _anchor, requirements, _language):
+                return requirements
+
+            def compose_image_prompt(self, *_args):
+                return "legacy base prompt"
+
+            def generate_image(self, _refs, prompt, *_args):
+                self.image_prompts.append(prompt)
+                return object()
+
+            def get_last_error(self):
+                return ""
+
+        task = {
+            "id": "legacy-smart-task",
+            "type": "smart",
+            "payload": {
+                "provider_id": "provider-1",
+                "image_paths": ["reference.png"],
+                "selected_types": {"S1": 1},
+                "image_language": "zh",
+            },
+        }
+        provider = {"id": "provider-1", "api_key": "test-key"}
+        client = CapturingClient()
+        execution = Mock()
+        execution.task = task
+        templates = {"S1": {"name": "卖点图", "desc": "突出商品核心优势"}}
+
+        with (
+            patch.object(app, "get_provider_by_id", return_value=provider),
+            patch.object(app, "get_active_provider", return_value=None),
+            patch.object(app, "load_image_paths", return_value=[object()]),
+            patch.object(app, "get_template_group", return_value=templates),
+            patch.object(app, "create_ai_client", return_value=client),
+            patch.object(app, "persist_image_for_task", return_value="result.png"),
+        ):
+            app._execute_smart_task(execution)
+
+        self.assertEqual(client.image_prompts, ["legacy base prompt"])
+
+    def test_failed_item_retry_reuses_saved_final_prompt_once(self):
+        class CapturingClient:
+            def __init__(self):
+                self.image_prompts = []
+
+            def generate_image(self, _refs, prompt, *_args):
+                self.image_prompts.append(prompt)
+                return object()
+
+            def get_last_error(self):
+                return ""
+
+        stored_prompt = "stored final prompt with user direction and compliance"
+        task = {
+            "id": "smart-retry-task",
+            "type": "smart",
+            "payload": {
+                "provider_id": "provider-1",
+                "image_paths": ["reference.png"],
+                "retry_items": [
+                    {"type_name": "卖点图", "index": 1, "prompt": stored_prompt}
+                ],
+                "user_instruction": "must not be appended during retry",
+                "image_language": "zh",
+            },
+        }
+        provider = {"id": "provider-1", "api_key": "test-key"}
+        client = CapturingClient()
+        execution = Mock()
+        execution.task = task
+
+        with (
+            patch.object(app, "get_provider_by_id", return_value=provider),
+            patch.object(app, "get_active_provider", return_value=None),
+            patch.object(app, "load_image_paths", return_value=[object()]),
+            patch.object(app, "create_ai_client", return_value=client),
+            patch.object(app, "persist_image_for_task", return_value="result.png"),
+        ):
+            app._execute_smart_task(execution)
+
+        self.assertEqual(client.image_prompts, [stored_prompt])
+
+
 class TranslationErrorSecurityTests(unittest.TestCase):
     def test_provider_secret_is_sanitized_before_translation_log_and_checkpoint(self):
         opaque_secret = "opaque-translation-secret-123"
