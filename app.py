@@ -7508,48 +7508,53 @@ def build_suite_task_requests(plan, persisted_assets) -> list[dict]:
     if not isinstance(plan, Mapping) or not isinstance(plan.get("plan_items"), list):
         raise ValueError("plan must contain a plan_items list")
     paths_by_id = _persisted_asset_path_map(persisted_assets)
-    requests = []
-    for index, item in enumerate(plan["plan_items"], start=1):
-        if not isinstance(item, Mapping):
-            raise ValueError(f"plan item {index} must be a mapping")
-        item_id = str(item.get("id") or "").strip()
-        type_key = str(item.get("type_key") or "").strip()
-        title = str(item.get("title") or "").strip()
-        final_prompt = str(item.get("final_prompt") or "")
-        if not item_id or not type_key or not title or not final_prompt.strip():
-            raise ValueError(
-                f"plan item {index} must contain id, type_key, title, and final_prompt"
-            )
-        reference_ids = item.get("reference_asset_ids")
-        if (
-            not isinstance(reference_ids, list)
-            or not 1 <= len(reference_ids) <= 3
-            or any(
-                not isinstance(asset_id, str) or not asset_id.strip()
-                for asset_id in reference_ids
-            )
-            or len(set(reference_ids)) != len(reference_ids)
-        ):
-            raise ValueError(
-                f"plan item {item_id} must contain one to three unique reference_asset_ids"
-            )
-        missing_ids = [asset_id for asset_id in reference_ids if asset_id not in paths_by_id]
-        if missing_ids:
-            raise ValueError(
-                f"plan item {item_id} references missing persisted asset: {missing_ids[0]}"
-            )
-        requests.append(
-            {
-                "id": item_id,
-                "type_key": type_key,
-                "type_name": title,
-                "title": title,
-                "final_prompt": final_prompt,
-                "reference_asset_ids": list(reference_ids),
-                "image_paths": [paths_by_id[asset_id] for asset_id in reference_ids],
-            }
+    return [
+        _build_suite_task_request(item, paths_by_id, index)
+        for index, item in enumerate(plan["plan_items"], start=1)
+    ]
+
+
+def _build_suite_task_request(item, paths_by_id: Mapping, index: int) -> dict:
+    if not isinstance(item, Mapping):
+        raise ValueError(f"plan item {index} must be a mapping")
+    item_id = item.get("id")
+    type_key = item.get("type_key")
+    title = item.get("title")
+    final_prompt = item.get("final_prompt")
+    if any(
+        not isinstance(value, str) or not value.strip()
+        for value in (item_id, type_key, title, final_prompt)
+    ):
+        raise ValueError(
+            f"plan item {index} must contain id, type_key, title, and final_prompt"
         )
-    return requests
+    reference_ids = item.get("reference_asset_ids")
+    if (
+        not isinstance(reference_ids, list)
+        or not 1 <= len(reference_ids) <= 3
+        or any(
+            not isinstance(asset_id, str) or not asset_id.strip()
+            for asset_id in reference_ids
+        )
+        or len(set(reference_ids)) != len(reference_ids)
+    ):
+        raise ValueError(
+            f"plan item {item_id} must contain one to three unique reference_asset_ids"
+        )
+    missing_ids = [asset_id for asset_id in reference_ids if asset_id not in paths_by_id]
+    if missing_ids:
+        raise ValueError(
+            f"plan item {item_id} references missing persisted asset: {missing_ids[0]}"
+        )
+    return {
+        "id": item_id,
+        "type_key": type_key,
+        "type_name": title,
+        "title": title,
+        "final_prompt": final_prompt,
+        "reference_asset_ids": list(reference_ids),
+        "image_paths": [paths_by_id[asset_id] for asset_id in reference_ids],
+    }
 
 
 def _execute_title_task(execution: TaskExecution):
@@ -8046,6 +8051,158 @@ def _validate_smart_task_payload(payload: dict):
     return errors
 
 
+def _validate_suite_task_snapshot(payload: dict) -> list[str]:
+    errors = []
+    plan = payload.get("suite_plan")
+    if not isinstance(plan, Mapping):
+        return ["套图计划已丢失"]
+
+    assets = plan.get("assets")
+    asset_by_id = {}
+    if not isinstance(assets, list):
+        errors.append("suite_plan.assets 必须是有效列表")
+    else:
+        for index, asset in enumerate(assets, start=1):
+            asset_id = asset.get("id") if isinstance(asset, Mapping) else None
+            if not isinstance(asset_id, str) or not asset_id.strip():
+                errors.append(f"第 {index} 个套图素材记录无效")
+            elif asset_id in asset_by_id:
+                errors.append(f"套图素材 ID 重复：{asset_id}")
+            else:
+                asset_by_id[asset_id] = asset
+
+    plan_items = plan.get("plan_items")
+    plan_item_by_id = {}
+    if not isinstance(plan_items, list):
+        errors.append("suite_plan.plan_items 必须是有效列表")
+    else:
+        validation_paths = {asset_id: asset_id for asset_id in asset_by_id}
+        for index, item in enumerate(plan_items, start=1):
+            item_id = item.get("id") if isinstance(item, Mapping) else None
+            if not isinstance(item_id, str) or not item_id.strip():
+                errors.append(f"第 {index} 个套图计划项记录无效")
+                continue
+            if item_id in plan_item_by_id:
+                errors.append(f"套图计划项 ID 重复：{item_id}")
+                continue
+            plan_item_by_id[item_id] = item
+            try:
+                _build_suite_task_request(item, validation_paths, index)
+            except ValueError as exc:
+                errors.append(f"套图计划项 {item_id} 无效：{exc}")
+
+    durable_image_paths = payload.get("image_paths")
+    if not isinstance(durable_image_paths, list) or any(
+        not isinstance(path, str) or not path.strip()
+        for path in durable_image_paths or []
+    ):
+        errors.append("套图任务 image_paths 必须是有效列表")
+        durable_path_set = set()
+    else:
+        durable_path_set = set(durable_image_paths)
+
+    reqs = payload.get("reqs")
+    if not isinstance(reqs, list) or not reqs:
+        errors.append("套图任务 reqs 必须是非空列表")
+        return errors
+
+    req_by_id = {}
+    asset_paths = {}
+    request_parts = []
+    for index, req in enumerate(reqs, start=1):
+        if not isinstance(req, Mapping):
+            errors.append(f"第 {index} 个套图请求格式无效")
+            continue
+        req_id = req.get("id")
+        valid_req_id = (
+            req_id if isinstance(req_id, str) and req_id.strip() else None
+        )
+        if valid_req_id is None:
+            errors.append(f"第 {index} 个套图请求缺少有效 ID")
+        elif valid_req_id in req_by_id:
+            errors.append(f"套图请求 ID 重复：{valid_req_id}")
+        else:
+            req_by_id[valid_req_id] = req
+
+        reference_ids = req.get("reference_asset_ids")
+        reference_paths = req.get("image_paths")
+        references_valid = (
+            isinstance(reference_ids, list)
+            and 1 <= len(reference_ids) <= 3
+            and all(
+                isinstance(asset_id, str) and asset_id.strip()
+                for asset_id in reference_ids
+            )
+            and len(set(reference_ids)) == len(reference_ids)
+        )
+        if not references_valid:
+            errors.append(
+                f"第 {index} 个套图请求的引用素材 ID 必须为 1 至 3 个非空唯一值"
+            )
+        paths_valid = (
+            isinstance(reference_paths, list)
+            and references_valid
+            and len(reference_paths) == len(reference_ids)
+            and all(
+                isinstance(path, str) and path.strip() for path in reference_paths
+            )
+        )
+        if not paths_valid:
+            errors.append(f"第 {index} 个套图请求必须包含 1 至 3 张参考图")
+        if not references_valid or not paths_valid:
+            request_parts.append((valid_req_id, req, None))
+            continue
+
+        unknown_ids = [
+            asset_id for asset_id in reference_ids if asset_id not in asset_by_id
+        ]
+        if unknown_ids:
+            errors.append(
+                f"第 {index} 个套图请求引用了未知素材：{unknown_ids[0]}"
+            )
+        for asset_id, path in zip(reference_ids, reference_paths):
+            if path not in durable_path_set:
+                errors.append(f"第 {index} 个套图请求引用了未持久化的参考图")
+            existing_path = asset_paths.get(asset_id)
+            if existing_path is not None and existing_path != path:
+                errors.append(f"套图素材 {asset_id} 的持久化路径映射冲突")
+            else:
+                asset_paths[asset_id] = path
+        request_parts.append((valid_req_id, req, reference_ids))
+
+    plan_ids = set(plan_item_by_id)
+    req_ids = set(req_by_id)
+    if payload.get("retry_parent_id"):
+        if not req_ids or not req_ids.issubset(plan_ids):
+            errors.append("失败项重试请求 ID 必须是原套图计划项的非空子集")
+    elif req_ids != plan_ids or len(reqs) != len(plan_item_by_id):
+        errors.append("首次套图请求 ID 必须与计划项完整匹配")
+
+    projection_fields = (
+        "id",
+        "type_key",
+        "title",
+        "type_name",
+        "final_prompt",
+        "reference_asset_ids",
+    )
+    for req_id, req, reference_ids in request_parts:
+        plan_item = plan_item_by_id.get(req_id)
+        if plan_item is None:
+            errors.append(f"套图请求 {req_id or 'unknown'} 与冻结计划不一致")
+            continue
+        if reference_ids is None:
+            continue
+        try:
+            expected_req = _build_suite_task_request(plan_item, asset_paths, 1)
+        except ValueError:
+            errors.append(f"套图请求 {req_id} 与冻结计划不一致")
+            continue
+        if any(req.get(field) != expected_req[field] for field in projection_fields):
+            errors.append(f"套图请求 {req_id} 与冻结计划不一致")
+    return errors
+
+
 def _validate_combo_task_payload(payload: dict):
     errors = list(_validate_image_task_payload(payload))
     if not payload.get("reqs"):
@@ -8056,30 +8213,7 @@ def _validate_combo_task_payload(payload: dict):
         errors.append("不支持的套图任务版本")
     if not isinstance(payload.get("suite_draft"), Mapping):
         errors.append("套图草稿已丢失")
-    if not isinstance(payload.get("suite_plan"), Mapping):
-        errors.append("套图计划已丢失")
-    durable_paths = set(payload.get("image_paths", []) or [])
-    for index, req in enumerate(payload.get("reqs", []) or [], start=1):
-        if not isinstance(req, Mapping):
-            errors.append(f"第 {index} 个套图请求格式无效")
-            continue
-        if any(
-            not str(req.get(field) or "").strip()
-            for field in ("id", "type_key", "title", "final_prompt")
-        ):
-            errors.append(f"第 {index} 个套图请求缺少固化计划字段")
-        reference_ids = req.get("reference_asset_ids")
-        reference_paths = req.get("image_paths")
-        if (
-            not isinstance(reference_ids, list)
-            or not isinstance(reference_paths, list)
-            or not 1 <= len(reference_ids) <= 3
-            or len(reference_ids) != len(reference_paths)
-            or any(not str(path or "").strip() for path in reference_paths)
-        ):
-            errors.append(f"第 {index} 个套图请求必须包含 1 至 3 张参考图")
-        elif any(path not in durable_paths for path in reference_paths):
-            errors.append(f"第 {index} 个套图请求引用了未持久化的参考图")
+    errors.extend(_validate_suite_task_snapshot(payload))
     return errors
 
 

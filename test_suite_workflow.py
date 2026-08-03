@@ -38,6 +38,42 @@ class SuitePayloadTests(unittest.TestCase):
             ],
         }
 
+    def _suite_payload(self):
+        return {
+            "suite_version": 1,
+            "suite_draft": {},
+            "suite_plan": self._plan(),
+            "image_paths": [
+                "/durable/front.png",
+                "/durable/detail.png",
+                "/durable/side.png",
+            ],
+            "reqs": [
+                {
+                    "id": "plan-01",
+                    "type_key": "main-front",
+                    "type_name": "Front hero",
+                    "title": "Front hero",
+                    "final_prompt": "Frozen front prompt",
+                    "reference_asset_ids": ["front-1"],
+                    "image_paths": ["/durable/front.png"],
+                },
+                {
+                    "id": "plan-02",
+                    "type_key": "detail",
+                    "type_name": "Material detail",
+                    "title": "Material detail",
+                    "final_prompt": "Frozen detail prompt",
+                    "reference_asset_ids": ["detail-1", "front-1", "side-1"],
+                    "image_paths": [
+                        "/durable/detail.png",
+                        "/durable/front.png",
+                        "/durable/side.png",
+                    ],
+                },
+            ],
+        }
+
     def test_build_requests_freezes_plan_fields_and_selected_durable_paths(self):
         requests = app.build_suite_task_requests(
             self._plan(),
@@ -125,24 +161,7 @@ class SuitePayloadTests(unittest.TestCase):
             "image_paths": ["/durable/front.png"],
             "reqs": [{"type_name": "Main", "prompt": "legacy prompt"}],
         }
-        suite_payload = {
-            "suite_version": 1,
-            "suite_draft": {},
-            "suite_plan": self._plan(),
-            "image_paths": [
-                "/durable/front.png",
-                "/durable/detail.png",
-                "/durable/side.png",
-            ],
-            "reqs": app.build_suite_task_requests(
-                self._plan(),
-                {
-                    "front-1": "/durable/front.png",
-                    "detail-1": "/durable/detail.png",
-                    "side-1": "/durable/side.png",
-                },
-            ),
-        }
+        suite_payload = self._suite_payload()
 
         self.assertEqual(app._validate_combo_task_payload(legacy_payload), [])
         self.assertEqual(app._validate_combo_task_payload(suite_payload), [])
@@ -150,6 +169,132 @@ class SuitePayloadTests(unittest.TestCase):
         suite_payload["reqs"][0]["image_paths"] = []
         errors = app._validate_combo_task_payload(suite_payload)
         self.assertTrue(any("参考图" in error for error in errors))
+
+    def test_snapshot_validation_rejects_requests_that_drift_from_the_plan(self):
+        for field, drifted_value in (
+            ("id", "plan-99"),
+            ("type_key", "scene"),
+            ("title", "Drifted title"),
+            ("type_name", "Drifted display title"),
+            ("final_prompt", "Drifted prompt"),
+        ):
+            with self.subTest(field=field):
+                payload = self._suite_payload()
+                payload["reqs"][0][field] = drifted_value
+
+                errors = app._validate_combo_task_payload(payload)
+
+                self.assertTrue(any("冻结计划不一致" in error for error in errors))
+
+        payload = self._suite_payload()
+        payload["reqs"][0]["reference_asset_ids"] = ["detail-1"]
+        payload["reqs"][0]["image_paths"] = ["/durable/detail.png"]
+
+        errors = app._validate_combo_task_payload(payload)
+
+        self.assertTrue(any("冻结计划不一致" in error for error in errors))
+
+    def test_snapshot_validation_rejects_empty_or_duplicate_reference_ids(self):
+        for reference_ids, image_paths in (
+            ([""], ["/durable/front.png"]),
+            (
+                ["front-1", "front-1"],
+                ["/durable/front.png", "/durable/front.png"],
+            ),
+        ):
+            with self.subTest(reference_ids=reference_ids):
+                payload = self._suite_payload()
+                payload["reqs"][0]["reference_asset_ids"] = reference_ids
+                payload["reqs"][0]["image_paths"] = image_paths
+
+                errors = app._validate_combo_task_payload(payload)
+
+                self.assertTrue(any("引用素材 ID" in error for error in errors))
+
+    def test_snapshot_validation_rejects_unknown_assets(self):
+        payload = self._suite_payload()
+        payload["reqs"][0]["reference_asset_ids"] = ["unknown-asset"]
+
+        errors = app._validate_combo_task_payload(payload)
+
+        self.assertTrue(any("未知素材" in error for error in errors))
+
+    def test_snapshot_validation_rejects_conflicting_asset_path_mappings(self):
+        payload = self._suite_payload()
+        payload["image_paths"].append("/durable/conflicting-front.png")
+        payload["reqs"][1]["image_paths"][1] = "/durable/conflicting-front.png"
+
+        errors = app._validate_combo_task_payload(payload)
+
+        self.assertTrue(any("映射冲突" in error for error in errors))
+
+    def test_snapshot_validation_enforces_request_identity_sets_and_retry_subsets(self):
+        missing_request = self._suite_payload()
+        missing_request["reqs"] = missing_request["reqs"][:1]
+        duplicate_request = self._suite_payload()
+        duplicate_request["reqs"][1]["id"] = "plan-01"
+
+        missing_errors = app._validate_combo_task_payload(missing_request)
+        duplicate_errors = app._validate_combo_task_payload(duplicate_request)
+
+        self.assertTrue(any("完整匹配" in error for error in missing_errors))
+        self.assertTrue(any("请求 ID 重复" in error for error in duplicate_errors))
+
+        retry_payload = self._suite_payload()
+        retry_payload["retry_parent_id"] = "parent-task"
+        retry_payload["reqs"] = retry_payload["reqs"][1:]
+        self.assertEqual(app._validate_combo_task_payload(retry_payload), [])
+
+    def test_snapshot_validation_requires_valid_unique_plan_records(self):
+        invalid_assets = self._suite_payload()
+        invalid_assets["suite_plan"]["assets"] = {}
+        duplicate_asset = self._suite_payload()
+        duplicate_asset["suite_plan"]["assets"][1]["id"] = "front-1"
+        invalid_items = self._suite_payload()
+        invalid_items["suite_plan"]["plan_items"] = {}
+        duplicate_item = self._suite_payload()
+        duplicate_item["suite_plan"]["plan_items"][1]["id"] = "plan-01"
+
+        self.assertTrue(
+            any(
+                "assets 必须是有效列表" in error
+                for error in app._validate_combo_task_payload(invalid_assets)
+            )
+        )
+        self.assertTrue(
+            any(
+                "素材 ID 重复" in error
+                for error in app._validate_combo_task_payload(duplicate_asset)
+            )
+        )
+        self.assertTrue(
+            any(
+                "plan_items 必须是有效列表" in error
+                for error in app._validate_combo_task_payload(invalid_items)
+            )
+        )
+        self.assertTrue(
+            any(
+                "计划项 ID 重复" in error
+                for error in app._validate_combo_task_payload(duplicate_item)
+            )
+        )
+
+    def test_snapshot_validation_requires_requests_to_be_a_nonempty_list(self):
+        payload = self._suite_payload()
+        payload["reqs"] = {"plan-01": payload["reqs"][0]}
+
+        errors = app._validate_combo_task_payload(payload)
+
+        self.assertTrue(any("reqs 必须是非空列表" in error for error in errors))
+
+    def test_snapshot_validation_rejects_non_string_request_ids_without_crashing(self):
+        payload = self._suite_payload()
+        payload["reqs"][0]["id"] = ["plan-01"]
+
+        errors = app._validate_combo_task_payload(payload)
+
+        self.assertTrue(any("缺少有效 ID" in error for error in errors))
 
     def test_consume_request_persists_the_approved_suite_snapshot(self):
         suite_plan = {
