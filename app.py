@@ -29,6 +29,7 @@ import urllib.parse
 import logging
 import logging.handlers
 import uuid
+from collections.abc import Mapping
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from google import genai
@@ -7475,6 +7476,82 @@ def _save_uploaded_images(files, prefix: str):
     return saved
 
 
+SUITE_TASK_VERSION = 1
+
+
+def _persisted_asset_path_map(persisted_assets) -> dict:
+    if isinstance(persisted_assets, Mapping):
+        entries = persisted_assets.items()
+    elif isinstance(persisted_assets, (list, tuple)):
+        entries = []
+        for asset in persisted_assets:
+            if not isinstance(asset, Mapping):
+                raise ValueError("persisted_assets must contain id/path mappings")
+            entries.append((asset.get("id"), asset.get("path")))
+    else:
+        raise ValueError("persisted_assets must be an id-to-path mapping or asset list")
+
+    paths_by_id = {}
+    for raw_asset_id, raw_path in entries:
+        asset_id = str(raw_asset_id or "").strip()
+        path = str(raw_path or "").strip()
+        if not asset_id or not path:
+            raise ValueError("persisted_assets must contain non-empty id/path values")
+        if asset_id in paths_by_id:
+            raise ValueError(f"duplicate persisted asset id: {asset_id}")
+        paths_by_id[asset_id] = path
+    return paths_by_id
+
+
+def build_suite_task_requests(plan, persisted_assets) -> list[dict]:
+    """Freeze approved plan items with their selected durable image paths."""
+    if not isinstance(plan, Mapping) or not isinstance(plan.get("plan_items"), list):
+        raise ValueError("plan must contain a plan_items list")
+    paths_by_id = _persisted_asset_path_map(persisted_assets)
+    requests = []
+    for index, item in enumerate(plan["plan_items"], start=1):
+        if not isinstance(item, Mapping):
+            raise ValueError(f"plan item {index} must be a mapping")
+        item_id = str(item.get("id") or "").strip()
+        type_key = str(item.get("type_key") or "").strip()
+        title = str(item.get("title") or "").strip()
+        final_prompt = str(item.get("final_prompt") or "")
+        if not item_id or not type_key or not title or not final_prompt.strip():
+            raise ValueError(
+                f"plan item {index} must contain id, type_key, title, and final_prompt"
+            )
+        reference_ids = item.get("reference_asset_ids")
+        if (
+            not isinstance(reference_ids, list)
+            or not 1 <= len(reference_ids) <= 3
+            or any(
+                not isinstance(asset_id, str) or not asset_id.strip()
+                for asset_id in reference_ids
+            )
+            or len(set(reference_ids)) != len(reference_ids)
+        ):
+            raise ValueError(
+                f"plan item {item_id} must contain one to three unique reference_asset_ids"
+            )
+        missing_ids = [asset_id for asset_id in reference_ids if asset_id not in paths_by_id]
+        if missing_ids:
+            raise ValueError(
+                f"plan item {item_id} references missing persisted asset: {missing_ids[0]}"
+            )
+        requests.append(
+            {
+                "id": item_id,
+                "type_key": type_key,
+                "type_name": title,
+                "title": title,
+                "final_prompt": final_prompt,
+                "reference_asset_ids": list(reference_ids),
+                "image_paths": [paths_by_id[asset_id] for asset_id in reference_ids],
+            }
+        )
+    return requests
+
+
 def _execute_title_task(execution: TaskExecution):
     task = execution.task
     payload = task.get("payload", {})
@@ -7973,6 +8050,36 @@ def _validate_combo_task_payload(payload: dict):
     errors = list(_validate_image_task_payload(payload))
     if not payload.get("reqs"):
         errors.append("没有可执行的组图项目")
+    if "suite_version" not in payload:
+        return errors
+    if payload.get("suite_version") != SUITE_TASK_VERSION:
+        errors.append("不支持的套图任务版本")
+    if not isinstance(payload.get("suite_draft"), Mapping):
+        errors.append("套图草稿已丢失")
+    if not isinstance(payload.get("suite_plan"), Mapping):
+        errors.append("套图计划已丢失")
+    durable_paths = set(payload.get("image_paths", []) or [])
+    for index, req in enumerate(payload.get("reqs", []) or [], start=1):
+        if not isinstance(req, Mapping):
+            errors.append(f"第 {index} 个套图请求格式无效")
+            continue
+        if any(
+            not str(req.get(field) or "").strip()
+            for field in ("id", "type_key", "title", "final_prompt")
+        ):
+            errors.append(f"第 {index} 个套图请求缺少固化计划字段")
+        reference_ids = req.get("reference_asset_ids")
+        reference_paths = req.get("image_paths")
+        if (
+            not isinstance(reference_ids, list)
+            or not isinstance(reference_paths, list)
+            or not 1 <= len(reference_ids) <= 3
+            or len(reference_ids) != len(reference_paths)
+            or any(not str(path or "").strip() for path in reference_paths)
+        ):
+            errors.append(f"第 {index} 个套图请求必须包含 1 至 3 张参考图")
+        elif any(path not in durable_paths for path in reference_paths):
+            errors.append(f"第 {index} 个套图请求引用了未持久化的参考图")
     return errors
 
 
@@ -8923,19 +9030,35 @@ def consume_combo_generation_request(provider, model_key, state=None):
         return None, ""
 
     state["combo_generating"] = False
-    reqs = state.get("combo_reqs", [])
     combo_images = state.get("combo_images", [])
-    image_paths = []
-    upload_dir = DATA_DIR / "task_uploads"
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    for idx, img in enumerate(combo_images):
-        filename = f"combo_{int(time.time())}_{idx + 1}.png"
-        path = upload_dir / filename
+    image_paths = _save_uploaded_images(
+        combo_images, f"combo_{int(time.time())}"
+    )
+    suite_plan = state.get("combo_suite_plan")
+    suite_draft = state.get("combo_suite_draft")
+    suite_payload = {}
+    if suite_plan is not None or suite_draft is not None:
+        if not isinstance(suite_plan, Mapping) or not isinstance(suite_draft, Mapping):
+            return None, "套图草稿或已批准计划已丢失，请重新生成出图计划。"
+        plan_assets = suite_plan.get("assets", [])
+        if not isinstance(plan_assets, list) or len(plan_assets) != len(image_paths):
+            return None, "套图素材持久化不完整，请重新上传素材。"
+        persisted_assets = [
+            {"id": asset.get("id"), "path": path}
+            for asset, path in zip(plan_assets, image_paths)
+            if isinstance(asset, Mapping)
+        ]
         try:
-            img.save(path, format="PNG")
-            image_paths.append(str(path))
-        except Exception:
-            continue
+            reqs = build_suite_task_requests(suite_plan, persisted_assets)
+        except ValueError as exc:
+            return None, str(exc)
+        suite_payload = {
+            "suite_version": SUITE_TASK_VERSION,
+            "suite_draft": copy.deepcopy(suite_draft),
+            "suite_plan": copy.deepcopy(suite_plan),
+        }
+    else:
+        reqs = state.get("combo_reqs", [])
 
     default_title_model = resolve_default_title_vision_model(
         provider.get("title_model") or provider.get("vision_model", "")
@@ -8943,6 +9066,7 @@ def consume_combo_generation_request(provider, model_key, state=None):
     return create_task(
         "combo",
         {
+            **suite_payload,
             "provider_id": provider.get("id", ""),
             "anchor": state.get("combo_anchor"),
             "reqs": reqs,
