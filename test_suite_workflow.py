@@ -9,6 +9,335 @@ from PIL import Image
 import app
 
 
+class SuiteEditorStateTests(unittest.TestCase):
+    def _assets(self):
+        return [
+            {"id": "front-1", "path": "front.jpg", "role": "front"},
+            {"id": "detail-1", "path": "detail.jpg", "role": "detail"},
+            {"id": "side-1", "path": "side.jpg", "role": "side"},
+        ]
+
+    def test_default_editor_state_builds_the_eight_image_suite(self):
+        state = app.build_suite_editor_state(self._assets())
+
+        self.assertEqual(app.MAX_TOTAL_IMAGES, 10)
+        self.assertEqual(state["target_count"], 8)
+        self.assertEqual(
+            state["selected_type_counts"],
+            {
+                "main-front": 1,
+                "back-side": 1,
+                "detail": 3,
+                "scene": 1,
+                "dimension": 1,
+                "selling-point": 1,
+                "package": 0,
+                "compare": 0,
+                "steps": 0,
+            },
+        )
+
+    def test_editor_state_rejects_more_than_ten_outputs(self):
+        with self.assertRaisesRegex(ValueError, "1 and 10"):
+            app.build_suite_editor_state(
+                self._assets(),
+                selected_type_counts={"scene": 11},
+            )
+
+    def test_editor_state_applies_user_role_corrections_before_planning(self):
+        state = app.build_suite_editor_state(
+            [{"path": "rear.jpg", "role": "rear", "role_confidence": 1.4}],
+        )
+
+        self.assertEqual(state["assets"][0]["id"], "asset-01")
+        self.assertEqual(state["assets"][0]["role"], "back")
+        self.assertEqual(state["assets"][0]["role_confidence"], 1.0)
+
+    def test_dimension_data_is_kept_only_while_dimension_output_is_selected(self):
+        enabled = app.build_suite_editor_state(
+            self._assets(),
+            selected_type_counts={"dimension": 1},
+            dimension_data={"width": {"value": 18, "unit": "cm"}},
+        )
+        disabled = app.build_suite_editor_state(
+            self._assets(),
+            selected_type_counts={"scene": 1},
+            dimension_data={"width": {"value": 18, "unit": "cm"}},
+        )
+
+        self.assertEqual(
+            enabled["dimension_data"],
+            {"width": {"value": 18, "unit": "cm"}},
+        )
+        self.assertEqual(disabled["dimension_data"], {})
+
+    def test_editor_state_preserves_freeform_language_and_user_evidence(self):
+        state = app.build_suite_editor_state(
+            self._assets(),
+            product_identity="Matte black travel mug with visible handle",
+            target_language="Canadian French, concise retail wording",
+            user_instruction="Keep the handle visible in every full product view.",
+            selling_points=["Leak-resistant lid", "Textured grip"],
+        )
+
+        self.assertEqual(
+            state["target_language"],
+            "Canadian French, concise retail wording",
+        )
+        self.assertEqual(
+            state["product_identity"],
+            "Matte black travel mug with visible handle",
+        )
+        self.assertEqual(
+            state["selling_points"],
+            ["Leak-resistant lid", "Textured grip"],
+        )
+        self.assertIn("handle visible", state["user_instruction"])
+
+    def test_freeform_image_language_reaches_the_generation_instruction(self):
+        instruction = app.get_image_language_instruction(
+            "Canadian French, concise retail wording"
+        )
+
+        self.assertIn("Canadian French, concise retail wording", instruction)
+
+    def test_plan_edits_revalidate_type_references_copy_and_frozen_prompt(self):
+        draft = app.build_suite_editor_state(
+            self._assets(),
+            product_identity="Black handled mug",
+            target_language="German",
+            selected_type_counts={"scene": 1},
+            selling_points=["Textured grip"],
+        )
+        initial = app.finalize_suite_plan(draft)
+        edited_items = copy.deepcopy(initial["plan_items"])
+        edited_items[0].update(
+            {
+                "type_key": "selling-point",
+                "theme": "Grip comfort",
+                "scene": "Bright kitchen counter",
+                "shot": "Three-quarter close view",
+                "composition": "Product left with text space",
+                "copy_enabled": True,
+                "copy_text": "Sicher im Griff",
+                "reference_asset_ids": ["detail-1", "missing", "detail-1"],
+            }
+        )
+
+        edited = app.apply_suite_plan_edits(draft, edited_items)
+        item = edited["plan_items"][0]
+
+        self.assertEqual(item["type_key"], "selling-point")
+        self.assertEqual(item["reference_asset_ids"], ["detail-1", "front-1", "side-1"])
+        self.assertTrue(item["copy_enabled"])
+        self.assertEqual(item["copy_text"], "Sicher im Griff")
+        self.assertIn("Bright kitchen counter", item["final_prompt"])
+        self.assertIn("Sicher im Griff", item["final_prompt"])
+        self.assertIn("German", item["final_prompt"])
+
+    def test_supported_types_exclude_claim_comparison_and_steps_without_evidence(self):
+        draft = app.build_suite_editor_state(
+            [{"path": "front.jpg", "role": "front"}],
+            selected_type_counts={"scene": 1},
+        )
+
+        self.assertEqual(
+            app.get_supported_suite_types(draft),
+            ["main-front", "scene"],
+        )
+
+        evidenced = app.build_suite_editor_state(
+            [
+                {"path": "front.jpg", "role": "front"},
+                {"path": "detail.jpg", "role": "detail"},
+                {"path": "package.jpg", "role": "package"},
+            ],
+            selected_type_counts={"scene": 1},
+            selling_points=["Textured grip"],
+        )
+        self.assertEqual(
+            app.get_supported_suite_types(evidenced),
+            ["main-front", "detail", "scene", "selling-point", "package"],
+        )
+
+    def test_upload_change_invalidates_analysis_and_plans_but_same_upload_does_not(self):
+        old_plan = {"plan_items": [{"id": "plan-01"}]}
+        state = {
+            "combo_upload_signature": "old-signature",
+            "combo_suite_analysis": {"assets": [{"id": "asset-01"}]},
+            "combo_suite_draft": {"target_count": 1},
+            "combo_suite_plan": old_plan,
+            "combo_suite_stage": 2,
+            "combo_asset_role_0": "front",
+            "combo_product_identity": "Old product",
+            "combo_selling_points": "Old claim",
+            "combo_dimension_width": "99",
+        }
+
+        changed = app.sync_combo_upload_state(
+            state,
+            [Image.new("RGB", (8, 8), "white")],
+            "new-signature",
+        )
+        self.assertTrue(changed)
+        self.assertEqual(state["combo_suite_stage"], 1)
+        self.assertIsNone(state["combo_suite_analysis"])
+        self.assertIsNone(state["combo_suite_draft"])
+        self.assertIsNone(state["combo_suite_plan"])
+        self.assertNotIn("combo_asset_role_0", state)
+        self.assertNotIn("combo_dimension_width", state)
+        self.assertEqual(state["combo_product_identity"], "")
+        self.assertEqual(state["combo_selling_points"], "")
+
+        state["combo_suite_plan"] = old_plan
+        unchanged = app.sync_combo_upload_state(
+            state,
+            [Image.new("RGB", (8, 8), "black")],
+            "new-signature",
+        )
+        self.assertFalse(unchanged)
+        self.assertIs(state["combo_suite_plan"], old_plan)
+
+    def test_personal_templates_validate_deduplicate_and_restore_system_default(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            settings_file = Path(temporary_directory) / "settings.json"
+            with patch.object(app, "SETTINGS_FILE", settings_file):
+                app._CONFIG_CACHE.clear()
+                app.save_personal_suite_template(
+                    "Launch set",
+                    {"main-front": 1, "detail": 2, "scene": 1},
+                )
+                app.save_personal_suite_template(
+                    "launch SET",
+                    {"main-front": 1, "scene": 2},
+                )
+
+                templates = app.load_personal_suite_templates()
+                self.assertEqual(len(templates), 2)
+                self.assertTrue(templates[0]["readonly"])
+                self.assertEqual(templates[0]["type_counts"]["detail"], 3)
+                self.assertEqual(templates[1]["name"], "launch SET")
+                self.assertEqual(sum(templates[1]["type_counts"].values()), 3)
+
+                templates[0]["type_counts"]["detail"] = 0
+                self.assertEqual(
+                    app.load_personal_suite_templates()[0]["type_counts"]["detail"],
+                    3,
+                )
+
+                app.delete_personal_suite_template("LAUNCH set")
+                restored = app.load_personal_suite_templates()
+                self.assertEqual(len(restored), 1)
+                self.assertEqual(restored[0]["id"], "temu-standard")
+
+                with self.assertRaises(ValueError):
+                    app.save_personal_suite_template("TEMU 标准套图", {"scene": 1})
+                with self.assertRaises(ValueError):
+                    app.save_personal_suite_template("Too many", {"scene": 11})
+                with self.assertRaises(ValueError):
+                    app.save_personal_suite_template("Unknown", {"invented": 1})
+
+
+class SuiteAINormalizationTests(unittest.TestCase):
+    def _client(self):
+        client = object.__new__(app.GeminiClient)
+        client.api_key = "test-key"
+        client.total_tokens = 0
+        client.last_error = None
+        return client
+
+    def test_asset_analysis_stays_aligned_to_upload_order_and_normalizes_fields(self):
+        client = self._client()
+        response = """{
+          "product_identity": "black travel mug",
+          "assets": [
+            {"upload_index": 2, "role": "close-up", "confidence": 1.8, "flags": ["watermark", 7]},
+            {"upload_index": 1, "role": "rear", "confidence": 0.82, "quality_flags": ["low-resolution"]}
+          ]
+        }"""
+        images = [Image.new("RGB", (8, 8), "white") for _ in range(3)]
+
+        with patch.object(client, "_vision_request", return_value=response):
+            result = client.analyze_suite_assets(images)
+
+        self.assertEqual(result["product_identity"], "black travel mug")
+        self.assertEqual(
+            [(asset["id"], asset["upload_index"], asset["role"]) for asset in result["assets"]],
+            [
+                ("asset-01", 1, "back"),
+                ("asset-02", 2, "detail"),
+                ("asset-03", 3, "unknown"),
+            ],
+        )
+        self.assertEqual(result["assets"][0]["role_confidence"], 0.82)
+        self.assertEqual(result["assets"][1]["role_confidence"], 1.0)
+        self.assertEqual(result["assets"][1]["quality_flags"], ["watermark"])
+
+    def test_malformed_asset_analysis_uses_one_deterministic_fallback_per_upload(self):
+        client = self._client()
+        images = [Image.new("RGB", (8, 8), "white") for _ in range(2)]
+
+        with patch.object(client, "_vision_request", return_value="not json"):
+            result = client.analyze_suite_assets(images)
+
+        self.assertEqual([asset["id"] for asset in result["assets"]], ["asset-01", "asset-02"])
+        self.assertEqual([asset["role"] for asset in result["assets"]], ["unknown", "unknown"])
+        self.assertTrue(all("analysis-unavailable" in asset["quality_flags"] for asset in result["assets"]))
+
+    def test_suite_planning_accepts_ai_copy_and_invalid_json_falls_back_without_raising(self):
+        client = self._client()
+        draft = app.build_suite_editor_state(
+            [{"id": "front-1", "path": "front.jpg", "role": "front"}],
+            product_identity="Black mug",
+            target_language="Spanish",
+            selected_type_counts={"main-front": 1},
+        )
+        ai_response = """{
+          "plan_items": [{
+            "type_key": "main-front",
+            "theme": "Clean catalog hero",
+            "scene": "Pure white studio",
+            "shot": "Straight-on front view",
+            "composition": "Centered complete product",
+            "copy_enabled": true,
+            "copy_text": "Diseño limpio",
+            "reference_asset_ids": ["front-1"]
+          }]
+        }"""
+
+        with patch.object(client, "_text_request", return_value=ai_response):
+            planned = client.generate_suite_plan(draft)
+        with patch.object(client, "_text_request", return_value="{broken"):
+            fallback = client.generate_suite_plan(draft)
+
+        self.assertTrue(planned["used_ai_plan"])
+        self.assertEqual(planned["plan_items"][0]["copy_text"], "Diseño limpio")
+        self.assertIn("Diseño limpio", planned["plan_items"][0]["final_prompt"])
+        self.assertFalse(fallback["used_ai_plan"])
+        self.assertEqual(len(fallback["plan_items"]), 1)
+        self.assertTrue(fallback["plan_items"][0]["final_prompt"])
+
+    def test_demo_suite_methods_are_deterministic_and_make_no_upstream_request(self):
+        client = self._client()
+        client.api_key = app.DEMO_PROVIDER_KEY
+        images = [Image.new("RGB", (8, 8), "white")]
+        draft = app.build_suite_editor_state(
+            [{"id": "front-1", "path": "front.jpg", "role": "front"}],
+            selected_type_counts={"main-front": 1},
+        )
+
+        with (
+            patch.object(client, "_vision_request", side_effect=AssertionError("network")),
+            patch.object(client, "_text_request", side_effect=AssertionError("network")),
+        ):
+            analysis = client.analyze_suite_assets(images)
+            plan = client.generate_suite_plan(draft)
+
+        self.assertEqual(analysis["assets"][0]["id"], "asset-01")
+        self.assertEqual(analysis["assets"][0]["role"], "front")
+        self.assertFalse(plan["used_ai_plan"])
+
+
 class SuitePayloadTests(unittest.TestCase):
     def _plan(self):
         return {

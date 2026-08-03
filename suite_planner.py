@@ -431,6 +431,9 @@ def _validated_ai_plan(deterministic_plan, assets, ai_plan, draft):
             value = _clean_text(candidate.get(field))
             if value:
                 item[field] = value
+        copy_text = _clean_text(candidate.get("copy_text"))
+        item["copy_enabled"] = bool(candidate.get("copy_enabled", bool(copy_text)))
+        item["copy_text"] = copy_text if item["copy_enabled"] else ""
         for field in ("theme", "scene", "shot", "composition"):
             signature = _variation_signature(item[field])
             if not signature or signature in seen_values[item["type_key"]][field]:
@@ -535,6 +538,17 @@ def _item_copy_text(plan_item):
     return _clean_text(plan_item.get("copy_text"))
 
 
+def _selling_point_text(draft):
+    if not isinstance(draft, Mapping):
+        return ""
+    value = draft.get("selling_points")
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (list, tuple)):
+        return "; ".join(_clean_text(point) for point in value if _clean_text(point))
+    return ""
+
+
 def _without_dimension_placeholders(text):
     cleaned = _DIMENSION_PLACEHOLDER_RE.sub("", text)
     return re.sub(r"\s+", " ", cleaned).strip()
@@ -554,6 +568,7 @@ def compose_suite_prompt(plan_item, draft, assets):
     visual_direction = "; ".join(
         f"{label}: {value}"
         for label, value in (
+            ("theme", _clean_text(item.get("theme"))),
             ("scene", _clean_text(item.get("scene"))),
             ("shot", _clean_text(item.get("shot"))),
             ("composition", _clean_text(item.get("composition"))),
@@ -595,6 +610,12 @@ def compose_suite_prompt(plan_item, draft, assets):
         sections.append(
             f"Target-language emphasis: render any visible text in {target_language}."
         )
+    user_instruction = _first_text(source, ("user_instruction", "additional_instruction"))
+    if user_instruction:
+        sections.append(f"User instructions: {user_instruction}")
+    selling_points = _selling_point_text(source)
+    if selling_points:
+        sections.append(f"Verified selling points: {selling_points}")
     sections.extend(
         (
             f"Reference material roles: {_reference_role_text(item, assets)}.",

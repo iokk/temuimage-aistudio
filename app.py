@@ -38,6 +38,14 @@ from task_engine import TaskEngine, TaskExecution, TaskHandler
 from task_status import TASK_COMPLETED_STATUSES, TASK_TERMINAL_STATUSES
 from task_store import SqliteTaskStore, TaskCapacityError
 from suite_output import normalize_suite_image
+from suite_planner import (
+    TYPE_KEYS as SUITE_TYPE_KEYS,
+    build_default_type_counts,
+    compose_suite_prompt,
+    finalize_suite_plan,
+    normalize_assets as normalize_suite_assets,
+    select_reference_assets,
+)
 
 # ==================== 配置常量 ====================
 APP_VERSION = "V15.2.1"
@@ -218,7 +226,7 @@ MAX_NAME_CHARS = 200
 MAX_DETAIL_CHARS = 500
 MAX_TAGS = 8
 MAX_TYPE_COUNT = 3
-MAX_TOTAL_IMAGES = 12
+MAX_TOTAL_IMAGES = 10
 MAX_HEADLINE_CHARS = 40
 MAX_SUBLINE_CHARS = 60
 MAX_BADGE_CHARS = 20
@@ -566,6 +574,7 @@ DEFAULT_SETTINGS = {
     "s3_secret_key": "",
     "s3_prefix": "temu-files/",
     "s3_presign_expires": 86400,
+    "suite_templates": [],
 }
 
 DEFAULT_PROVIDERS_DATA = {"providers": [], "current_id": ""}
@@ -1287,6 +1296,272 @@ def get_task_limits(settings=None):
 
 def save_settings(s):
     return save_json(SETTINGS_FILE, s)
+
+
+SYSTEM_SUITE_TEMPLATE = {
+    "id": "temu-standard",
+    "name": "TEMU 标准套图",
+    "type_counts": build_default_type_counts(),
+    "readonly": True,
+    "system": True,
+}
+
+_SUITE_TYPE_TITLES = {
+    "main-front": "正面白底图",
+    "back-side": "背面或侧面图",
+    "detail": "细节图",
+    "scene": "场景图",
+    "dimension": "尺寸图",
+    "selling-point": "卖点图",
+    "package": "包装图",
+    "compare": "对比图",
+    "steps": "操作步骤图",
+}
+
+
+def _validated_suite_type_counts(type_counts, *, default_when_missing=False):
+    if type_counts is None and default_when_missing:
+        return build_default_type_counts()
+    if not isinstance(type_counts, Mapping):
+        raise ValueError("selected_type_counts must be a mapping")
+    unknown = set(type_counts) - set(SUITE_TYPE_KEYS)
+    if unknown:
+        raise ValueError("selected_type_counts contains unknown image types")
+    normalized = {}
+    for type_key in SUITE_TYPE_KEYS:
+        count = type_counts.get(type_key, 0)
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError("selected_type_counts must contain non-negative integers")
+        normalized[type_key] = count
+    target_count = sum(normalized.values())
+    if not 1 <= target_count <= MAX_TOTAL_IMAGES:
+        raise ValueError("target_count must be between 1 and 10")
+    return normalized
+
+
+def build_suite_editor_state(
+    assets,
+    product_identity="",
+    target_language="English",
+    dimension_data=None,
+    selected_type_counts=None,
+    user_instruction="",
+    selling_points=None,
+):
+    """Build a Streamlit-independent suite draft from editable workspace fields."""
+    counts = _validated_suite_type_counts(
+        selected_type_counts, default_when_missing=True
+    )
+    points = selling_points if selling_points is not None else []
+    if isinstance(points, str):
+        points = [line.strip() for line in points.splitlines() if line.strip()]
+    elif isinstance(points, (list, tuple)):
+        points = [str(point).strip() for point in points if str(point).strip()]
+    else:
+        points = []
+    return {
+        "platform_profile": "temu-standard",
+        "target_count": sum(counts.values()),
+        "target_language": str(target_language or "").strip(),
+        "dimension_data": copy.deepcopy(dimension_data or {})
+        if counts["dimension"]
+        else {},
+        "assets": normalize_suite_assets(copy.deepcopy(list(assets or []))),
+        "selected_type_counts": counts,
+        "product_identity": str(product_identity or "").strip(),
+        "user_instruction": str(user_instruction or "").strip(),
+        "selling_points": points,
+    }
+
+
+def sync_combo_upload_state(state, images, upload_signature):
+    """Replace upload-backed state and invalidate every analysis or plan on change."""
+    if state.get("combo_upload_signature") == upload_signature:
+        return False
+    state["combo_upload_signature"] = upload_signature
+    state["combo_images"] = list(images or [])
+    state["combo_suite_analysis"] = None
+    state["combo_suite_draft"] = None
+    state["combo_suite_plan"] = None
+    state["combo_anchor"] = None
+    state["combo_suite_stage"] = 1
+    state["combo_product_identity"] = ""
+    state["combo_product_summary"] = ""
+    state["combo_selling_points"] = ""
+    state["combo_user_instruction"] = ""
+    for key in list(state.keys()):
+        if str(key).startswith(
+            ("combo_plan_", "combo_asset_role_", "combo_dimension_")
+        ):
+            del state[key]
+    return True
+
+
+def get_supported_suite_types(draft):
+    """Return only image types the current draft can retain without substitution."""
+    supported = []
+    for type_key in SUITE_TYPE_KEYS:
+        probe = copy.deepcopy(dict(draft or {}))
+        probe["target_count"] = 1
+        probe["selected_type_counts"] = {
+            key: int(key == type_key) for key in SUITE_TYPE_KEYS
+        }
+        try:
+            item = finalize_suite_plan(probe)["plan_items"][0]
+        except (TypeError, ValueError, IndexError):
+            continue
+        if item.get("type_key") == type_key:
+            supported.append(type_key)
+    selling_points = draft.get("selling_points", []) if isinstance(draft, Mapping) else []
+    has_selling_points = bool(
+        selling_points.strip()
+        if isinstance(selling_points, str)
+        else isinstance(selling_points, (list, tuple))
+        and any(str(point).strip() for point in selling_points)
+    )
+    return [
+        type_key
+        for type_key in supported
+        if type_key not in {"compare", "steps"}
+        and (type_key != "selling-point" or has_selling_points)
+    ]
+
+
+def apply_suite_plan_edits(draft, plan_items):
+    """Normalize editable plan-card state and freeze every resulting prompt."""
+    if not isinstance(plan_items, list) or len(plan_items) != draft.get("target_count"):
+        raise ValueError("plan_items must match target_count")
+    assets = normalize_suite_assets(copy.deepcopy(draft.get("assets", [])))
+    supported = set(get_supported_suite_types(draft))
+    normalized_items = []
+    for index, raw_item in enumerate(plan_items, start=1):
+        item = copy.deepcopy(raw_item) if isinstance(raw_item, Mapping) else {}
+        type_key = item.get("type_key")
+        if type_key not in supported:
+            type_key = "scene" if "scene" in supported else next(iter(supported), "")
+        if not type_key:
+            raise ValueError("no evidence-supported image type is available")
+        allowed_references = select_reference_assets(type_key, assets, limit=3)
+        requested_references = item.get("reference_asset_ids")
+        valid_requested = (
+            isinstance(requested_references, list)
+            and 1 <= len(requested_references) <= 3
+            and len(requested_references) == len(set(requested_references))
+            and set(requested_references).issubset(set(allowed_references))
+        )
+        item["reference_asset_ids"] = (
+            list(requested_references) if valid_requested else allowed_references
+        )
+        if not item["reference_asset_ids"]:
+            raise ValueError(f"{type_key} has no relevant reference image")
+        item.update(
+            {
+                "id": str(item.get("id") or f"plan-{index:02d}"),
+                "order": index,
+                "type_key": type_key,
+                "title": _SUITE_TYPE_TITLES[type_key],
+                "theme": str(item.get("theme") or "").strip(),
+                "scene": str(item.get("scene") or "").strip(),
+                "shot": str(item.get("shot") or "").strip(),
+                "composition": str(item.get("composition") or "").strip(),
+                "copy_enabled": bool(item.get("copy_enabled", False)),
+                "copy_text": str(item.get("copy_text") or "").strip(),
+                "replacement_reason": str(item.get("replacement_reason") or "").strip(),
+                "warnings": [
+                    str(warning).strip()
+                    for warning in item.get("warnings", [])
+                    if str(warning).strip()
+                ],
+            }
+        )
+        item["final_prompt"] = compose_suite_prompt(item, draft, assets)
+        normalized_items.append(item)
+    return {
+        "target_count": len(normalized_items),
+        "assets": assets,
+        "plan_items": normalized_items,
+        "used_ai_plan": bool(any(item.get("final_prompt") for item in normalized_items)),
+    }
+
+
+def _suite_template_record(name, type_counts):
+    clean_name = str(name or "").strip()
+    if not clean_name:
+        raise ValueError("template name is required")
+    if clean_name.casefold() == SYSTEM_SUITE_TEMPLATE["name"].casefold():
+        raise ValueError("the system template is read-only")
+    counts = _validated_suite_type_counts(type_counts)
+    template_id = "personal-" + hashlib.sha256(
+        clean_name.casefold().encode("utf-8")
+    ).hexdigest()[:12]
+    return {
+        "id": template_id,
+        "name": clean_name,
+        "type_counts": counts,
+        "readonly": False,
+        "system": False,
+    }
+
+
+def load_personal_suite_templates():
+    """Load a fresh system template plus valid, de-duplicated personal templates."""
+    settings = get_settings()
+    raw_templates = settings.get("suite_templates", [])
+    if not isinstance(raw_templates, list):
+        raw_templates = []
+    personal = {}
+    for raw in raw_templates:
+        if not isinstance(raw, Mapping):
+            continue
+        try:
+            record = _suite_template_record(raw.get("name"), raw.get("type_counts"))
+        except ValueError:
+            continue
+        personal[record["name"].casefold()] = record
+    return copy.deepcopy([SYSTEM_SUITE_TEMPLATE, *personal.values()])
+
+
+def save_personal_suite_template(name, type_counts):
+    record = _suite_template_record(name, type_counts)
+    settings = get_settings()
+    raw_templates = settings.get("suite_templates", [])
+    if not isinstance(raw_templates, list):
+        raw_templates = []
+    remaining = [
+        copy.deepcopy(template)
+        for template in raw_templates
+        if isinstance(template, Mapping)
+        and str(template.get("name") or "").strip().casefold()
+        != record["name"].casefold()
+    ]
+    settings["suite_templates"] = [*remaining, record]
+    if not save_settings(settings):
+        raise OSError("failed to save suite template")
+    _CONFIG_CACHE.pop(str(SETTINGS_FILE), None)
+
+
+def delete_personal_suite_template(name):
+    clean_name = str(name or "").strip()
+    if not clean_name or clean_name.casefold() == SYSTEM_SUITE_TEMPLATE["name"].casefold():
+        return False
+    settings = get_settings()
+    raw_templates = settings.get("suite_templates", [])
+    if not isinstance(raw_templates, list):
+        return False
+    remaining = [
+        copy.deepcopy(template)
+        for template in raw_templates
+        if not isinstance(template, Mapping)
+        or str(template.get("name") or "").strip().casefold()
+        != clean_name.casefold()
+    ]
+    if len(remaining) == len(raw_templates):
+        return False
+    settings["suite_templates"] = remaining
+    if not save_settings(settings):
+        raise OSError("failed to delete suite template")
+    _CONFIG_CACHE.pop(str(SETTINGS_FILE), None)
+    return True
 
 
 def apply_proxy_settings(settings=None):
@@ -3848,6 +4123,12 @@ def build_temu_tri_title_prompt(template_prompt: str, product_info: str) -> str:
 
 
 def get_image_language_instruction(target_language: str) -> str:
+    freeform_language = str(target_language or "").strip()
+    if freeform_language and freeform_language not in TARGET_LANGUAGE_MAP:
+        return (
+            "If the image contains any visible text, render it only in "
+            f"{freeform_language}. Do not mix languages or add untranslated source text."
+        )
     lang = get_target_language(target_language)
     template = (
         get_prompts().get("image_language_instruction")
@@ -4981,6 +5262,148 @@ Return valid JSON only."""
             self.last_error = str(e)
             return default_result
 
+    def analyze_suite_assets(self, images):
+        """Profile all suite uploads once and preserve their one-based upload order."""
+        image_count = min(len(images or []), MAX_IMAGES)
+        fallback_assets = [
+            {
+                "id": f"asset-{index:02d}",
+                "upload_index": index,
+                "path": "",
+                "role": "unknown",
+                "role_confidence": 0.0,
+                "is_primary": index == 1,
+                "quality_flags": ["analysis-unavailable"],
+                "variant_group": "default",
+            }
+            for index in range(1, image_count + 1)
+        ]
+        fallback = {
+            "product_identity": "",
+            "product_summary": "",
+            "selling_points": [],
+            "assets": fallback_assets,
+        }
+        if not image_count:
+            return fallback
+        if is_demo_api_key(self.api_key):
+            fallback["product_identity"] = "Demo product"
+            fallback["product_summary"] = "Local deterministic suite analysis"
+            fallback["assets"][0]["role"] = "front"
+            fallback["assets"][0]["role_confidence"] = 1.0
+            for asset in fallback["assets"]:
+                asset["quality_flags"] = ["demo-analysis"]
+            return fallback
+
+        prompt = """Analyze every uploaded ecommerce reference image exactly once.
+Return one JSON object with product_identity, product_summary, selling_points, and assets.
+assets must contain one record per upload and use the one-based upload_index shown by the upload order.
+Each asset record must contain upload_index, role, confidence, and flags.
+Allowed roles: front, back, side, detail, dimension, package, scene, unknown.
+Allowed flags should describe only visible evidence such as low-resolution, watermark, text, collage, crop, duplicate, or variant-conflict.
+Do not infer hidden structure, dimensions, materials, accessories, functions, or claims.
+Return JSON only."""
+        try:
+            text = self._vision_request(
+                list(images)[:image_count], prompt, max_images=image_count
+            )
+            parsed = self._parse_json_response(text, {})
+        except Exception as exc:
+            self.last_error = str(exc)
+            return fallback
+        if not isinstance(parsed, Mapping) or not isinstance(parsed.get("assets"), list):
+            return fallback
+
+        by_index = {}
+        for raw_asset in parsed["assets"]:
+            if not isinstance(raw_asset, Mapping):
+                continue
+            upload_index = raw_asset.get("upload_index")
+            if (
+                isinstance(upload_index, bool)
+                or not isinstance(upload_index, int)
+                or not 1 <= upload_index <= image_count
+                or upload_index in by_index
+            ):
+                continue
+            flags = raw_asset.get("quality_flags", raw_asset.get("flags", []))
+            normalized = normalize_suite_assets(
+                [
+                    {
+                        "id": f"asset-{upload_index:02d}",
+                        "role": raw_asset.get("role"),
+                        "role_confidence": raw_asset.get(
+                            "role_confidence", raw_asset.get("confidence")
+                        ),
+                        "is_primary": raw_asset.get(
+                            "is_primary", upload_index == 1
+                        ),
+                        "quality_flags": flags,
+                        "variant_group": raw_asset.get("variant_group"),
+                    }
+                ]
+            )[0]
+            normalized["upload_index"] = upload_index
+            by_index[upload_index] = normalized
+
+        normalized_assets = []
+        for fallback_asset in fallback_assets:
+            upload_index = fallback_asset["upload_index"]
+            normalized_assets.append(
+                by_index.get(upload_index, copy.deepcopy(fallback_asset))
+            )
+        selling_points = parsed.get("selling_points", [])
+        if not isinstance(selling_points, list):
+            selling_points = []
+        return {
+            "product_identity": str(parsed.get("product_identity") or "").strip(),
+            "product_summary": str(parsed.get("product_summary") or "").strip(),
+            "selling_points": [
+                str(point).strip()
+                for point in selling_points
+                if str(point).strip()
+            ],
+            "assets": normalized_assets,
+        }
+
+    def generate_suite_plan(self, draft):
+        """Generate differentiated structured plan details with a safe local fallback."""
+        deterministic = finalize_suite_plan(draft)
+        if is_demo_api_key(self.api_key):
+            return deterministic
+        planning_input = {
+            "product_identity": draft.get("product_identity", ""),
+            "target_language": draft.get("target_language", ""),
+            "dimension_data": draft.get("dimension_data", {}),
+            "selling_points": draft.get("selling_points", []),
+            "user_instruction": draft.get("user_instruction", ""),
+            "assets": deterministic["assets"],
+            "required_plan_items": [
+                {
+                    "type_key": item["type_key"],
+                    "allowed_reference_asset_ids": item["reference_asset_ids"],
+                    "replacement_reason": item.get("replacement_reason", ""),
+                    "warnings": item.get("warnings", []),
+                }
+                for item in deterministic["plan_items"]
+            ],
+        }
+        prompt = """Create one differentiated ecommerce suite plan item for every required_plan_items entry in the input JSON.
+Keep each required type_key unchanged and choose one to three IDs only from that entry's allowed_reference_asset_ids.
+Return JSON with a plan_items array. Every item must contain type_key, theme, scene, shot, composition, copy_enabled, copy_text, and reference_asset_ids.
+Themes, scenes, shots, and compositions must be meaningfully different for repeated image types.
+Use copy only when supported by product identity or selling points; keep it concise in target_language. Never invent product facts, dimensions, structure, accessories, functions, or claims.
+Return JSON only.
+INPUT:
+""" + json.dumps(planning_input, ensure_ascii=False)
+        try:
+            text = self._text_request(prompt)
+            parsed = self._parse_json_response(text, {})
+            return finalize_suite_plan(draft, ai_plan=parsed)
+        except Exception as exc:
+            self.last_error = str(exc)
+            return deterministic
+
     def generate_requirements(
         self, anchor, types_counts, tags=None, target_language="zh"
     ):
@@ -5920,6 +6343,17 @@ def init_session():
         "combo_errors": [],
         "combo_titles": [],
         "combo_title_result": {},
+        "combo_suite_stage": 1,
+        "combo_suite_analysis": None,
+        "combo_suite_draft": None,
+        "combo_suite_plan": None,
+        "combo_upload_signature": "",
+        "combo_type_counts": build_default_type_counts(),
+        "combo_product_identity": "",
+        "combo_product_summary": "",
+        "combo_target_language": "English",
+        "combo_user_instruction": "",
+        "combo_selling_points": "",
         "combo_result_title_language": s.get(
             "default_title_language", DEFAULT_TARGET_LANGUAGE
         ),
@@ -9351,332 +9785,554 @@ def consume_combo_generation_request(provider, model_key, state=None):
     )
 
 
-def show_combo_page():
-    st.markdown(
-        '<div class="page-title">🚀 智能组图工作流</div>', unsafe_allow_html=True
+def _combo_file_signature(files):
+    digest = hashlib.sha256()
+    for uploaded_file in files or []:
+        payload = uploaded_file.getvalue()
+        digest.update(str(getattr(uploaded_file, "name", "")).encode("utf-8"))
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+    return digest.hexdigest() if files else ""
+
+
+def _default_combo_analysis(image_count):
+    return {
+        "product_identity": "",
+        "product_summary": "",
+        "selling_points": [],
+        "assets": [
+            {
+                "id": f"asset-{index:02d}",
+                "upload_index": index,
+                "path": "",
+                "role": "unknown",
+                "role_confidence": 0.0,
+                "is_primary": index == 1,
+                "quality_flags": ["analysis-pending"],
+                "variant_group": "default",
+            }
+            for index in range(1, image_count + 1)
+        ],
+    }
+
+
+def _clear_combo_plan_widgets(state=None):
+    state = st.session_state if state is None else state
+    for key in list(state.keys()):
+        if str(key).startswith("combo_plan_"):
+            del state[key]
+
+
+def _reset_combo_workspace():
+    state = st.session_state
+    reset_values = {
+        "combo_suite_stage": 1,
+        "combo_suite_analysis": None,
+        "combo_suite_draft": None,
+        "combo_suite_plan": None,
+        "combo_upload_signature": "",
+        "combo_images": [],
+        "combo_anchor": None,
+        "combo_reqs": [],
+        "combo_generating": False,
+        "combo_type_counts": build_default_type_counts(),
+        "combo_product_identity": "",
+        "combo_product_summary": "",
+        "combo_target_language": "English",
+        "combo_user_instruction": "",
+        "combo_selling_points": "",
+    }
+    for key in list(state.keys()):
+        if str(key).startswith(("combo_plan_", "combo_asset_role_", "combo_count_")):
+            del state[key]
+    state.pop("combo_suite_upload", None)
+    state.update(reset_values)
+
+
+def _render_combo_stage_header(stage):
+    first, second = st.columns(2)
+    first.markdown(
+        "**1. 素材与套图组合**" if stage == 1 else "1. 素材与套图组合"
+    )
+    second.markdown(
+        "**2. 审核出图计划**" if stage == 2 else "2. 审核出图计划"
     )
 
-    s = get_settings()
-    templates = get_template_group("combo_types")
-    provider = get_active_provider()
-    if not provider or not provider.get("api_key"):
-        st.error("⚠️ 未配置可用的提供商，请先在「提供商设置」中添加")
-        return
 
-    api_key = provider.get("api_key")
-    base_url = provider.get("base_url", "")
-    title_model = provider.get("title_model", "")
-    vision_model = provider.get("vision_model", "")
-    provider_image_model = provider.get("image_model", "")
-
-    # 侧边栏：只保留只读的任务状态/用量信息，可交互的出图参数已移到主区域「这次出图设置」卡片
-    model_key = provider_image_model or s.get("default_model", "nano-banana")
-    with st.sidebar:
-        st.markdown("#### 📊 任务状态")
-        if st.session_state.combo_anchor:
-            a = st.session_state.combo_anchor
-            st.markdown(
-                f'<div class="success-card" style="font-size:13px"><strong>🎯 {esc(a.get("product_name_zh", "商品"))}</strong><br><span style="color:#64748b">品类: {esc(a.get("primary_category", "未识别"))}</span></div>',
-                unsafe_allow_html=True,
+def _render_combo_asset_grid(images, analysis):
+    roles = ["front", "back", "side", "detail", "dimension", "package", "scene", "unknown"]
+    role_labels = {
+        "front": "正面",
+        "back": "背面",
+        "side": "侧面",
+        "detail": "细节",
+        "dimension": "尺寸",
+        "package": "包装",
+        "scene": "场景",
+        "unknown": "未知",
+    }
+    assets = analysis.get("assets", [])
+    columns = st.columns(4)
+    for index, (image, asset) in enumerate(zip(images, assets)):
+        with columns[index % len(columns)]:
+            st.image(image, caption=f"素材 {index + 1}", width="stretch")
+            role_key = f"combo_asset_role_{index}"
+            current_role = asset.get("role", "unknown")
+            if role_key not in st.session_state:
+                st.session_state[role_key] = current_role if current_role in roles else "unknown"
+            selected_role = st.selectbox(
+                f"素材 {index + 1} 角色",
+                roles,
+                format_func=lambda value: role_labels[value],
+                key=role_key,
+                label_visibility="collapsed",
             )
-        else:
-            st.info("📤 请先上传并分析商品")
+            if selected_role != current_role:
+                asset["role_confidence"] = 1.0
+            asset["role"] = selected_role
+            confidence = float(asset.get("role_confidence", 0) or 0)
+            st.caption(f"置信度 {confidence:.0%}")
+            flags = asset.get("quality_flags", [])
+            if flags and flags != ["analysis-pending"]:
+                st.caption(" · ".join(str(flag) for flag in flags[:2]))
 
-        if st.session_state.session_tokens > 0:
-            st.markdown(
-                f'<div class="token-badge">🎯 {st.session_state.session_tokens:,} tokens</div>',
-                unsafe_allow_html=True,
-            )
 
-    # 检查是否有已完成的结果需要显示
-    if st.session_state.combo_generation_done and st.session_state.combo_results:
-        st.markdown("## 📸 生成结果")
-        display_generation_results(
-            st.session_state.combo_results,
-            st.session_state.combo_errors,
-            st.session_state.combo_titles,
-            st.session_state.get("combo_tokens_used", 0),
-            "combo",
-            st.session_state.get(
-                "combo_result_title_language", DEFAULT_TARGET_LANGUAGE
-            ),
+def _render_combo_template_controls(type_counts):
+    templates = load_personal_suite_templates()
+    template_ids = [template["id"] for template in templates]
+    template_by_id = {template["id"]: template for template in templates}
+    left, middle, right = st.columns([2, 1, 1])
+    with left:
+        selected_id = st.selectbox(
+            "套图模板",
+            template_ids,
+            format_func=lambda template_id: template_by_id[template_id]["name"],
+            key="combo_suite_template_id",
         )
-
-        if st.button("🔄 开始新任务", type="primary", width="stretch"):
-            # 重置状态
-            st.session_state.combo_anchor = None
-            st.session_state.combo_reqs = []
-            st.session_state.combo_images = []
-            st.session_state.combo_results = []
-            st.session_state.combo_errors = []
-            st.session_state.combo_titles = []
-            st.session_state.combo_generation_done = False
-            st.session_state.combo_generating = False
-            for tk in templates.keys():
-                if f"combo_sel_{tk}" in st.session_state:
-                    del st.session_state[f"combo_sel_{tk}"]
-                if f"combo_cnt_{tk}" in st.session_state:
-                    del st.session_state[f"combo_cnt_{tk}"]
+    with middle:
+        if st.button("应用模板", width="stretch", key="combo_apply_template"):
+            selected_counts = copy.deepcopy(template_by_id[selected_id]["type_counts"])
+            st.session_state["combo_type_counts"] = selected_counts
+            for type_key in SUITE_TYPE_KEYS:
+                st.session_state[f"combo_count_{type_key}"] = selected_counts.get(type_key, 0)
+            st.rerun()
+    with right:
+        selected_template = template_by_id[selected_id]
+        if selected_template.get("readonly"):
+            if st.button("恢复默认", width="stretch", key="combo_restore_template"):
+                defaults = build_default_type_counts()
+                st.session_state["combo_type_counts"] = defaults
+                for type_key in SUITE_TYPE_KEYS:
+                    st.session_state[f"combo_count_{type_key}"] = defaults[type_key]
+                st.rerun()
+        elif st.button("删除模板", width="stretch", key="combo_delete_template"):
+            delete_personal_suite_template(selected_template["name"])
             st.rerun()
 
-        show_footer()
+    st.markdown("#### 套图类型与数量")
+    columns = st.columns(3)
+    selected_counts = {}
+    for index, type_key in enumerate(SUITE_TYPE_KEYS):
+        widget_key = f"combo_count_{type_key}"
+        if widget_key not in st.session_state:
+            st.session_state[widget_key] = int(type_counts.get(type_key, 0))
+        with columns[index % len(columns)]:
+            selected_counts[type_key] = st.number_input(
+                _SUITE_TYPE_TITLES[type_key],
+                min_value=0,
+                max_value=MAX_TYPE_COUNT,
+                step=1,
+                key=widget_key,
+            )
+    st.session_state["combo_type_counts"] = selected_counts
+
+    save_name, save_action = st.columns([3, 1])
+    with save_name:
+        template_name = st.text_input(
+            "个人模板名称",
+            key="combo_template_name",
+            placeholder="例如：厨房用品标准套图",
+        )
+    with save_action:
+        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        if st.button(
+            "保存模板",
+            width="stretch",
+            disabled=not template_name.strip(),
+            key="combo_save_template",
+        ):
+            try:
+                save_personal_suite_template(template_name, selected_counts)
+                st.success("个人模板已保存。")
+            except (ValueError, OSError) as exc:
+                st.error(str(exc))
+    return selected_counts
+
+
+def _render_combo_stage_one(provider, settings):
+    files = st.file_uploader(
+        "上传 1 至 14 张商品参考图",
+        type=["png", "jpg", "jpeg", "webp"],
+        accept_multiple_files=True,
+        key="combo_suite_upload",
+    )
+    files = list(files or [])
+    if len(files) > MAX_IMAGES:
+        st.warning(f"最多分析 {MAX_IMAGES} 张，已忽略后续文件。")
+        files = files[:MAX_IMAGES]
+    images = []
+    for uploaded_file in files:
+        try:
+            images.append(Image.open(io.BytesIO(uploaded_file.getvalue())).convert("RGB"))
+        except Exception:
+            st.warning(f"无法读取素材：{getattr(uploaded_file, 'name', '未知文件')}")
+    signature = _combo_file_signature(files)
+    sync_combo_upload_state(st.session_state, images, signature)
+
+    if not images:
+        st.info("上传商品素材后，可以分析角色并配置 1 至 10 张标准套图。")
         return
 
-    # 正常的Tab流程
-    tabs = st.tabs(
-        ["📤 上传素材", "🎨 选择类型", "📝 图需文案", "🛡️ 合规检测", "🖼️ 生成出图"]
-    )
+    analysis = st.session_state.get("combo_suite_analysis")
+    if not isinstance(analysis, Mapping) or len(analysis.get("assets", [])) != len(images):
+        analysis = _default_combo_analysis(len(images))
+        st.session_state["combo_suite_analysis"] = analysis
 
-    # Tab 1: 上传
-    with tabs[0]:
-        st.markdown(
-            '<div class="help-section"><h4>💡 上传建议</h4><ul><li>至少上传1张<b>纯白底主体图</b>效果最佳</li><li>尺寸图建议上传原标注图作为参考</li></ul></div>',
-            unsafe_allow_html=True,
-        )
-
-        files = st.file_uploader(
-            "上传商品图片",
-            type=["png", "jpg", "jpeg", "webp"],
-            accept_multiple_files=True,
-            label_visibility="collapsed",
-            key="combo_upload_unique",
-        )
-        st.caption("支持 PNG / JPG / WEBP，可多选。上传后系统会先分析商品，再按所选类型批量出图。")
-
-        if files:
-            images = []
-            display_count = min(len(files), 6)
-            # 固定预览网格，单张上传不会占满整个内容区。
-            cols = st.columns(min(max(display_count, 3), 6))
-            for i, f in enumerate(files[:display_count]):
-                img = Image.open(f).convert("RGB")
-                images.append(img)
-                with cols[i]:
-                    st.image(img, caption=f"图{i + 1}", width="stretch")
-            for f in files[display_count:MAX_IMAGES]:
-                images.append(Image.open(f).convert("RGB"))
-            st.session_state.combo_images = images
-            st.success(f"✅ 已加载 {len(images)} 张图片")
-
-        st.markdown("---")
-        c1, c2 = st.columns(2)
-        with c1:
-            name = st.text_input(
-                "商品名称",
-                max_chars=MAX_NAME_CHARS,
-                key="combo_name",
-                placeholder="例如: 不锈钢保温杯",
-            )
-        with c2:
-            detail = st.text_input(
-                "简要描述",
-                max_chars=MAX_DETAIL_CHARS,
-                key="combo_detail",
-                placeholder="例如: 500ml双层真空",
-            )
-        tags = st.text_input(
-            "产品标签 (逗号分隔)",
-            key="combo_tags",
-            placeholder="保温持久, 食品级, 大容量",
-        )
-
-        btn_disabled = not st.session_state.combo_images
-        if st.button(
-            "🔍 AI分析商品",
+    analyze_col, status_col = st.columns([1, 3])
+    with analyze_col:
+        analyze_clicked = st.button(
+            "AI 分析素材",
             type="primary",
             width="stretch",
-            disabled=btn_disabled,
+            key="combo_analyze_assets",
+        )
+    with status_col:
+        st.caption(f"已加载 {len(images)} 张参考图。AI 识别后仍可逐图修正角色。")
+    if analyze_clicked:
+        with st.spinner("正在分析全部素材..."):
+            client = create_ai_client(
+                provider,
+                model=st.session_state.get("combo_output_model", provider.get("image_model", "")),
+            )
+            analyzed = client.analyze_suite_assets(images)
+        st.session_state["combo_suite_analysis"] = analyzed
+        st.session_state["combo_product_identity"] = analyzed.get("product_identity", "")
+        st.session_state["combo_product_summary"] = analyzed.get("product_summary", "")
+        st.session_state["combo_selling_points"] = "\n".join(analyzed.get("selling_points", []))
+        for key in list(st.session_state.keys()):
+            if str(key).startswith("combo_asset_role_"):
+                del st.session_state[key]
+        st.session_state.session_tokens += client.get_tokens_used()
+        st.rerun()
+
+    _render_combo_asset_grid(images, analysis)
+
+    st.markdown("#### 商品证据")
+    product_identity = st.text_input(
+        "商品身份摘要",
+        key="combo_product_identity",
+        placeholder="品类、颜色、材质及可见结构，例如：黑色带手柄保温杯",
+    )
+    product_summary = st.text_area(
+        "可见特征补充",
+        key="combo_product_summary",
+        height=80,
+        placeholder="只写素材中可见或已确认的信息。",
+    )
+    selling_points = st.text_area(
+        "真实卖点（每行一项）",
+        key="combo_selling_points",
+        height=80,
+        placeholder="例如：防滑握持纹理",
+    )
+
+    type_counts = _render_combo_template_controls(
+        st.session_state.get("combo_type_counts", build_default_type_counts())
+    )
+    total_count = sum(type_counts.values())
+    if not 1 <= total_count <= MAX_TOTAL_IMAGES:
+        st.error(f"输出总数必须为 1 至 {MAX_TOTAL_IMAGES} 张，当前为 {total_count} 张。")
+    else:
+        st.caption(f"计划输出 {total_count} 张 · 参考图 {len(images)} 张")
+
+    dimension_data = {}
+    if type_counts.get("dimension", 0):
+        st.markdown("#### 真实尺寸")
+        d1, d2, d3, d4 = st.columns(4)
+        with d1:
+            width = st.text_input("宽", key="combo_dimension_width")
+        with d2:
+            height = st.text_input("高", key="combo_dimension_height")
+        with d3:
+            depth = st.text_input("深", key="combo_dimension_depth")
+        with d4:
+            unit = st.selectbox("单位", ["cm", "mm", "inch"], key="combo_dimension_unit")
+        for key, value in (("width", width), ("height", height), ("depth", depth)):
+            if value.strip():
+                dimension_data[key] = {"value": value.strip(), "unit": unit}
+        st.caption("尺寸留空时，只能使用已标注尺寸的原始素材；否则规划器会自动安全替换尺寸图。")
+
+    target_language = st.text_input(
+        "图片内文案目标语言",
+        key="combo_target_language",
+        placeholder="例如：Canadian French, concise retail wording",
+    )
+    user_instruction = st.text_area(
+        "全局补充要求",
+        key="combo_user_instruction",
+        height=90,
+        placeholder="例如：所有完整商品视图都保留手柄，场景使用明亮自然光。",
+    )
+    output_settings = render_output_settings_panel("combo", provider, settings)
+
+    if st.button(
+        "生成出图计划",
+        type="primary",
+        width="stretch",
+        disabled=not (1 <= total_count <= MAX_TOTAL_IMAGES),
+        key="combo_generate_suite_plan",
+    ):
+        try:
+            draft = build_suite_editor_state(
+                analysis["assets"],
+                product_identity=product_identity or product_summary,
+                target_language=target_language,
+                dimension_data=dimension_data,
+                selected_type_counts=type_counts,
+                user_instruction=user_instruction,
+                selling_points=selling_points,
+            )
+            with st.spinner("正在生成差异化套图计划..."):
+                client = create_ai_client(
+                    provider,
+                    model=output_settings["model"],
+                )
+                plan = client.generate_suite_plan(draft)
+            _clear_combo_plan_widgets()
+            st.session_state["combo_suite_draft"] = draft
+            st.session_state["combo_suite_plan"] = plan
+            st.session_state["combo_suite_stage"] = 2
+            st.session_state["combo_image_language"] = target_language
+            st.session_state["combo_anchor"] = {
+                "product_name_zh": product_identity or "商品",
+                "product_name_en": product_identity or "Product",
+                "primary_category": product_summary or "General",
+                "visual_attrs": draft["selling_points"],
+            }
+            st.session_state["combo_enable_title"] = False
+            st.session_state.session_tokens += client.get_tokens_used()
+            st.rerun()
+        except (TypeError, ValueError) as exc:
+            st.error(str(exc))
+
+
+def _render_combo_stage_two(provider):
+    draft = st.session_state.get("combo_suite_draft")
+    plan = st.session_state.get("combo_suite_plan")
+    images = st.session_state.get("combo_images", [])
+    if not isinstance(draft, Mapping) or not isinstance(plan, Mapping):
+        st.warning("计划状态已失效，请重新配置套图。")
+        st.session_state["combo_suite_stage"] = 1
+        return
+
+    supported_types = get_supported_suite_types(draft)
+    assets = plan.get("assets", [])
+    asset_positions = {
+        asset.get("id"): index
+        for index, asset in enumerate(assets)
+        if isinstance(asset, Mapping)
+    }
+    edited_items = []
+    for index, original in enumerate(plan.get("plan_items", [])):
+        item_id = original.get("id", f"plan-{index + 1:02d}")
+        with st.expander(
+            f"{index + 1:02d} · {_SUITE_TYPE_TITLES.get(original.get('type_key'), original.get('title', '计划项'))}",
+            expanded=index < 2,
         ):
-            with st.spinner("🤖 AI正在分析..."):
-                try:
-                    client = create_ai_client(provider, model=model_key)
-                    anchor = client.analyze_product(
-                        st.session_state.combo_images, name, detail
-                    )
-                    st.session_state.combo_anchor = anchor
-                    st.session_state.combo_tags_list = [
-                        t.strip() for t in tags.split(",") if t.strip()
-                    ][:MAX_TAGS]
-                    st.session_state.session_tokens += client.get_tokens_used()
-                    st.success("✅ 分析完成！")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"分析失败: {sanitize_task_error(str(e))}")
-
-    # Tab 2: 选择类型
-    with tabs[1]:
-        if not st.session_state.combo_anchor:
-            st.warning("👆 请先在「上传素材」完成商品分析")
-        else:
-            selected_types, total_count = render_type_selector(
-                templates,
-                prefix="combo",
-                max_per_type=MAX_TYPE_COUNT,
-                max_total=MAX_TOTAL_IMAGES,
+            default_type = (
+                original["type_key"]
+                if original.get("type_key") in supported_types
+                else "scene"
             )
-
-            if total_count > MAX_TOTAL_IMAGES:
-                st.error(f"❌ 超出最大限制 ({MAX_TOTAL_IMAGES}张)")
-
-            enable_title, title_info, title_template, title_language, title_vision_model = (
-                render_title_gen_option("combo", provider)
+            type_key = st.selectbox(
+                "图片类型",
+                supported_types,
+                index=supported_types.index(default_type),
+                format_func=lambda value: _SUITE_TYPE_TITLES[value],
+                key=f"combo_plan_type_{item_id}",
             )
+            if original.get("replacement_reason"):
+                st.warning(f"替换原因：{original['replacement_reason']}")
+            for warning in original.get("warnings", []):
+                if warning and warning != original.get("replacement_reason"):
+                    st.caption(f"风险：{warning}")
 
-            image_language = render_target_language_selector(
-                "combo",
-                "image_language",
-                "🌐 图需 / 入图文案语言",
-                "控制图需、入图文案和图片提示词里的目标语言。",
+            direction_left, direction_right = st.columns(2)
+            with direction_left:
+                theme = st.text_input(
+                    "主题",
+                    value=original.get("theme", ""),
+                    key=f"combo_plan_theme_{item_id}",
+                )
+                scene = st.text_area(
+                    "场景",
+                    value=original.get("scene", ""),
+                    height=80,
+                    key=f"combo_plan_scene_{item_id}",
+                )
+            with direction_right:
+                shot = st.text_input(
+                    "镜头",
+                    value=original.get("shot", ""),
+                    key=f"combo_plan_shot_{item_id}",
+                )
+                composition = st.text_area(
+                    "构图",
+                    value=original.get("composition", ""),
+                    height=80,
+                    key=f"combo_plan_composition_{item_id}",
+                )
+
+            allowed_references = select_reference_assets(type_key, assets, limit=3)
+            reference_key = f"combo_plan_refs_{item_id}"
+            current_references = [
+                asset_id
+                for asset_id in original.get("reference_asset_ids", [])
+                if asset_id in allowed_references
+            ] or allowed_references
+            if reference_key in st.session_state:
+                current_state_references = [
+                    asset_id
+                    for asset_id in st.session_state[reference_key]
+                    if asset_id in allowed_references
+                ]
+                st.session_state[reference_key] = current_state_references or allowed_references
+            references = st.multiselect(
+                "引用素材（1 至 3 张）",
+                allowed_references,
+                default=current_references,
+                max_selections=3,
+                key=reference_key,
             )
-            st.caption(
-                f"当前图片文案语言: {get_title_language_caption(image_language)}"
+            if not references:
+                st.warning("至少选择一张与当前类型相关的参考图。")
+            preview_columns = st.columns(3)
+            for preview_index, asset_id in enumerate(references[:3]):
+                image_position = asset_positions.get(asset_id)
+                if image_position is not None and image_position < len(images):
+                    with preview_columns[preview_index]:
+                        st.image(images[image_position], caption=asset_id, width="stretch")
+
+            copy_enabled = st.checkbox(
+                "启用图片内文案",
+                value=bool(original.get("copy_enabled", False)),
+                key=f"combo_plan_copy_enabled_{item_id}",
             )
-
-            st.markdown("---")
-            output_settings = render_output_settings_panel("combo", provider, s)
-            model_key = output_settings["model"]
-
-            can_generate = total_count > 0 and total_count <= MAX_TOTAL_IMAGES
-
-            if st.button(
-                "📝 AI生成图需文案",
-                type="primary",
-                width="stretch",
-                disabled=not can_generate,
-            ):
-                with st.spinner("🤖 生成中..."):
-                    try:
-                        client = create_ai_client(provider, model=model_key)
-                        reqs = client.generate_requirements(
-                            st.session_state.combo_anchor,
-                            selected_types,
-                            st.session_state.get("combo_tags_list", []),
-                            image_language,
-                        )
-                        reqs = client.generate_en_copy(
-                            st.session_state.combo_anchor,
-                            reqs,
-                            image_language,
-                        )
-                        st.session_state.combo_reqs = reqs
-                        st.session_state.session_tokens += client.get_tokens_used()
-                        st.success("✅ 生成完成！")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"生成失败: {sanitize_task_error(str(e))}")
-
-    # Tab 3: 图需文案
-    with tabs[2]:
-        reqs = st.session_state.combo_reqs
-        if not reqs:
-            st.info("👆 请先在「选择类型」生成图需文案")
-        else:
-            image_language = st.session_state.get(
-                "combo_image_language", DEFAULT_TARGET_LANGUAGE
+            copy_text = ""
+            if copy_enabled:
+                copy_text = st.text_input(
+                    "图片内文案",
+                    value=original.get("copy_text", ""),
+                    key=f"combo_plan_copy_{item_id}",
+                )
+            edited = copy.deepcopy(original)
+            edited.update(
+                {
+                    "type_key": type_key,
+                    "theme": theme,
+                    "scene": scene,
+                    "shot": shot,
+                    "composition": composition,
+                    "reference_asset_ids": references,
+                    "copy_enabled": copy_enabled,
+                    "copy_text": copy_text,
+                }
             )
-            language_info = get_target_language(image_language)
-            st.markdown(
-                f'<div class="help-section"><h4>✏️ 编辑提示</h4><ul><li>{language_info["label"]}文案将直接出现在生成的图片上</li><li>避免使用认证词汇和绝对化用语</li></ul></div>',
-                unsafe_allow_html=True,
+            edited_items.append(edited)
+
+    try:
+        approved_plan = apply_suite_plan_edits(draft, edited_items)
+        st.session_state["combo_suite_plan"] = approved_plan
+        plan_error = ""
+    except ValueError as exc:
+        approved_plan = None
+        plan_error = str(exc)
+        st.error(plan_error)
+
+    st.caption(
+        f"共 {draft.get('target_count', 0)} 张 · 预计 {draft.get('target_count', 0)} 次图片请求 · 1600×1600 · PNG/JPG · 单张不超过 2MB"
+    )
+    template_name_col, template_action_col = st.columns([3, 1])
+    with template_name_col:
+        template_name = st.text_input(
+            "保存当前组合为个人模板",
+            key="combo_plan_template_name",
+            placeholder="输入模板名称",
+        )
+    with template_action_col:
+        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        if st.button(
+            "保存模板",
+            width="stretch",
+            disabled=not template_name.strip(),
+            key="combo_plan_save_template",
+        ):
+            plan_counts = {type_key: 0 for type_key in SUITE_TYPE_KEYS}
+            for item in (approved_plan or plan).get("plan_items", []):
+                if item.get("type_key") in plan_counts:
+                    plan_counts[item["type_key"]] += 1
+            try:
+                save_personal_suite_template(template_name, plan_counts)
+                st.success("当前组合已保存为个人模板。")
+            except (ValueError, OSError) as exc:
+                st.error(str(exc))
+
+    back_col, reset_col, submit_col = st.columns([1, 1, 2])
+    with back_col:
+        if st.button("返回组合", width="stretch", key="combo_back_to_setup"):
+            st.session_state["combo_suite_stage"] = 1
+            st.rerun()
+    with reset_col:
+        if st.button("开始新套图", width="stretch", key="combo_reset_workspace"):
+            _reset_combo_workspace()
+            st.rerun()
+    with submit_col:
+        if st.button(
+            "确认并提交后台任务",
+            type="primary",
+            width="stretch",
+            disabled=bool(plan_error or approved_plan is None),
+            key="combo_submit_suite",
+        ):
+            st.session_state["combo_suite_draft"] = copy.deepcopy(draft)
+            st.session_state["combo_suite_plan"] = copy.deepcopy(approved_plan)
+            st.session_state["combo_generating"] = True
+            model_key = st.session_state.get(
+                "combo_output_model", provider.get("image_model", "")
             )
-            for i, r in enumerate(reqs):
-                info = templates.get(r.get("type_key", ""), {})
-                with st.expander(
-                    f"{info.get('icon', '📷')} {r.get('type_name', '')} #{r.get('index', 1)}",
-                    expanded=(i < 2),
-                ):
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        st.markdown(f"**{language_info['label']}图需**")
-                        r["topic"] = st.text_input(
-                            "主题",
-                            value=r.get("topic", ""),
-                            max_chars=30,
-                            key=f"topic_{i}",
-                        )
-                        r["scene"] = st.text_area(
-                            "场景",
-                            value=r.get("scene", ""),
-                            max_chars=80,
-                            height=80,
-                            key=f"scene_{i}",
-                        )
-                    with c2:
-                        st.markdown(f"**{language_info['label']}入图文案**")
-                        r["headline"] = st.text_input(
-                            "标题",
-                            value=r.get("headline", ""),
-                            max_chars=MAX_HEADLINE_CHARS,
-                            key=f"hl_{i}",
-                        )
-                        r["subline"] = st.text_input(
-                            "副标题",
-                            value=r.get("subline", ""),
-                            max_chars=MAX_SUBLINE_CHARS,
-                            key=f"sl_{i}",
-                        )
-                        r["badge"] = st.text_input(
-                            "徽章",
-                            value=r.get("badge", ""),
-                            max_chars=MAX_BADGE_CHARS,
-                            key=f"bd_{i}",
-                        )
-
-    # Tab 4: 合规检测
-    with tabs[3]:
-        reqs = st.session_state.combo_reqs
-        if not reqs:
-            st.info("👆 请先生成图需文案")
-        else:
-            mode = st.session_state.get("user_compliance_mode", "strict")
-            all_ok = True
-            for i, r in enumerate(reqs):
-                text = f"{r.get('headline', '')} {r.get('subline', '')} {r.get('badge', '')}"
-                ok, _, note = check_compliance(text, mode)
-                r["compliance_ok"] = ok
-                if not ok:
-                    all_ok = False
-                info = templates.get(r.get("type_key", ""), {})
-                with st.expander(
-                    f"{'✅' if ok else '⚠️'} {info.get('icon', '')} {r.get('type_name', '')} #{r.get('index', 1)}",
-                    expanded=not ok,
-                ):
-                    if ok:
-                        st.success("✅ 通过")
-                    else:
-                        st.warning(f"⚠️ {note}")
-
-            if all_ok:
-                st.success("✅ 全部通过合规检测")
-
-            if st.button(
-                "🚀 确认并开始出图", type="primary", width="stretch"
-            ):
-                st.session_state.combo_generating = True
-                st.rerun()
-
-    # Tab 5: 生成
-    with tabs[4]:
-        reqs = st.session_state.combo_reqs
-        if not reqs:
-            st.info("👆 请完成前面的步骤")
-        elif not st.session_state.combo_generating:
-            task_desc = f"**待生成: {len(reqs)} 张图片**"
-            if st.session_state.get("combo_enable_title") and st.session_state.get(
-                "combo_title_info"
-            ):
-                task_desc += " + **TEMU 三语标题（中/西/法）**"
-            st.markdown(task_desc)
-            if st.button("🚀 确认开始生成", type="primary", width="stretch"):
-                st.session_state.combo_generating = True
-                st.rerun()
-        else:
-            task, err = consume_combo_generation_request(provider, model_key)
+            task, error = consume_combo_generation_request(provider, model_key)
             if task:
                 open_submitted_task(task)
-            else:
-                st.error(err or "任务提交失败，请重试。")
+            st.error(error or "任务提交失败，请重试。")
 
+
+def show_combo_page():
+    st.markdown(
+        '<div class="page-title">电商标准套图工作台</div>',
+        unsafe_allow_html=True,
+    )
+    settings = get_settings()
+    provider = get_active_provider()
+    if not provider or not provider.get("api_key"):
+        st.error("未配置可用的提供商，请先在提供商设置中添加。")
+        return
+
+    stage = int(st.session_state.get("combo_suite_stage", 1) or 1)
+    _render_combo_stage_header(stage)
+    if stage == 2:
+        _render_combo_stage_two(provider)
+    else:
+        _render_combo_stage_one(provider, settings)
     show_footer()
 
 

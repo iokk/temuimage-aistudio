@@ -330,6 +330,37 @@ class SuitePlannerRuleTests(unittest.TestCase):
             ["Neutral tabletop studio", "Soft daylight workshop"],
         )
 
+    def test_valid_ai_copy_is_preserved_for_prompt_freezing(self):
+        from suite_planner import finalize_suite_plan
+
+        draft = self._draft(
+            {"main-front": 1},
+            [{"id": "front-1", "path": "front.jpg", "role": "front"}],
+            target_language="Italian",
+        )
+        plan = finalize_suite_plan(
+            draft,
+            ai_plan={
+                "plan_items": [
+                    {
+                        "type_key": "main-front",
+                        "reference_asset_ids": ["front-1"],
+                        "theme": "Catalog clarity",
+                        "scene": "Pure white studio",
+                        "shot": "Straight-on product view",
+                        "composition": "Centered complete product",
+                        "copy_enabled": True,
+                        "copy_text": "Design essenziale",
+                    }
+                ]
+            },
+        )
+
+        item = plan["plan_items"][0]
+        self.assertTrue(item["copy_enabled"])
+        self.assertEqual(item["copy_text"], "Design essenziale")
+        self.assertIn("User copy: Design essenziale", item["final_prompt"])
+
     def test_plan_returns_normalized_assets_that_resolve_generated_ids(self):
         from suite_planner import plan_suite
 
@@ -398,6 +429,7 @@ class SuitePromptTests(unittest.TestCase):
         self.assertIn("stainless steel travel mug", prompt)
         self.assertIn("Brazilian Portuguese", prompt)
         self.assertIn("front", prompt)
+        self.assertIn("theme: material focus", prompt)
         self.assertIn("1600x1600", prompt)
 
     def test_empty_copy_is_omitted_and_logo_is_disabled_by_default(self):
@@ -427,6 +459,23 @@ class SuitePromptTests(unittest.TestCase):
         self.assertTrue(
             all("Klingon for all visible text" in item["final_prompt"] for item in plan["plan_items"])
         )
+
+    def test_finalized_prompt_includes_the_users_global_instruction(self):
+        from suite_planner import finalize_suite_plan
+
+        item = finalize_suite_plan(
+            self._draft(
+                {"main-front": 1},
+                user_instruction="Keep the visible handle in every full product view.",
+                selling_points=["Textured non-slip grip"],
+            )
+        )["plan_items"][0]
+
+        self.assertIn(
+            "Keep the visible handle in every full product view.",
+            item["final_prompt"],
+        )
+        self.assertIn("Textured non-slip grip", item["final_prompt"])
 
     def test_finalized_plan_replaces_unsupported_dimension_and_removes_placeholders(self):
         from suite_planner import finalize_suite_plan
