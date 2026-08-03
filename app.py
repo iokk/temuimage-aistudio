@@ -37,6 +37,7 @@ from google.genai import types
 from task_engine import TaskEngine, TaskExecution, TaskHandler
 from task_status import TASK_COMPLETED_STATUSES, TASK_TERMINAL_STATUSES
 from task_store import SqliteTaskStore, TaskCapacityError
+from suite_output import normalize_suite_image
 
 # ==================== 配置常量 ====================
 APP_VERSION = "V15.2.1"
@@ -3045,9 +3046,13 @@ def get_combo_retry_request(task: dict, item: dict):
     stored_req = item.get("req")
     if isinstance(stored_req, dict):
         retry_req = copy.deepcopy(stored_req)
-        retry_req["_batch_index"] = int(
-            item.get("index") or retry_req.get("_batch_index") or 1
-        )
+        try:
+            batch_index = int(
+                retry_req.get("_batch_index") or item.get("index") or 1
+            )
+        except (TypeError, ValueError):
+            batch_index = 1
+        retry_req["_batch_index"] = batch_index
         return retry_req
 
     try:
@@ -7883,14 +7888,17 @@ def _execute_translate_task(execution: TaskExecution):
 def _execute_combo_task(execution: TaskExecution):
     task = execution.task
     payload = task.get("payload", {})
+    is_suite_task = "suite_version" in payload
     provider = (
         get_provider_by_id(payload.get("provider_id", "")) or get_active_provider()
     )
     if not provider or not provider.get("api_key"):
         raise Exception("未配置可用的提供商")
-    refs = load_image_paths(payload.get("image_paths", []))
-    if not refs:
-        raise Exception("任务参考图已丢失，请重新上传")
+    refs = None
+    if not is_suite_task:
+        refs = load_image_paths(payload.get("image_paths", []))
+        if not refs:
+            raise Exception("任务参考图已丢失，请重新上传")
     reqs = payload.get("reqs", [])
     anchor = payload.get("anchor", {})
     client = create_ai_client(
@@ -7906,23 +7914,49 @@ def _execute_combo_task(execution: TaskExecution):
     for i, req in enumerate(reqs):
         execution.raise_if_stopped()
         item_index = int(req.get("_batch_index") or i + 1)
-        prompt = ""
+        req_snapshot = copy.deepcopy(req)
+        prompt = req.get("final_prompt", "") if is_suite_task else ""
         error_meta = None
+        file_path = ""
+        output_metadata = None
         try:
-            prompt = client.compose_image_prompt(
-                anchor,
-                req,
-                payload.get("aspect", "1:1"),
-                payload.get("image_language", DEFAULT_TARGET_LANGUAGE),
-            )
+            item_refs = refs
+            if is_suite_task:
+                item_refs = load_image_paths(req.get("image_paths", []))
+                if not item_refs:
+                    raise ReferenceImageLoadError(
+                        "任务参考图已丢失，请重新上传"
+                    )
+            else:
+                prompt = client.compose_image_prompt(
+                    anchor,
+                    req,
+                    payload.get("aspect", "1:1"),
+                    payload.get("image_language", DEFAULT_TARGET_LANGUAGE),
+                )
             img = client.generate_image(
-                refs,
+                item_refs,
                 prompt,
                 payload.get("aspect", "1:1"),
                 payload.get("size", "1K"),
                 payload.get("thinking_level", "high"),
                 payload.get("image_language", DEFAULT_TARGET_LANGUAGE),
             )
+            if img:
+                if is_suite_task:
+                    stem = f"{task['id']}_{str(item_index).zfill(2)}"
+                    output_metadata = normalize_suite_image(
+                        img,
+                        DATA_DIR / "task_results",
+                        stem,
+                    )
+                    file_path = output_metadata["path"]
+                else:
+                    filename = (
+                        f"{task['id']}_{str(item_index).zfill(2)}_"
+                        f"{req.get('type_name', 'image')}.png"
+                    )
+                    file_path = persist_image_for_task(img, filename)
         except Exception as e:
             error_meta = classify_provider_image_task_error(str(e), provider)
             safe_exception = RuntimeError(error_meta["error"]).with_traceback(
@@ -7936,18 +7970,25 @@ def _execute_combo_task(execution: TaskExecution):
             )
             client.last_error = error_meta["error"]
             img = None
-        if img:
-            filename = f"{task['id']}_{str(item_index).zfill(2)}_{req.get('type_name', 'image')}.png"
-            file_path = persist_image_for_task(img, filename)
+        if file_path:
             results.append(file_path)
-            item_results.append(
-                {
-                    "index": item_index,
-                    "type_name": req.get("type_name", "图片"),
-                    "status": "done",
-                    "file_path": file_path,
-                }
-            )
+            item_result = {
+                "index": item_index,
+                "type_name": req.get("type_name", "图片"),
+                "status": "done",
+                "file_path": file_path,
+            }
+            if is_suite_task:
+                item_result.update(
+                    {
+                        "id": req.get("id", ""),
+                        "type_key": req.get("type_key", ""),
+                        "prompt": prompt,
+                        "req": req_snapshot,
+                        "output_metadata": copy.deepcopy(output_metadata),
+                    }
+                )
+            item_results.append(item_result)
         else:
             if error_meta is None:
                 error_meta = classify_provider_image_task_error(
@@ -7956,16 +7997,22 @@ def _execute_combo_task(execution: TaskExecution):
                     provider,
                 )
             errors.append(error_meta["error"])
-            item_results.append(
-                {
-                    "index": item_index,
-                    "type_name": req.get("type_name", "图片"),
-                    "prompt": prompt,
-                    "req": copy.deepcopy(req),
-                    "status": "error",
-                    **error_meta,
-                }
-            )
+            item_result = {
+                "index": item_index,
+                "type_name": req.get("type_name", "图片"),
+                "prompt": prompt,
+                "req": req_snapshot,
+                "status": "error",
+                **error_meta,
+            }
+            if is_suite_task:
+                item_result.update(
+                    {
+                        "id": req.get("id", ""),
+                        "type_key": req.get("type_key", ""),
+                    }
+                )
+            item_results.append(item_result)
         execution.checkpoint(
             progress={"done": i + 1, "total": total},
             result_files=results,

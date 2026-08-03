@@ -35,6 +35,24 @@ def copy_explicit_python_files(dockerfile: Path, image_root: Path) -> None:
 
 
 class DeploymentManifestTests(unittest.TestCase):
+    def test_dockerfiles_copy_suite_runtime_modules(self):
+        required_sources = {"suite_planner.py", "suite_output.py"}
+
+        for dockerfile_name in ("Dockerfile", "Dockerfile.web"):
+            with self.subTest(dockerfile=dockerfile_name):
+                copied_sources = {
+                    shlex.split(line, comments=True)[1]
+                    for line in (REPOSITORY_ROOT / dockerfile_name)
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                    if line.lstrip().upper().startswith("COPY ")
+                }
+
+                self.assertTrue(
+                    required_sources.issubset(copied_sources),
+                    f"{dockerfile_name} must copy the suite runtime modules",
+                )
+
     def test_web_requirements_include_encrypted_secret_storage(self):
         requirements = {
             re.split(r"[<>=!~]", line, maxsplit=1)[0].strip().lower()

@@ -2,7 +2,7 @@ import copy
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PIL import Image
 
@@ -374,6 +374,219 @@ class SuitePayloadTests(unittest.TestCase):
         self.assertEqual(payload["reqs"][0]["final_prompt"], "Frozen front prompt")
         self.assertEqual(payload["reqs"][0]["image_paths"], payload["image_paths"])
         self.assertFalse(state["combo_generating"])
+
+
+class SuiteExecutionTests(unittest.TestCase):
+    def _request(
+        self,
+        item_id,
+        type_key,
+        title,
+        prompt,
+        reference_ids,
+        image_paths,
+    ):
+        return {
+            "id": item_id,
+            "type_key": type_key,
+            "type_name": title,
+            "title": title,
+            "final_prompt": prompt,
+            "reference_asset_ids": reference_ids,
+            "image_paths": image_paths,
+        }
+
+    def _execution(self, reqs):
+        execution = Mock()
+        execution.task = {
+            "id": "suite-execution",
+            "type": "combo",
+            "payload": {
+                "suite_version": app.SUITE_TASK_VERSION,
+                "provider_id": "provider-1",
+                "image_paths": ["front.png", "detail.png", "side.png"],
+                "reqs": reqs,
+                "aspect": "1:1",
+                "size": "1K",
+                "thinking_level": "high",
+                "image_language": "en",
+            },
+        }
+        return execution
+
+    def test_executes_frozen_requests_with_only_selected_references_and_normalizes_outputs(self):
+        reqs = [
+            self._request(
+                "plan-01",
+                "main-front",
+                "Front hero",
+                "Frozen front prompt",
+                ["front-1"],
+                ["front.png"],
+            ),
+            self._request(
+                "plan-02",
+                "detail",
+                "Material detail",
+                "Frozen detail prompt",
+                ["detail-1", "side-1"],
+                ["detail.png", "side.png"],
+            ),
+        ]
+        original_reqs = copy.deepcopy(reqs)
+        execution = self._execution(reqs)
+        loaded_references = {
+            ("front.png",): ["front-ref"],
+            ("detail.png", "side.png"): ["detail-ref", "side-ref"],
+        }
+        generated_calls = []
+
+        class FrozenPromptClient:
+            last_error = ""
+
+            def compose_image_prompt(self, *_args):
+                raise AssertionError("suite execution must not recompose frozen prompts")
+
+            def generate_image(self, references, prompt, *args):
+                generated_calls.append((list(references), prompt))
+                return f"generated-{len(generated_calls)}"
+
+            def get_last_error(self):
+                return self.last_error
+
+        normalized_outputs = [
+            {
+                "path": "/results/suite-execution_01.jpg",
+                "format": "JPEG",
+                "width": 1600,
+                "height": 1600,
+                "bytes": 120000,
+                "dpi": (72, 72),
+            },
+            {
+                "path": "/results/suite-execution_02.png",
+                "format": "PNG",
+                "width": 1600,
+                "height": 1600,
+                "bytes": 220000,
+                "dpi": (72, 72),
+            },
+        ]
+
+        with (
+            patch.object(
+                app,
+                "get_provider_by_id",
+                return_value={"id": "provider-1", "api_key": "test-key"},
+            ),
+            patch.object(app, "get_active_provider", return_value=None),
+            patch.object(
+                app,
+                "load_image_paths",
+                side_effect=lambda paths: loaded_references[tuple(paths)],
+            ) as load_images,
+            patch.object(app, "create_ai_client", return_value=FrozenPromptClient()),
+            patch.object(
+                app,
+                "normalize_suite_image",
+                side_effect=normalized_outputs,
+            ) as normalize_image,
+        ):
+            result = app._execute_combo_task(execution)
+
+        self.assertEqual(
+            [call.args[0] for call in load_images.call_args_list],
+            [["front.png"], ["detail.png", "side.png"]],
+        )
+        self.assertEqual(
+            generated_calls,
+            [
+                (["front-ref"], "Frozen front prompt"),
+                (["detail-ref", "side-ref"], "Frozen detail prompt"),
+            ],
+        )
+        self.assertEqual(normalize_image.call_count, 2)
+        self.assertEqual(result["files"], [output["path"] for output in normalized_outputs])
+        self.assertFalse(result["partial"])
+        self.assertEqual(execution.checkpoint.call_count, 2)
+        for index, (item, req, output) in enumerate(
+            zip(result["item_results"], original_reqs, normalized_outputs),
+            start=1,
+        ):
+            self.assertEqual(item["index"], index)
+            self.assertEqual(item["id"], req["id"])
+            self.assertEqual(item["type_key"], req["type_key"])
+            self.assertEqual(item["prompt"], req["final_prompt"])
+            self.assertEqual(item["req"], req)
+            self.assertIsNot(item["req"], reqs[index - 1])
+            self.assertEqual(item["file_path"], output["path"])
+            self.assertEqual(item["output_metadata"], output)
+
+        final_checkpoint = execution.checkpoint.call_args.kwargs
+        self.assertEqual(final_checkpoint["result_files"], result["files"])
+
+    def test_preserves_complete_frozen_request_for_reference_generation_and_normalization_failures(self):
+        secret = "opaque-suite-secret"
+        reqs = [
+            self._request(
+                "plan-01", "main-front", "Front", "load prompt", ["front-1"], ["missing.png"]
+            ),
+            self._request(
+                "plan-02", "scene", "Scene", "generate prompt", ["front-1"], ["front.png"]
+            ),
+            self._request(
+                "plan-03", "detail", "Detail", "normalize prompt", ["detail-1"], ["detail.png"]
+            ),
+        ]
+        execution = self._execution(reqs)
+
+        class PartiallyFailingClient:
+            last_error = ""
+
+            def compose_image_prompt(self, *_args):
+                raise AssertionError("suite execution must not compose prompts")
+
+            def generate_image(self, _references, prompt, *args):
+                if prompt == "generate prompt":
+                    raise RuntimeError("504 Gateway Time-out")
+                return "generated-for-normalization"
+
+            def get_last_error(self):
+                return self.last_error
+
+        def load_images(paths):
+            if paths == ["missing.png"]:
+                raise RuntimeError(f"reference loader echoed {secret}")
+            return [f"loaded-{paths[0]}"]
+
+        with (
+            patch.object(
+                app,
+                "get_provider_by_id",
+                return_value={"id": "provider-1", "api_key": secret},
+            ),
+            patch.object(app, "get_active_provider", return_value=None),
+            patch.object(app, "load_image_paths", side_effect=load_images),
+            patch.object(app, "create_ai_client", return_value=PartiallyFailingClient()),
+            patch.object(
+                app,
+                "normalize_suite_image",
+                side_effect=RuntimeError(f"normalizer echoed {secret}"),
+            ),
+        ):
+            result = app._execute_combo_task(execution)
+
+        self.assertTrue(result["partial"])
+        self.assertEqual(result["files"], [])
+        self.assertEqual(execution.checkpoint.call_count, 3)
+        self.assertEqual(len(result["item_results"]), 3)
+        for item, req in zip(result["item_results"], reqs):
+            self.assertEqual(item["status"], "error")
+            self.assertEqual(item["id"], req["id"])
+            self.assertEqual(item["type_key"], req["type_key"])
+            self.assertEqual(item["prompt"], req["final_prompt"])
+            self.assertEqual(item["req"], req)
+            self.assertNotIn(secret, item["error"])
 
 
 if __name__ == "__main__":

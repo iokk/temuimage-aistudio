@@ -20,6 +20,8 @@ COPY app.py .
 COPY task_engine.py .
 COPY task_store.py .
 COPY task_status.py .
+COPY suite_planner.py .
+COPY suite_output.py .
 COPY run_tulite.py .
 COPY provider_acceptance.py .
 COPY scripts/verify_provider.py ./scripts/verify_provider.py

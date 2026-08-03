@@ -446,6 +446,103 @@ class FailedItemRetryTests(unittest.TestCase):
             app.build_task_center_state(task)["can_retry_failed_items"]
         )
 
+    def test_suite_retry_payload_keeps_frozen_snapshot_and_only_failed_request(self):
+        successful_req = {
+            "id": "plan-01",
+            "type_key": "main-front",
+            "type_name": "Front hero",
+            "title": "Front hero",
+            "final_prompt": "Frozen front prompt",
+            "reference_asset_ids": ["front-1"],
+            "image_paths": ["/durable/front.png"],
+        }
+        failed_req = {
+            "id": "plan-02",
+            "type_key": "detail",
+            "type_name": "Material detail",
+            "title": "Material detail",
+            "final_prompt": "Frozen detail prompt",
+            "reference_asset_ids": ["detail-1", "front-1"],
+            "image_paths": ["/durable/detail.png", "/durable/front.png"],
+        }
+        suite_draft = {"target_count": 2, "target_language": "English"}
+        suite_plan = {
+            "assets": [{"id": "front-1"}, {"id": "detail-1"}],
+            "plan_items": [
+                {
+                    "id": req["id"],
+                    "type_key": req["type_key"],
+                    "title": req["title"],
+                    "final_prompt": req["final_prompt"],
+                    "reference_asset_ids": req["reference_asset_ids"],
+                }
+                for req in (successful_req, failed_req)
+            ],
+        }
+        task = {
+            "id": "suite-parent",
+            "type": "combo",
+            "status": "partial",
+            "summary": "智能组图任务 · 2张",
+            "payload": {
+                "suite_version": app.SUITE_TASK_VERSION,
+                "suite_draft": suite_draft,
+                "suite_plan": suite_plan,
+                "provider_id": "provider-1",
+                "image_paths": ["/durable/front.png", "/durable/detail.png"],
+                "reqs": [successful_req, failed_req],
+                "total": 2,
+            },
+            "item_results": [
+                {
+                    "index": 1,
+                    "id": successful_req["id"],
+                    "status": "done",
+                    "req": successful_req,
+                    "file_path": "/results/done.jpg",
+                },
+                {
+                    "index": 2,
+                    "id": failed_req["id"],
+                    "type_key": failed_req["type_key"],
+                    "prompt": failed_req["final_prompt"],
+                    "status": "error",
+                    "retryable": True,
+                    "req": failed_req,
+                },
+            ],
+        }
+
+        payload, error = app.build_failed_item_retry_payload(task)
+
+        self.assertEqual(error, "")
+        self.assertEqual(payload["suite_version"], app.SUITE_TASK_VERSION)
+        self.assertEqual(payload["suite_draft"], suite_draft)
+        self.assertEqual(payload["suite_plan"], suite_plan)
+        self.assertEqual(payload["total"], 1)
+        self.assertEqual(payload["retry_parent_id"], "suite-parent")
+        self.assertEqual(
+            payload["reqs"],
+            [{**failed_req, "_batch_index": 2}],
+        )
+        self.assertEqual(app._validate_combo_task_payload(payload), [])
+        self.assertNotIn(successful_req["id"], [req["id"] for req in payload["reqs"]])
+        self.assertNotIn("_batch_index", failed_req)
+
+    def test_combo_retry_preserves_stored_original_batch_index(self):
+        stored_req = {
+            "type_name": "Material detail",
+            "_batch_index": 7,
+        }
+
+        retry_req = app.get_combo_retry_request(
+            {},
+            {"index": 1, "req": stored_req},
+        )
+
+        self.assertEqual(retry_req["_batch_index"], 7)
+        self.assertIsNot(retry_req, stored_req)
+
     def test_retry_action_preserves_combo_task_type(self):
         task = {
             "id": "combo-retry",
