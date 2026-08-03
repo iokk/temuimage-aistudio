@@ -122,3 +122,13 @@ docker compose up -d --build
 ```
 
 `data/` 目录内的配置、任务与文件在升级时会保留。
+
+升级前建议先完整备份 `data/`，升级后执行：
+
+```bash
+docker compose config --quiet
+docker compose ps
+curl --fail http://127.0.0.1:8501/_stcore/health
+```
+
+如需回滚，切换到 `CHANGELOG.md` 中最近的已验收标签，恢复升级前的整个 `data/` 备份并重新构建。不要只复制 `tasks.sqlite3`，SQLite 的 WAL/SHM 文件和项目文件必须保持同一备份时点。

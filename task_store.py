@@ -81,6 +81,45 @@ class SqliteTaskStore:
                 ).fetchall()
             return [self._decode(row[0]) for row in rows]
 
+    def list_page(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        scope_owner_id: Optional[str] = None,
+        include_unowned: bool = False,
+        statuses: Optional[Iterable[str]] = None,
+    ) -> dict:
+        page_size = max(1, min(int(page_size), 100))
+        page = max(1, int(page))
+        with self._lock, self._connect() as connection:
+            clauses = []
+            params = []
+            if scope_owner_id is not None:
+                if include_unowned:
+                    clauses.append("(owner_id = ? OR owner_id = '')")
+                else:
+                    clauses.append("owner_id = ?")
+                params.append(str(scope_owner_id))
+            status_values = tuple(sorted({str(status) for status in (statuses or ()) if str(status)}))
+            if status_values:
+                placeholders = ",".join("?" for _ in status_values)
+                clauses.append(f"status IN ({placeholders})")
+                params.extend(status_values)
+            where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+            total = int(connection.execute(f"SELECT COUNT(*) FROM tasks{where}", params).fetchone()[0])
+            offset = (page - 1) * page_size
+            rows = connection.execute(
+                f"SELECT document FROM tasks{where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+                [*params, page_size, offset],
+            ).fetchall()
+        return {
+            "items": [self._decode(row[0]) for row in rows],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "pages": max(1, (total + page_size - 1) // page_size),
+        }
+
     def get(
         self,
         task_id: str,

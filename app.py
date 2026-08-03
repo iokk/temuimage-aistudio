@@ -3350,6 +3350,46 @@ def list_tasks_for_display():
     )
 
 
+def list_tasks_for_display_page(page=1, page_size=20, statuses=None):
+    return TASK_REPOSITORY.list_page(
+        page=page,
+        page_size=page_size,
+        scope_owner_id=get_session_owner_id(),
+        include_unowned=True,
+        statuses=statuses,
+    )
+
+
+def render_pagination(key_prefix: str, total: int, page: int, page_size: int):
+    """Render compact reusable pagination and return the selected page settings."""
+    page_size_key = f"{key_prefix}_page_size"
+    page_key = f"{key_prefix}_page"
+    if st.session_state.get(page_size_key) not in {10, 20, 50}:
+        st.session_state[page_size_key] = page_size if page_size in {10, 20, 50} else 20
+    selected_size = st.selectbox(
+        "每页显示",
+        [10, 20, 50],
+        key=page_size_key,
+        label_visibility="collapsed",
+        format_func=lambda value: f"每页 {value} 条",
+    )
+    pages = max(1, (int(total) + selected_size - 1) // selected_size)
+    current_page = min(max(1, int(st.session_state.get(page_key, page))), pages)
+    previous, indicator, following = st.columns([1, 2, 1])
+    with previous:
+        if st.button("← 上一页", key=f"{key_prefix}_previous", disabled=current_page <= 1, width="stretch"):
+            st.session_state[page_key] = current_page - 1
+            st.rerun()
+    with indicator:
+        st.caption(f"第 {current_page} / {pages} 页 · 共 {total} 条")
+    with following:
+        if st.button("下一页 →", key=f"{key_prefix}_next", disabled=current_page >= pages, width="stretch"):
+            st.session_state[page_key] = current_page + 1
+            st.rerun()
+    st.session_state[page_key] = current_page
+    return current_page, selected_size
+
+
 def clear_completed_tasks():
     return TASK_REPOSITORY.clear_archived_done(
         scope_owner_id=get_session_owner_id(),
@@ -7732,67 +7772,71 @@ def render_image_template_management():
 
     for group_key in TEMPLATE_GROUP_ORDER:
         group_meta = TEMPLATE_PAGE_META.get(group_key, {})
-        st.markdown(f"#### {group_meta.get('title', group_key)}")
-        st.caption(group_meta.get("desc", ""))
         group = templates.get(group_key, {})
-        render_template_group_preview(group_key, group_meta, group)
         sorted_items = get_sorted_templates(group_key, enabled_only=False)
-        for item_key, item in sorted_items:
-            item_meta = TEMPLATE_ITEM_META.get(group_key, {}).get(item_key, {})
-            with st.expander(
-                f"{item.get('icon', '📦')} {item.get('name', item_key)}",
-                expanded=False,
-            ):
-                c1, c2 = st.columns([1.1, 1])
-                with c1:
-                    st.caption(
-                        f"适用页面: {group_meta.get('page_label', '未定义')} · 用途: {item_meta.get('usage_note', item.get('desc', ''))}"
-                    )
-                    item["name"] = st.text_input(
-                        "模板名称",
-                        item.get("name", item_meta.get("recommended_name", "")),
-                        key=f"tpl_name_{group_key}_{item_key}",
-                        help="建议使用业务人员能一眼看懂的名称。",
-                    )
-                    item["desc"] = st.text_input(
-                        "模板说明",
-                        item.get("desc", item_meta.get("recommended_desc", "")),
-                        key=f"tpl_desc_{group_key}_{item_key}",
-                        help="建议直接写清这个模板会生成什么类型的图。",
-                    )
-                    if item_meta.get("usage_note"):
-                        st.caption(f"用途提示: {item_meta.get('usage_note')}")
-                    if "hint" in item:
-                        item["hint"] = st.text_input(
-                            "提示语 / Hint",
-                            item.get("hint", ""),
-                            key=f"tpl_hint_{group_key}_{item_key}",
-                            help="供系统内部生成时参考的英文或说明性提示。",
+        with st.expander(
+            f"{group_meta.get('title', group_key)} · {len(sorted_items)} 个模板",
+            expanded=False,
+        ):
+            st.caption(group_meta.get("desc", ""))
+            render_template_group_preview(group_key, group_meta, group)
+            page_key = f"template_{group_key}_page"
+            size_key = f"template_{group_key}_page_size"
+            page = int(st.session_state.get(page_key, 1))
+            page_size = int(st.session_state.get(size_key, 10))
+            page, page_size = render_pagination(
+                f"template_{group_key}", len(sorted_items), page, page_size
+            )
+            start = (page - 1) * page_size
+            for item_key, item in sorted_items[start : start + page_size]:
+                item_meta = TEMPLATE_ITEM_META.get(group_key, {}).get(item_key, {})
+                with st.expander(
+                    f"{item.get('icon', '📦')} {item.get('name', item_key)}",
+                    expanded=False,
+                ):
+                    c1, c2 = st.columns([1.1, 1])
+                    with c1:
+                        st.caption(
+                            f"适用页面: {group_meta.get('page_label', '未定义')} · 用途: {item_meta.get('usage_note', item.get('desc', ''))}"
                         )
-                    if "prompt" in item:
-                        item["prompt"] = st.text_area(
-                            "模板 Prompt",
-                            item.get("prompt", ""),
-                            height=220,
-                            key=f"tpl_prompt_{group_key}_{item_key}",
-                            help="该模板会直接影响翻译保版模式下的实际生成提示词。",
+                        item["name"] = st.text_input(
+                            "模板名称",
+                            item.get("name", item_meta.get("recommended_name", "")),
+                            key=f"tpl_name_{group_key}_{item_key}",
+                            help="建议使用业务人员能一眼看懂的名称。",
                         )
-                    item["enabled"] = st.checkbox(
-                        "启用",
-                        item.get("enabled", True),
-                        key=f"tpl_enabled_{group_key}_{item_key}",
-                    )
-                    item["order"] = st.number_input(
-                        "排序",
-                        min_value=1,
-                        step=1,
-                        value=int(item.get("order", 1)),
-                        key=f"tpl_order_{group_key}_{item_key}",
-                    )
-                with c2:
-                    render_template_item_preview(item, group_meta, item_meta)
+                        item["desc"] = st.text_input(
+                            "模板说明",
+                            item.get("desc", item_meta.get("recommended_desc", "")),
+                            key=f"tpl_desc_{group_key}_{item_key}",
+                            help="建议直接写清这个模板会生成什么类型的图。",
+                        )
+                        if item_meta.get("usage_note"):
+                            st.caption(f"用途提示: {item_meta.get('usage_note')}")
+                        if "hint" in item:
+                            item["hint"] = st.text_input(
+                                "提示语 / Hint", item.get("hint", ""),
+                                key=f"tpl_hint_{group_key}_{item_key}",
+                                help="供系统内部生成时参考的英文或说明性提示。",
+                            )
+                        if "prompt" in item:
+                            item["prompt"] = st.text_area(
+                                "模板 Prompt", item.get("prompt", ""), height=220,
+                                key=f"tpl_prompt_{group_key}_{item_key}",
+                                help="该模板会直接影响翻译保版模式下的实际生成提示词。",
+                            )
+                        item["enabled"] = st.checkbox(
+                            "启用", item.get("enabled", True),
+                            key=f"tpl_enabled_{group_key}_{item_key}",
+                        )
+                        item["order"] = st.number_input(
+                            "排序", min_value=1, step=1, value=int(item.get("order", 1)),
+                            key=f"tpl_order_{group_key}_{item_key}",
+                        )
+                    with c2:
+                        render_template_item_preview(item, group_meta, item_meta)
 
-        st.markdown("---")
+            st.markdown("---")
     if st.button("💾 保存图片模板", key="save_templates_btn"):
         save_templates(templates)
         st.success("✅ 图片模板已保存")
@@ -9318,7 +9362,14 @@ def show_task_center():
         st.rerun()
     tasks = list_tasks_for_display()
     active = [task for task in tasks if build_task_center_state(task)["can_cancel"]]
-    terminal = [task for task in tasks if task.get("status") in TASK_TERMINAL_STATUSES]
+    recent_page = int(st.session_state.get("task_center_recent_page", 1))
+    recent_size = int(st.session_state.get("task_center_recent_page_size", 20))
+    terminal_page = list_tasks_for_display_page(
+        recent_page,
+        recent_size,
+        statuses=TASK_TERMINAL_STATUSES,
+    )
+    terminal = terminal_page["items"]
     queued = sum(task.get("status") == "queued" for task in active)
     running = sum(task.get("status") == "running" for task in active)
 
@@ -9373,7 +9424,15 @@ def show_task_center():
         active_retry_provider_id = str(
             (get_active_provider() or {}).get("id") or ""
         )
-        for task in terminal[:12]:
+        recent_page, recent_size = render_pagination(
+            "task_center_recent",
+            terminal_page["total"],
+            terminal_page["page"],
+            terminal_page["page_size"],
+        )
+        if recent_page != terminal_page["page"] or recent_size != terminal_page["page_size"]:
+            st.rerun()
+        for task in terminal:
             item_views = build_task_item_views(task)
             progress = task.get("progress", {}) or {}
             task_summary = build_task_display_summary(task)
@@ -9400,7 +9459,8 @@ def show_task_center():
                     )
                 if timeout_diagnostic := build_task_timeout_diagnostic(task):
                     st.caption(timeout_diagnostic)
-                render_task_item_results(task, show_images=True)
+                with st.expander("查看结果图片", expanded=False):
+                    render_task_item_results(task, show_images=True)
                 task_center_state = build_task_center_state(task)
                 if task_center_state["can_retry_failed_items"]:
                     render_failed_task_retry_controls(
@@ -9865,7 +9925,13 @@ def show_project_center():
             st.info("还没有历史项目。出图任务完成或失败后会自动出现在这里，可随时回来下载结果。")
         else:
             render_batch_record_actions(active_records, mode="history")
-        for record in active_records:
+        history_page = int(st.session_state.get("project_history_page", 1))
+        history_size = int(st.session_state.get("project_history_page_size", 20))
+        history_page, history_size = render_pagination(
+            "project_history", len(active_records), history_page, history_size
+        )
+        history_start = (history_page - 1) * history_size
+        for record in active_records[history_start : history_start + history_size]:
             render_history_record_block(record, in_trash=False)
 
     with tab_trash:
@@ -9911,7 +9977,13 @@ def show_project_center():
                 st.rerun()
         else:
             st.info("回收站为空。删除的项目会先出现在这里。")
-        for record in trashed_records:
+        trash_page = int(st.session_state.get("project_trash_page", 1))
+        trash_size = int(st.session_state.get("project_trash_page_size", 20))
+        trash_page, trash_size = render_pagination(
+            "project_trash", len(trashed_records), trash_page, trash_size
+        )
+        trash_start = (trash_page - 1) * trash_size
+        for record in trashed_records[trash_start : trash_start + trash_size]:
             render_history_record_block(record, in_trash=True)
 
     with tab_files:

@@ -20,6 +20,7 @@
 - API Key 存储：在提供商设置中录入的 Key，macOS 桌面版写入系统 Keychain，服务器/容器使用 Fernet 加密后写入提供商配置。通过 `GOOGLE_API_KEY` / `GEMINI_API_KEY` 注入的 Key 由运行环境或 `.env` 管理，不会复制到 `providers.json`；`.env` 本身仍含敏感明文，必须限制权限且不得提交
 - 文件日志（`data/logs/app.log`，滚动 5MB×3），任务失败自动记录完整堆栈
 - 过期文件每小时自动清理
+- 任务、历史项目和模板均采用分页/折叠展示；结果原图仅在用户展开时加载，适合记录量增长后的日常使用
 
 ## 快速开始（本地）
 
@@ -83,6 +84,14 @@ deploy/1panel/      # 1Panel 面板部署专用文件
 desktop/ desktop-app/  # macOS 桌面壳（仅本地桌面版需要）
 data/               # 运行时数据（配置/任务/文件/日志），已 gitignore
 ```
+
+## 维护与 AI 接手
+
+- [ARCHITECTURE.md](ARCHITECTURE.md)：数据流、模块边界与扩展方式
+- [MAINTENANCE.md](MAINTENANCE.md)：故障分类、备份、回滚和日常验收
+- [CHANGELOG.md](CHANGELOG.md)：版本变更记录
+- [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)：当前能力和已知边界
+- [AGENTS.md](AGENTS.md)：Codex、ChatGPT、Claude 等 AI 修改项目时必须遵守的契约
 
 ## 注意事项
 

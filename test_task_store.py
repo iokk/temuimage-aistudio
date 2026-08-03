@@ -27,6 +27,39 @@ def make_task(task_id, status="queued", created_at="2026-07-29T10:00:00", **extr
 
 
 class SqliteTaskStoreTests(unittest.TestCase):
+    def test_list_page_returns_stable_owner_scoped_slice_and_total(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            store = SqliteTaskStore(Path(temporary_directory) / "tasks.sqlite3")
+            for index in range(5):
+                task = make_task(f"task-{index}")
+                task["owner_id"] = "owner-a"
+                task["created_at"] = f"2026-08-04T00:00:0{index}"
+                task["updated_at"] = task["created_at"]
+                store.create(task, max_tasks=20, terminal_statuses={"done"})
+            foreign = make_task("foreign")
+            foreign["owner_id"] = "owner-b"
+            store.create(foreign, max_tasks=20, terminal_statuses={"done"})
+
+            result = store.list_page(2, 2, scope_owner_id="owner-a")
+
+        self.assertEqual(result["total"], 5)
+        self.assertEqual(result["page"], 2)
+        self.assertEqual([task["id"] for task in result["items"]], ["task-2", "task-1"])
+
+    def test_list_page_filters_statuses_before_counting_and_slicing(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            store = SqliteTaskStore(Path(temporary_directory) / "tasks.sqlite3")
+            for task in (
+                make_task("queued", status="queued", created_at="2026-08-04T00:00:03"),
+                make_task("done-new", status="done", created_at="2026-08-04T00:00:02"),
+                make_task("error-old", status="error", created_at="2026-08-04T00:00:01"),
+            ):
+                store.create(task, max_tasks=20, terminal_statuses=TERMINAL_STATUSES)
+
+            result = store.list_page(page=1, page_size=10, statuses={"done", "error"})
+
+        self.assertEqual(result["total"], 2)
+        self.assertEqual([task["id"] for task in result["items"]], ["done-new", "error-old"])
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
