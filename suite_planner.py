@@ -93,6 +93,22 @@ _TYPE_TITLES = {
     "steps": "Product steps",
 }
 
+_TYPE_PROMPT_CONSTRAINTS = {
+    "main-front": "Show one complete product as the primary front view on a clean white background.",
+    "back-side": "Show only the evidenced back or side structure of the product.",
+    "detail": "Focus on a visible material, construction, or feature detail from the references.",
+    "scene": "Keep the product as the clear subject while showing a credible use context.",
+    "dimension": "Display only verified dimensions from user data or selected dimension references; never infer a measurement.",
+    "selling-point": "Show only a selling point supported by the supplied product evidence.",
+    "package": "Show only package contents visible in the selected package reference images.",
+    "compare": "Compare only evidenced product attributes without invented alternatives or claims.",
+    "steps": "Show only evidenced product-use steps without inventing accessories or actions.",
+}
+
+_DIMENSION_PLACEHOLDER_RE = re.compile(
+    r"\bxx\s*(?:cm|inch(?:es)?|in)\b", re.IGNORECASE
+)
+
 _VARIATION_SEEDS = (
     ("material focus", "controlled studio setting", "macro close-up", "diagonal feature framing"),
     ("functional focus", "bright product setting", "three-quarter product view", "asymmetrical negative space"),
@@ -445,6 +461,130 @@ def plan_suite(draft, ai_plan=None):
         "plan_items": ai_items,
         "used_ai_plan": True,
     }
+
+
+def _first_text(source, keys, fallback=""):
+    if not isinstance(source, Mapping):
+        return fallback
+    for key in keys:
+        value = _clean_text(source.get(key))
+        if value:
+            return value
+    return fallback
+
+
+def _verified_dimension_text(draft):
+    dimension_data = draft.get("dimension_data") if isinstance(draft, Mapping) else None
+    if not _has_valid_dimension_data(dimension_data):
+        return ""
+
+    shared_unit = _clean_text(dimension_data.get("unit")).lower()
+    dimensions = []
+    for raw_key, raw_value in dimension_data.items():
+        key = _clean_text(raw_key).lower().replace("-", "_").replace(" ", "_")
+        if key == "unit":
+            continue
+        label = key.replace("_", " ")
+        if isinstance(raw_value, Mapping):
+            value = _clean_text(str(raw_value.get("value")))
+            unit = _clean_text(raw_value.get("unit")).lower()
+        else:
+            value = _clean_text(str(raw_value))
+            unit = shared_unit if isinstance(raw_value, (int, float)) else ""
+        dimensions.append(" ".join(part for part in (label, value, unit) if part))
+    return "; ".join(dimensions)
+
+
+def _reference_role_text(plan_item, assets):
+    normalized_assets = normalize_assets(assets)
+    role_by_id = {asset["id"]: asset["role"] for asset in normalized_assets}
+    references = plan_item.get("reference_asset_ids", []) if isinstance(plan_item, Mapping) else []
+    roles = []
+    if isinstance(references, (list, tuple)):
+        for asset_id in references:
+            role = role_by_id.get(asset_id)
+            if role and role not in roles:
+                roles.append(role)
+    return ", ".join(roles) if roles else "assigned reference images"
+
+
+def _item_copy_text(plan_item):
+    if not isinstance(plan_item, Mapping):
+        return ""
+    if "copy_enabled" in plan_item and not bool(plan_item.get("copy_enabled")):
+        return ""
+    return _clean_text(plan_item.get("copy_text"))
+
+
+def _without_dimension_placeholders(text):
+    cleaned = _DIMENSION_PLACEHOLDER_RE.sub("", text)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def compose_suite_prompt(plan_item, draft, assets):
+    """Compose one safe, ordered image-generation prompt from a suite plan item."""
+    item = plan_item if isinstance(plan_item, Mapping) else {}
+    source = draft if isinstance(draft, Mapping) else {}
+    type_key = item.get("type_key") if item.get("type_key") in TYPE_KEYS else "scene"
+    title = _clean_text(item.get("title")) or _TYPE_TITLES[type_key]
+    product_identity = _first_text(
+        source,
+        ("product_identity", "product_name", "product_summary", "product_title", "name"),
+        "the product shown in the selected reference images",
+    )
+    visual_direction = "; ".join(
+        f"{label}: {value}"
+        for label, value in (
+            ("scene", _clean_text(item.get("scene"))),
+            ("shot", _clean_text(item.get("shot"))),
+            ("composition", _clean_text(item.get("composition"))),
+            ("lighting", _clean_text(item.get("lighting"))),
+        )
+        if value
+    ) or "Follow the selected reference images."
+    target_language = _first_text(source, ("target_language", "image_language", "output_language"))
+    type_constraint = _TYPE_PROMPT_CONSTRAINTS[type_key]
+    if type_key == "dimension":
+        dimensions = _verified_dimension_text(source)
+        if dimensions:
+            type_constraint += f" Verified dimensions: {dimensions}."
+    logo_enabled = bool(source.get("logo_enabled", TEMU_STANDARD_PROFILE["default_logo_enabled"]))
+    logo_requirement = (
+        "Use a logo only when it is explicitly supplied in a selected reference image."
+        if logo_enabled
+        else "Do not add a logo."
+    )
+
+    sections = [
+        f"Product identity: {product_identity}.",
+        f"Image type: {title} ({type_key}).",
+        f"Scene, shot, composition, and lighting: {visual_direction}",
+    ]
+    copy_text = _item_copy_text(item)
+    if copy_text:
+        sections.append(f"User copy: {copy_text}.")
+    if target_language:
+        sections.append(
+            f"Target-language emphasis: render any visible text in {target_language}."
+        )
+    sections.extend(
+        (
+            f"Reference material roles: {_reference_role_text(item, assets)}.",
+            f"Type requirements: {type_constraint}",
+            "Platform requirements: TEMU Standard Suite; 1600x1600 pixels; PNG or JPG; maximum file size 2 MB; 72 DPI metadata; "
+            + logo_requirement,
+            "Truthfulness requirements: preserve the evidenced product identity and visible attributes; do not invent structure, accessories, dimensions, functions, or claims; do not copy source watermarks, store identifiers, source Chinese copy, or collage layouts.",
+        )
+    )
+    return "\n".join(_without_dimension_placeholders(section) for section in sections)
+
+
+def finalize_suite_plan(draft, ai_plan=None):
+    """Build a safe plan and freeze the final prompt on every plan item."""
+    plan = plan_suite(draft, ai_plan=ai_plan)
+    for item in plan["plan_items"]:
+        item["final_prompt"] = compose_suite_prompt(item, draft, plan["assets"])
+    return plan
 
 
 def _validate_target_count(target_count):

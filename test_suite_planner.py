@@ -347,5 +347,117 @@ class SuitePlannerRuleTests(unittest.TestCase):
         self.assertTrue(reference_ids.issubset(asset_ids))
 
 
+class SuitePromptTests(unittest.TestCase):
+    def _draft(self, type_counts, assets=None, **overrides):
+        draft = {
+            "target_count": sum(type_counts.values()),
+            "assets": assets
+            if assets is not None
+            else [
+                {"id": "front-1", "path": "front.jpg", "role": "front"},
+                {"id": "detail-1", "path": "detail.jpg", "role": "detail"},
+            ],
+            "selected_type_counts": type_counts,
+            "product_identity": "stainless steel travel mug",
+            "target_language": "Brazilian Portuguese",
+        }
+        draft.update(overrides)
+        return draft
+
+    def test_compose_prompt_uses_the_required_semantic_order(self):
+        from suite_planner import compose_suite_prompt, plan_suite
+
+        draft = self._draft({"main-front": 1})
+        item = plan_suite(draft)["plan_items"][0]
+        item.update(
+            {
+                "scene": "bright kitchen counter",
+                "shot": "three-quarter product view",
+                "composition": "centered framing",
+                "lighting": "soft daylight",
+                "copy_enabled": True,
+                "copy_text": "Keeps drinks warm",
+            }
+        )
+
+        prompt = compose_suite_prompt(item, draft, draft["assets"])
+
+        ordered_sections = (
+            "Product identity:",
+            "Image type:",
+            "Scene, shot, composition, and lighting:",
+            "User copy:",
+            "Target-language emphasis:",
+            "Reference material roles:",
+            "Type requirements:",
+            "Platform requirements:",
+            "Truthfulness requirements:",
+        )
+        positions = [prompt.index(section) for section in ordered_sections]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("stainless steel travel mug", prompt)
+        self.assertIn("Brazilian Portuguese", prompt)
+        self.assertIn("front", prompt)
+        self.assertIn("1600x1600", prompt)
+
+    def test_empty_copy_is_omitted_and_logo_is_disabled_by_default(self):
+        from suite_planner import compose_suite_prompt, plan_suite
+
+        draft = self._draft({"detail": 1})
+        item = plan_suite(draft)["plan_items"][0]
+        item.update({"copy_enabled": True, "copy_text": "   "})
+
+        prompt = compose_suite_prompt(item, draft, draft["assets"])
+
+        self.assertNotIn("User copy:", prompt)
+        self.assertIn("Do not add a logo", prompt)
+
+    def test_finalized_plan_freezes_prompts_and_uses_freeform_target_language(self):
+        from suite_planner import finalize_suite_plan
+
+        plan = finalize_suite_plan(
+            self._draft(
+                {"main-front": 1, "detail": 1},
+                target_language="Klingon for all visible text",
+            )
+        )
+
+        self.assertEqual(len(plan["plan_items"]), 2)
+        self.assertTrue(all(item["final_prompt"] for item in plan["plan_items"]))
+        self.assertTrue(
+            all("Klingon for all visible text" in item["final_prompt"] for item in plan["plan_items"])
+        )
+
+    def test_finalized_plan_replaces_unsupported_dimension_and_removes_placeholders(self):
+        from suite_planner import finalize_suite_plan
+
+        plan = finalize_suite_plan(
+            self._draft(
+                {"dimension": 1},
+                dimension_data={"width": "XX cm"},
+                user_instruction="Use XX inch labels only when available.",
+            )
+        )
+
+        self.assertNotIn("dimension", [item["type_key"] for item in plan["plan_items"]])
+        final_prompts = [item["final_prompt"] for item in plan["plan_items"]]
+        self.assertTrue(all("XX cm" not in prompt for prompt in final_prompts))
+        self.assertTrue(all("XX inch" not in prompt for prompt in final_prompts))
+
+    def test_dimension_prompt_includes_only_verified_dimension_values(self):
+        from suite_planner import finalize_suite_plan
+
+        plan = finalize_suite_plan(
+            self._draft(
+                {"dimension": 1},
+                dimension_data={"depth": {"value": 8, "unit": "in"}},
+            )
+        )
+
+        item = plan["plan_items"][0]
+        self.assertEqual(item["type_key"], "dimension")
+        self.assertIn("depth 8 in", item["final_prompt"])
+
+
 if __name__ == "__main__":
     unittest.main()
