@@ -175,6 +175,23 @@ class SuitePlannerRuleTests(unittest.TestCase):
                 select_reference_assets(item["type_key"], assets, limit=3),
             )
 
+    def test_eligible_references_include_every_relevant_asset_before_selection_limit(self):
+        from suite_planner import eligible_reference_assets, select_reference_assets
+
+        assets = [
+            {"id": f"detail-{index}", "path": f"detail-{index}.jpg", "role": "detail"}
+            for index in range(1, 6)
+        ]
+
+        self.assertEqual(
+            eligible_reference_assets("detail", assets),
+            ["detail-1", "detail-2", "detail-3", "detail-4", "detail-5"],
+        )
+        self.assertEqual(
+            select_reference_assets("detail", assets, limit=3),
+            ["detail-1", "detail-2", "detail-3"],
+        )
+
     def test_repeated_type_items_rotate_theme_shot_and_composition(self):
         from suite_planner import plan_suite
 
@@ -431,6 +448,24 @@ class SuitePromptTests(unittest.TestCase):
         self.assertIn("front", prompt)
         self.assertIn("theme: material focus", prompt)
         self.assertIn("1600x1600", prompt)
+
+    def test_prompt_keeps_product_identity_and_visible_summary_as_distinct_evidence(self):
+        from suite_planner import compose_suite_prompt, plan_suite
+
+        draft = self._draft(
+            {"main-front": 1},
+            product_identity="matte black travel mug",
+            product_summary="Visible ribbed handle and silver lid ring",
+        )
+        item = plan_suite(draft)["plan_items"][0]
+
+        prompt = compose_suite_prompt(item, draft, draft["assets"])
+
+        self.assertIn("Product identity: matte black travel mug", prompt)
+        self.assertIn(
+            "Visible product summary: Visible ribbed handle and silver lid ring",
+            prompt,
+        )
 
     def test_empty_copy_is_omitted_and_logo_is_disabled_by_default(self):
         from suite_planner import compose_suite_prompt, plan_suite

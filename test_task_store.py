@@ -179,6 +179,76 @@ class SqliteTaskStoreTests(unittest.TestCase):
             {"owner-a-task", "owner-b-task"},
         )
 
+    def test_create_reuses_existing_task_for_the_same_owner_and_submission(self):
+        store = self.make_store()
+        first = make_task(
+            "first-task",
+            owner_id="owner-a",
+            submission_id="submission-1",
+        )
+        duplicate = make_task(
+            "duplicate-task",
+            owner_id="owner-a",
+            submission_id="submission-1",
+        )
+
+        created = store.create(first, 10, TERMINAL_STATUSES)
+        replayed = store.create(duplicate, 10, TERMINAL_STATUSES)
+
+        self.assertEqual(replayed, created)
+        self.assertEqual([task["id"] for task in store.list()], ["first-task"])
+
+        other_owner = store.create(
+            make_task(
+                "other-owner-task",
+                owner_id="owner-b",
+                submission_id="submission-1",
+            ),
+            10,
+            TERMINAL_STATUSES,
+        )
+        self.assertEqual(other_owner["id"], "other-owner-task")
+        self.assertEqual(len(store.list()), 2)
+
+    def test_concurrent_create_with_one_submission_returns_one_task(self):
+        stores = [self.make_store(), self.make_store()]
+        barrier = threading.Barrier(3)
+        results = []
+        failures = []
+
+        def create_submission(store, index):
+            try:
+                barrier.wait()
+                results.append(
+                    store.create(
+                        make_task(
+                            f"task-{index}",
+                            owner_id="owner-a",
+                            submission_id="submission-race",
+                        ),
+                        10,
+                        TERMINAL_STATUSES,
+                    )
+                )
+            except BaseException as error:
+                failures.append(error)
+
+        threads = [
+            threading.Thread(target=create_submission, args=(store, index))
+            for index, store in enumerate(stores)
+        ]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(failures, [])
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]["id"], results[1]["id"])
+        self.assertEqual(len(self.make_store().list()), 1)
+
     def test_owner_scope_is_enforced_by_queries_updates_and_cleanup(self):
         store = self.make_store()
         tasks = [

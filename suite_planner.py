@@ -192,12 +192,9 @@ def normalize_assets(raw_assets):
     return normalized
 
 
-def select_reference_assets(plan_type, assets, limit=3):
-    """Select up to three role-relevant asset IDs for a planned image type."""
-    if isinstance(limit, bool) or not isinstance(limit, int):
-        limit = 3
-    limit = min(max(limit, 0), 3)
-    if not limit or plan_type not in TYPE_KEYS:
+def eligible_reference_assets(plan_type, assets):
+    """Return every role-relevant asset ID for a planned image type."""
+    if plan_type not in TYPE_KEYS:
         return []
 
     normalized_assets = normalize_assets(assets)
@@ -207,9 +204,17 @@ def select_reference_assets(plan_type, assets, limit=3):
         for asset in normalized_assets:
             if asset["role"] == role and asset["id"] not in selected:
                 selected.append(asset["id"])
-                if len(selected) == limit:
-                    return selected
     return selected
+
+
+def select_reference_assets(plan_type, assets, limit=3):
+    """Select up to three role-relevant asset IDs for a planned image type."""
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        limit = 3
+    limit = min(max(limit, 0), 3)
+    if not limit:
+        return []
+    return eligible_reference_assets(plan_type, assets)[:limit]
 
 
 def _meaningful_dimension_value(value):
@@ -562,9 +567,10 @@ def compose_suite_prompt(plan_item, draft, assets):
     title = _clean_text(item.get("title")) or _TYPE_TITLES[type_key]
     product_identity = _first_text(
         source,
-        ("product_identity", "product_name", "product_summary", "product_title", "name"),
+        ("product_identity", "product_name", "product_title", "name"),
         "the product shown in the selected reference images",
     )
+    product_summary = _clean_text(source.get("product_summary"))
     visual_direction = "; ".join(
         f"{label}: {value}"
         for label, value in (
@@ -600,9 +606,15 @@ def compose_suite_prompt(plan_item, draft, assets):
 
     sections = [
         f"Product identity: {product_identity}.",
-        f"Image type: {title} ({type_key}).",
-        f"Scene, shot, composition, and lighting: {visual_direction}",
     ]
+    if product_summary:
+        sections.append(f"Visible product summary: {product_summary}.")
+    sections.extend(
+        (
+            f"Image type: {title} ({type_key}).",
+            f"Scene, shot, composition, and lighting: {visual_direction}",
+        )
+    )
     copy_text = _item_copy_text(item)
     if copy_text:
         sections.append(f"User copy: {copy_text}.")

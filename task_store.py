@@ -105,6 +105,27 @@ class SqliteTaskStore:
                 ).fetchone()
             return self._decode(row[0]) if row else None
 
+    def get_by_submission(self, owner_id: str, submission_id: str) -> Optional[dict]:
+        normalized_owner = str(owner_id or "")
+        normalized_submission = str(submission_id or "").strip()
+        if not normalized_submission:
+            return None
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT document FROM tasks WHERE owner_id = ? ORDER BY created_at ASC",
+                (normalized_owner,),
+            ).fetchall()
+            for row in rows:
+                task = self._decode(row[0])
+                task_submission = str(
+                    task.get("submission_id")
+                    or (task.get("payload") or {}).get("submission_id")
+                    or ""
+                ).strip()
+                if task_submission == normalized_submission:
+                    return task
+        return None
+
     def get_or_create_workspace_id(self, preferred_id: str = "") -> str:
         """Return one stable local workspace identity across sessions/processes."""
         with self._lock, self._transaction() as connection:
@@ -137,7 +158,26 @@ class SqliteTaskStore:
     def create(self, task: dict, max_tasks: int, terminal_statuses: Iterable[str]) -> dict:
         terminal = tuple(sorted(set(terminal_statuses)))
         owner_id = str(task.get("owner_id") or "")
+        submission_id = str(
+            task.get("submission_id")
+            or (task.get("payload") or {}).get("submission_id")
+            or ""
+        ).strip()
         with self._lock, self._transaction() as connection:
+            if submission_id:
+                rows = connection.execute(
+                    "SELECT document FROM tasks WHERE owner_id = ? ORDER BY created_at ASC",
+                    (owner_id,),
+                ).fetchall()
+                for row in rows:
+                    existing = self._decode(row[0])
+                    existing_submission = str(
+                        existing.get("submission_id")
+                        or (existing.get("payload") or {}).get("submission_id")
+                        or ""
+                    ).strip()
+                    if existing_submission == submission_id:
+                        return copy.deepcopy(existing)
             if owner_id:
                 count = connection.execute(
                     "SELECT COUNT(*) FROM tasks WHERE owner_id = ?", (owner_id,)

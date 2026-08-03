@@ -1,5 +1,7 @@
 import copy
+import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -75,6 +77,7 @@ class SuiteEditorStateTests(unittest.TestCase):
         state = app.build_suite_editor_state(
             self._assets(),
             product_identity="Matte black travel mug with visible handle",
+            product_summary="Visible brushed lid ring and ribbed handle",
             target_language="Canadian French, concise retail wording",
             user_instruction="Keep the handle visible in every full product view.",
             selling_points=["Leak-resistant lid", "Textured grip"],
@@ -87,6 +90,10 @@ class SuiteEditorStateTests(unittest.TestCase):
         self.assertEqual(
             state["product_identity"],
             "Matte black travel mug with visible handle",
+        )
+        self.assertEqual(
+            state["product_summary"],
+            "Visible brushed lid ring and ribbed handle",
         )
         self.assertEqual(
             state["selling_points"],
@@ -237,6 +244,198 @@ class SuiteEditorStateTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     app.save_personal_suite_template("Unknown", {"invented": 1})
 
+    def test_personal_template_blueprints_are_owner_scoped_and_sanitized(self):
+        plan_items = [
+            {
+                "id": "plan-01",
+                "type_key": "main-front",
+                "theme": "Clean catalog launch",
+                "scene": "Pure white studio",
+                "shot": "Straight-on front view",
+                "composition": "Centered complete product",
+                "copy_enabled": True,
+                "copy_text": "Built for daily use",
+                "reference_asset_ids": ["old-front"],
+                "final_prompt": "old product prompt",
+                "product_identity": "old product",
+            }
+        ]
+        expected_fields = {
+            "type_key",
+            "theme",
+            "scene",
+            "shot",
+            "composition",
+            "copy_enabled",
+            "copy_text",
+        }
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            settings_file = Path(temporary_directory) / "settings.json"
+            with patch.object(app, "SETTINGS_FILE", settings_file):
+                app._CONFIG_CACHE.clear()
+                app.save_personal_suite_template(
+                    "Launch set",
+                    {"main-front": 1},
+                    plan_items=plan_items,
+                    user_instruction="Use bright natural light.",
+                    owner_id="owner-a",
+                )
+
+                owner_a = app.load_personal_suite_templates(owner_id="owner-a")
+                owner_b = app.load_personal_suite_templates(owner_id="owner-b")
+                stored_settings = json.loads(settings_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(len(owner_a), 2)
+        self.assertEqual(len(owner_b), 1)
+        self.assertEqual(set(owner_a[1]["plan_blueprint"][0]), expected_fields)
+        self.assertEqual(
+            owner_a[1]["global_settings"],
+            {"user_instruction": "Use bright natural light."},
+        )
+        self.assertEqual(
+            list(stored_settings["suite_templates"]["owners"]),
+            ["owner-a"],
+        )
+
+    def test_template_blueprint_reuses_direction_but_reselects_new_product_references(self):
+        old_plan_item = {
+            "type_key": "main-front",
+            "theme": "Clean catalog launch",
+            "scene": "Pure white studio",
+            "shot": "Straight-on front view",
+            "composition": "Centered complete product",
+            "copy_enabled": True,
+            "copy_text": "Ready for every day",
+            "reference_asset_ids": ["old-front"],
+            "final_prompt": "old frozen prompt",
+        }
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            settings_file = Path(temporary_directory) / "settings.json"
+            with patch.object(app, "SETTINGS_FILE", settings_file):
+                app._CONFIG_CACHE.clear()
+                app.save_personal_suite_template(
+                    "Reusable launch",
+                    {"main-front": 1},
+                    plan_items=[old_plan_item],
+                    user_instruction="Keep the complete product visible.",
+                    owner_id="owner-a",
+                )
+                template = app.load_personal_suite_templates(owner_id="owner-a")[1]
+
+        new_draft = app.build_suite_editor_state(
+            [{"id": "new-front", "path": "new-front.jpg", "role": "front"}],
+            product_identity="New red kettle",
+            product_summary="Visible arched handle and steel spout",
+            selected_type_counts={"main-front": 1},
+        )
+        new_plan = app.finalize_suite_plan(new_draft)
+
+        merged_draft, merged_plan = app.apply_suite_template_blueprint(
+            new_draft, new_plan, template
+        )
+        item = merged_plan["plan_items"][0]
+
+        self.assertEqual(item["theme"], "Clean catalog launch")
+        self.assertEqual(item["reference_asset_ids"], ["new-front"])
+        self.assertNotEqual(item["final_prompt"], "old frozen prompt")
+        self.assertIn("New red kettle", item["final_prompt"])
+        self.assertIn("Visible arched handle and steel spout", item["final_prompt"])
+        self.assertIn("Keep the complete product visible", item["final_prompt"])
+        self.assertEqual(
+            merged_draft["user_instruction"],
+            "Keep the complete product visible.",
+        )
+
+    def test_concurrent_template_saves_do_not_lose_owner_records(self):
+        failures = []
+        barrier = threading.Barrier(9)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            settings_file = Path(temporary_directory) / "settings.json"
+            with patch.object(app, "SETTINGS_FILE", settings_file):
+                app._CONFIG_CACHE.clear()
+
+                def save_template(index):
+                    try:
+                        barrier.wait()
+                        app.save_personal_suite_template(
+                            f"Template {index}",
+                            {"scene": 1},
+                            owner_id="shared-owner",
+                        )
+                    except BaseException as error:
+                        failures.append(error)
+
+                threads = [
+                    threading.Thread(target=save_template, args=(index,))
+                    for index in range(8)
+                ]
+                for thread in threads:
+                    thread.start()
+                barrier.wait()
+                for thread in threads:
+                    thread.join(timeout=10)
+
+                templates = app.load_personal_suite_templates(owner_id="shared-owner")
+
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            {template["name"] for template in templates[1:]},
+            {f"Template {index}" for index in range(8)},
+        )
+
+    def test_plan_collection_copy_and_delete_reindex_and_sync_the_draft(self):
+        draft = app.build_suite_editor_state(
+            [{"id": "front-1", "path": "front.jpg", "role": "front"}],
+            selected_type_counts={"scene": 2},
+        )
+        plan = app.finalize_suite_plan(draft)
+
+        copied_draft, copied_plan = app.mutate_suite_plan_collection(
+            draft, plan, action="copy", item_id="plan-01"
+        )
+        deleted_draft, deleted_plan = app.mutate_suite_plan_collection(
+            copied_draft, copied_plan, action="delete", item_id="plan-02"
+        )
+
+        self.assertEqual(copied_draft["target_count"], 3)
+        self.assertEqual(copied_draft["selected_type_counts"]["scene"], 3)
+        self.assertEqual(
+            [item["id"] for item in copied_plan["plan_items"]],
+            ["plan-01", "plan-02", "plan-03"],
+        )
+        self.assertEqual(copied_plan["plan_items"][1]["scene"], plan["plan_items"][0]["scene"])
+        self.assertTrue(all(item["final_prompt"] for item in copied_plan["plan_items"]))
+        self.assertEqual(deleted_draft["target_count"], 2)
+        self.assertEqual(deleted_draft["selected_type_counts"]["scene"], 2)
+        self.assertEqual(
+            [item["id"] for item in deleted_plan["plan_items"]],
+            ["plan-01", "plan-02"],
+        )
+
+    def test_plan_collection_enforces_one_to_ten_items(self):
+        one_draft = app.build_suite_editor_state(
+            [{"id": "front-1", "path": "front.jpg", "role": "front"}],
+            selected_type_counts={"scene": 1},
+        )
+        one_plan = app.finalize_suite_plan(one_draft)
+        ten_draft = app.build_suite_editor_state(
+            [{"id": "front-1", "path": "front.jpg", "role": "front"}],
+            selected_type_counts={"scene": 10},
+        )
+        ten_plan = app.finalize_suite_plan(ten_draft)
+
+        with self.assertRaisesRegex(ValueError, "at least one"):
+            app.mutate_suite_plan_collection(
+                one_draft, one_plan, action="delete", item_id="plan-01"
+            )
+        with self.assertRaisesRegex(ValueError, "at most ten"):
+            app.mutate_suite_plan_collection(
+                ten_draft, ten_plan, action="copy", item_id="plan-01"
+            )
+
 
 class SuiteAINormalizationTests(unittest.TestCase):
     def _client(self):
@@ -316,6 +515,52 @@ class SuiteAINormalizationTests(unittest.TestCase):
         self.assertFalse(fallback["used_ai_plan"])
         self.assertEqual(len(fallback["plan_items"]), 1)
         self.assertTrue(fallback["plan_items"][0]["final_prompt"])
+
+    def test_valid_suite_plan_uses_one_ai_request(self):
+        client = self._client()
+        draft = app.build_suite_editor_state(
+            [{"id": "front-1", "path": "front.jpg", "role": "front"}],
+            selected_type_counts={"main-front": 1},
+        )
+        valid_response = """{"plan_items":[{"type_key":"main-front","theme":"Catalog clarity","scene":"White studio","shot":"Front view","composition":"Centered product","copy_enabled":false,"copy_text":"","reference_asset_ids":["front-1"]}]}"""
+
+        with patch.object(client, "_text_request", return_value=valid_response) as request:
+            result = client.generate_suite_plan(draft)
+
+        self.assertTrue(result["used_ai_plan"])
+        self.assertEqual(request.call_count, 1)
+
+    def test_invalid_suite_plan_is_retried_once_with_correction_instruction(self):
+        client = self._client()
+        draft = app.build_suite_editor_state(
+            [{"id": "front-1", "path": "front.jpg", "role": "front"}],
+            selected_type_counts={"main-front": 1},
+        )
+        valid_response = """{"plan_items":[{"type_key":"main-front","theme":"Catalog clarity","scene":"White studio","shot":"Front view","composition":"Centered product","copy_enabled":false,"copy_text":"","reference_asset_ids":["front-1"]}]}"""
+
+        with patch.object(
+            client, "_text_request", side_effect=["{broken", valid_response]
+        ) as request:
+            result = client.generate_suite_plan(draft)
+
+        self.assertTrue(result["used_ai_plan"])
+        self.assertEqual(request.call_count, 2)
+        self.assertIn("correct", request.call_args_list[1].args[0].lower())
+
+    def test_two_invalid_suite_plan_responses_fall_back_after_two_requests(self):
+        client = self._client()
+        draft = app.build_suite_editor_state(
+            [{"id": "front-1", "path": "front.jpg", "role": "front"}],
+            selected_type_counts={"main-front": 1},
+        )
+
+        with patch.object(
+            client, "_text_request", side_effect=["{broken", "[]"]
+        ) as request:
+            result = client.generate_suite_plan(draft)
+
+        self.assertFalse(result["used_ai_plan"])
+        self.assertEqual(request.call_count, 2)
 
     def test_demo_suite_methods_are_deterministic_and_make_no_upstream_request(self):
         client = self._client()
@@ -735,6 +980,83 @@ class SuitePayloadTests(unittest.TestCase):
         self.assertEqual(payload["reqs"][0]["final_prompt"], "Frozen front prompt")
         self.assertEqual(payload["reqs"][0]["image_paths"], payload["image_paths"])
         self.assertFalse(state["combo_generating"])
+
+    def test_duplicate_suite_submission_reuses_one_task_without_rewriting_uploads(self):
+        from task_store import SqliteTaskStore
+
+        suite_plan = {
+            "target_count": 1,
+            "assets": [
+                {"id": "front-1", "path": "session-only.png", "role": "front"}
+            ],
+            "plan_items": [
+                {
+                    "id": "plan-01",
+                    "order": 1,
+                    "type_key": "main-front",
+                    "title": "Front hero",
+                    "reference_asset_ids": ["front-1"],
+                    "final_prompt": "Frozen front prompt",
+                }
+            ],
+        }
+        suite_draft = {
+            "target_count": 1,
+            "target_language": "English",
+            "assets": copy.deepcopy(suite_plan["assets"]),
+            "selected_type_counts": {"main-front": 1},
+        }
+        state = {
+            "combo_generating": True,
+            "combo_submission_id": "stable-suite-submission",
+            "combo_images": [Image.new("RGB", (8, 8), "white")],
+            "combo_anchor": {"category": "mug"},
+            "combo_suite_draft": suite_draft,
+            "combo_suite_plan": suite_plan,
+            "combo_image_language": "English",
+            "combo_enable_title": False,
+            "combo_title_info": "",
+        }
+        provider = {
+            "id": "provider-1",
+            "title_model": "gpt-4o-mini",
+            "vision_model": "gpt-4o-mini",
+        }
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            data_dir = Path(temporary_directory)
+            repository = SqliteTaskStore(data_dir / "tasks.sqlite3")
+            original_save = app._save_uploaded_images
+            with (
+                patch.object(app, "DATA_DIR", data_dir),
+                patch.object(app, "TASK_REPOSITORY", repository),
+                patch.object(app, "get_session_owner_id", return_value="owner-a"),
+                patch.object(app, "get_task_limits", return_value=(1, 20)),
+                patch.object(
+                    app,
+                    "_save_uploaded_images",
+                    wraps=original_save,
+                ) as save_uploads,
+            ):
+                first = app.consume_combo_generation_request(
+                    provider, "fallback-model", state=state
+                )
+                state["combo_generating"] = True
+                replayed = app.consume_combo_generation_request(
+                    provider, "fallback-model", state=state
+                )
+
+            persisted_tasks = repository.list(scope_owner_id="owner-a")
+
+        self.assertEqual(first[1], "")
+        self.assertEqual(replayed[1], "")
+        self.assertEqual(first[0]["id"], replayed[0]["id"])
+        self.assertEqual(save_uploads.call_count, 1)
+        self.assertEqual(len(persisted_tasks), 1)
+        self.assertEqual(
+            persisted_tasks[0]["submission_id"],
+            "stable-suite-submission",
+        )
 
 
 class SuiteExecutionTests(unittest.TestCase):

@@ -42,6 +42,7 @@ from suite_planner import (
     TYPE_KEYS as SUITE_TYPE_KEYS,
     build_default_type_counts,
     compose_suite_prompt,
+    eligible_reference_assets,
     finalize_suite_plan,
     normalize_assets as normalize_suite_assets,
     select_reference_assets,
@@ -1347,6 +1348,7 @@ def build_suite_editor_state(
     selected_type_counts=None,
     user_instruction="",
     selling_points=None,
+    product_summary="",
 ):
     """Build a Streamlit-independent suite draft from editable workspace fields."""
     counts = _validated_suite_type_counts(
@@ -1369,6 +1371,7 @@ def build_suite_editor_state(
         "assets": normalize_suite_assets(copy.deepcopy(list(assets or []))),
         "selected_type_counts": counts,
         "product_identity": str(product_identity or "").strip(),
+        "product_summary": str(product_summary or "").strip(),
         "user_instruction": str(user_instruction or "").strip(),
         "selling_points": points,
     }
@@ -1383,6 +1386,8 @@ def sync_combo_upload_state(state, images, upload_signature):
     state["combo_suite_analysis"] = None
     state["combo_suite_draft"] = None
     state["combo_suite_plan"] = None
+    state["combo_submission_id"] = ""
+    state["combo_applied_suite_template"] = None
     state["combo_anchor"] = None
     state["combo_suite_stage"] = 1
     state["combo_product_identity"] = ""
@@ -1441,16 +1446,17 @@ def apply_suite_plan_edits(draft, plan_items):
             type_key = "scene" if "scene" in supported else next(iter(supported), "")
         if not type_key:
             raise ValueError("no evidence-supported image type is available")
-        allowed_references = select_reference_assets(type_key, assets, limit=3)
+        eligible_references = eligible_reference_assets(type_key, assets)
+        default_references = eligible_references[:3]
         requested_references = item.get("reference_asset_ids")
         valid_requested = (
             isinstance(requested_references, list)
             and 1 <= len(requested_references) <= 3
             and len(requested_references) == len(set(requested_references))
-            and set(requested_references).issubset(set(allowed_references))
+            and set(requested_references).issubset(set(eligible_references))
         )
         item["reference_asset_ids"] = (
-            list(requested_references) if valid_requested else allowed_references
+            list(requested_references) if valid_requested else default_references
         )
         if not item["reference_asset_ids"]:
             raise ValueError(f"{type_key} has no relevant reference image")
@@ -1484,7 +1490,47 @@ def apply_suite_plan_edits(draft, plan_items):
     }
 
 
-def _suite_template_record(name, type_counts):
+_SETTINGS_LOCKS = {}
+_SETTINGS_LOCKS_GUARD = threading.RLock()
+
+
+def get_settings_lock():
+    path = Path(str(SETTINGS_FILE) + ".lock")
+    key = str(path.resolve())
+    with _SETTINGS_LOCKS_GUARD:
+        lock = _SETTINGS_LOCKS.get(key)
+        if lock is None:
+            lock = _InterProcessHistoryLock(path)
+            _SETTINGS_LOCKS[key] = lock
+        return lock
+
+
+def _suite_template_owner_id(owner_id=None):
+    return str(owner_id if owner_id is not None else get_session_owner_id()).strip()
+
+
+def _suite_plan_blueprint(plan_items):
+    if not isinstance(plan_items, list):
+        return []
+    blueprint = []
+    for raw_item in plan_items:
+        if not isinstance(raw_item, Mapping) or raw_item.get("type_key") not in SUITE_TYPE_KEYS:
+            continue
+        blueprint.append(
+            {
+                "type_key": raw_item["type_key"],
+                "theme": str(raw_item.get("theme") or "").strip(),
+                "scene": str(raw_item.get("scene") or "").strip(),
+                "shot": str(raw_item.get("shot") or "").strip(),
+                "composition": str(raw_item.get("composition") or "").strip(),
+                "copy_enabled": bool(raw_item.get("copy_enabled", False)),
+                "copy_text": str(raw_item.get("copy_text") or "").strip(),
+            }
+        )
+    return blueprint
+
+
+def _suite_template_record(name, type_counts, plan_items=None, user_instruction=""):
     clean_name = str(name or "").strip()
     if not clean_name:
         raise ValueError("template name is required")
@@ -1498,70 +1544,196 @@ def _suite_template_record(name, type_counts):
         "id": template_id,
         "name": clean_name,
         "type_counts": counts,
+        "plan_blueprint": _suite_plan_blueprint(plan_items),
+        "global_settings": {
+            "user_instruction": str(user_instruction or "").strip(),
+        },
         "readonly": False,
         "system": False,
     }
 
 
-def load_personal_suite_templates():
+def _owner_template_records(settings, owner_id):
+    suite_templates = settings.get("suite_templates", {})
+    if not isinstance(suite_templates, Mapping):
+        return []
+    owners = suite_templates.get("owners", {})
+    if not isinstance(owners, Mapping):
+        return []
+    records = owners.get(owner_id, [])
+    return records if isinstance(records, list) else []
+
+
+def _atomic_settings_mutation(mutator):
+    with get_settings_lock():
+        settings = load_json(SETTINGS_FILE, copy.deepcopy(DEFAULT_SETTINGS))
+        if not isinstance(settings, dict):
+            settings = copy.deepcopy(DEFAULT_SETTINGS)
+        for key, value in DEFAULT_SETTINGS.items():
+            settings.setdefault(key, copy.deepcopy(value))
+        changed, result = mutator(settings)
+        if changed:
+            if not save_settings(settings):
+                raise OSError("failed to save settings")
+            with FILE_IO_LOCK:
+                _CONFIG_CACHE.pop(str(SETTINGS_FILE), None)
+        return result
+
+
+def load_personal_suite_templates(owner_id=None):
     """Load a fresh system template plus valid, de-duplicated personal templates."""
+    owner_id = _suite_template_owner_id(owner_id)
     settings = get_settings()
-    raw_templates = settings.get("suite_templates", [])
-    if not isinstance(raw_templates, list):
-        raw_templates = []
+    raw_templates = _owner_template_records(settings, owner_id)
     personal = {}
     for raw in raw_templates:
         if not isinstance(raw, Mapping):
             continue
         try:
-            record = _suite_template_record(raw.get("name"), raw.get("type_counts"))
+            global_settings = raw.get("global_settings", {})
+            user_instruction = (
+                global_settings.get("user_instruction", "")
+                if isinstance(global_settings, Mapping)
+                else ""
+            )
+            record = _suite_template_record(
+                raw.get("name"),
+                raw.get("type_counts"),
+                plan_items=raw.get("plan_blueprint"),
+                user_instruction=user_instruction,
+            )
         except ValueError:
             continue
         personal[record["name"].casefold()] = record
     return copy.deepcopy([SYSTEM_SUITE_TEMPLATE, *personal.values()])
 
 
-def save_personal_suite_template(name, type_counts):
-    record = _suite_template_record(name, type_counts)
-    settings = get_settings()
-    raw_templates = settings.get("suite_templates", [])
-    if not isinstance(raw_templates, list):
-        raw_templates = []
-    remaining = [
-        copy.deepcopy(template)
-        for template in raw_templates
-        if isinstance(template, Mapping)
-        and str(template.get("name") or "").strip().casefold()
-        != record["name"].casefold()
-    ]
-    settings["suite_templates"] = [*remaining, record]
-    if not save_settings(settings):
-        raise OSError("failed to save suite template")
-    _CONFIG_CACHE.pop(str(SETTINGS_FILE), None)
+def save_personal_suite_template(
+    name,
+    type_counts,
+    plan_items=None,
+    user_instruction="",
+    owner_id=None,
+):
+    owner_id = _suite_template_owner_id(owner_id)
+    record = _suite_template_record(
+        name,
+        type_counts,
+        plan_items=plan_items,
+        user_instruction=user_instruction,
+    )
+
+    def mutate(settings):
+        suite_templates = settings.get("suite_templates", {})
+        if not isinstance(suite_templates, Mapping):
+            suite_templates = {}
+        suite_templates = copy.deepcopy(dict(suite_templates))
+        owners = suite_templates.get("owners", {})
+        if not isinstance(owners, Mapping):
+            owners = {}
+        owners = copy.deepcopy(dict(owners))
+        remaining = [
+            copy.deepcopy(template)
+            for template in _owner_template_records(settings, owner_id)
+            if isinstance(template, Mapping)
+            and str(template.get("name") or "").strip().casefold()
+            != record["name"].casefold()
+        ]
+        owners[owner_id] = [*remaining, record]
+        suite_templates["owners"] = owners
+        settings["suite_templates"] = suite_templates
+        return True, None
+
+    return _atomic_settings_mutation(mutate)
 
 
-def delete_personal_suite_template(name):
+def delete_personal_suite_template(name, owner_id=None):
     clean_name = str(name or "").strip()
     if not clean_name or clean_name.casefold() == SYSTEM_SUITE_TEMPLATE["name"].casefold():
         return False
-    settings = get_settings()
-    raw_templates = settings.get("suite_templates", [])
-    if not isinstance(raw_templates, list):
-        return False
-    remaining = [
-        copy.deepcopy(template)
-        for template in raw_templates
-        if not isinstance(template, Mapping)
-        or str(template.get("name") or "").strip().casefold()
-        != clean_name.casefold()
-    ]
-    if len(remaining) == len(raw_templates):
-        return False
-    settings["suite_templates"] = remaining
-    if not save_settings(settings):
-        raise OSError("failed to delete suite template")
-    _CONFIG_CACHE.pop(str(SETTINGS_FILE), None)
-    return True
+    owner_id = _suite_template_owner_id(owner_id)
+
+    def mutate(settings):
+        raw_templates = _owner_template_records(settings, owner_id)
+        remaining = [
+            copy.deepcopy(template)
+            for template in raw_templates
+            if not isinstance(template, Mapping)
+            or str(template.get("name") or "").strip().casefold()
+            != clean_name.casefold()
+        ]
+        if len(remaining) == len(raw_templates):
+            return False, False
+        suite_templates = copy.deepcopy(dict(settings.get("suite_templates", {})))
+        owners = copy.deepcopy(dict(suite_templates.get("owners", {})))
+        owners[owner_id] = remaining
+        suite_templates["owners"] = owners
+        settings["suite_templates"] = suite_templates
+        return True, True
+
+    return _atomic_settings_mutation(mutate)
+
+
+def apply_suite_template_blueprint(draft, plan, template):
+    """Apply reusable directions by type occurrence and rebuild product-specific fields."""
+    merged_draft = copy.deepcopy(dict(draft or {}))
+    if isinstance(template, Mapping):
+        global_settings = template.get("global_settings", {})
+        if isinstance(global_settings, Mapping):
+            merged_draft["user_instruction"] = str(
+                global_settings.get("user_instruction") or ""
+            ).strip()
+        blueprint = _suite_plan_blueprint(template.get("plan_blueprint"))
+    else:
+        blueprint = []
+    by_type = {type_key: [] for type_key in SUITE_TYPE_KEYS}
+    for blueprint_item in blueprint:
+        by_type[blueprint_item["type_key"]].append(blueprint_item)
+    occurrences = {type_key: 0 for type_key in SUITE_TYPE_KEYS}
+    merged_items = []
+    for raw_item in (plan or {}).get("plan_items", []):
+        item = copy.deepcopy(raw_item)
+        type_key = item.get("type_key")
+        occurrence = occurrences.get(type_key, 0)
+        if type_key in occurrences:
+            occurrences[type_key] += 1
+        candidates = by_type.get(type_key, [])
+        if occurrence < len(candidates):
+            item.update(candidates[occurrence])
+        merged_items.append(item)
+    return merged_draft, apply_suite_plan_edits(merged_draft, merged_items)
+
+
+def mutate_suite_plan_collection(draft, plan, *, action, item_id):
+    """Copy or delete one plan card and keep draft counts, IDs, and prompts synchronized."""
+    items = copy.deepcopy((plan or {}).get("plan_items", []))
+    target_index = next(
+        (index for index, item in enumerate(items) if item.get("id") == item_id),
+        None,
+    )
+    if target_index is None:
+        raise ValueError("plan item was not found")
+    if action == "copy":
+        if len(items) >= MAX_TOTAL_IMAGES:
+            raise ValueError("a suite plan can contain at most ten items")
+        items.insert(target_index + 1, copy.deepcopy(items[target_index]))
+    elif action == "delete":
+        if len(items) <= 1:
+            raise ValueError("a suite plan must contain at least one item")
+        del items[target_index]
+    else:
+        raise ValueError("unsupported plan collection action")
+
+    counts = {type_key: 0 for type_key in SUITE_TYPE_KEYS}
+    for index, item in enumerate(items, start=1):
+        item["id"] = f"plan-{index:02d}"
+        item["order"] = index
+        if item.get("type_key") in counts:
+            counts[item["type_key"]] += 1
+    synced_draft = copy.deepcopy(dict(draft or {}))
+    synced_draft["target_count"] = len(items)
+    synced_draft["selected_type_counts"] = counts
+    return synced_draft, apply_suite_plan_edits(synced_draft, items)
 
 
 def apply_proxy_settings(settings=None):
@@ -3231,11 +3403,14 @@ def create_task(task_type: str, payload: dict):
         return None, "；".join(validation_errors)
     _, max_task_queue = get_task_limits()
     now = datetime.now().isoformat()
+    owner_id = get_session_owner_id()
+    submission_id = str(payload.get("submission_id") or "").strip()
     task = {
         "id": _new_task_id(),
         "type": task_type,
         "status": "queued",
-        "owner_id": get_session_owner_id(),
+        "owner_id": owner_id,
+        "submission_id": submission_id,
         "created_at": now,
         "updated_at": now,
         "payload": copy.deepcopy(payload),
@@ -5373,6 +5548,7 @@ Return JSON only."""
             return deterministic
         planning_input = {
             "product_identity": draft.get("product_identity", ""),
+            "product_summary": draft.get("product_summary", ""),
             "target_language": draft.get("target_language", ""),
             "dimension_data": draft.get("dimension_data", {}),
             "selling_points": draft.get("selling_points", []),
@@ -5396,13 +5572,20 @@ Use copy only when supported by product identity or selling points; keep it conc
 Return JSON only.
 INPUT:
 """ + json.dumps(planning_input, ensure_ascii=False)
-        try:
-            text = self._text_request(prompt)
-            parsed = self._parse_json_response(text, {})
-            return finalize_suite_plan(draft, ai_plan=parsed)
-        except Exception as exc:
-            self.last_error = str(exc)
-            return deterministic
+        correction = """
+
+CORRECTION REQUIRED: The previous response was malformed or structurally invalid.
+Return exactly one valid JSON object matching the requested plan_items schema and all constraints. JSON only."""
+        for attempt in range(2):
+            try:
+                text = self._text_request(prompt if attempt == 0 else prompt + correction)
+                parsed = self._parse_json_response(text, {})
+                candidate = finalize_suite_plan(draft, ai_plan=parsed)
+                if candidate.get("used_ai_plan"):
+                    return candidate
+            except Exception as exc:
+                self.last_error = str(exc)
+        return deterministic
 
     def generate_requirements(
         self, anchor, types_counts, tags=None, target_language="zh"
@@ -6347,6 +6530,8 @@ def init_session():
         "combo_suite_analysis": None,
         "combo_suite_draft": None,
         "combo_suite_plan": None,
+        "combo_submission_id": "",
+        "combo_applied_suite_template": None,
         "combo_upload_signature": "",
         "combo_type_counts": build_default_type_counts(),
         "combo_product_identity": "",
@@ -9721,9 +9906,21 @@ def consume_combo_generation_request(provider, model_key, state=None):
         return None, ""
 
     state["combo_generating"] = False
+    submission_id = str(state.get("combo_submission_id") or "").strip()
+    if not submission_id:
+        submission_id = uuid.uuid4().hex
+        state["combo_submission_id"] = submission_id
+    owner_id = get_session_owner_id()
+    existing_task = TASK_REPOSITORY.get_by_submission(owner_id, submission_id)
+    if existing_task:
+        return existing_task, ""
+
     combo_images = state.get("combo_images", [])
+    upload_key = hashlib.sha256(
+        f"{owner_id}\0{submission_id}".encode("utf-8")
+    ).hexdigest()[:20]
     image_paths = _save_uploaded_images(
-        combo_images, f"combo_{int(time.time())}"
+        combo_images, f"combo_{upload_key}"
     )
     suite_plan = state.get("combo_suite_plan")
     suite_draft = state.get("combo_suite_draft")
@@ -9758,6 +9955,7 @@ def consume_combo_generation_request(provider, model_key, state=None):
         "combo",
         {
             **suite_payload,
+            "submission_id": submission_id,
             "provider_id": provider.get("id", ""),
             "anchor": state.get("combo_anchor"),
             "reqs": reqs,
@@ -9830,6 +10028,8 @@ def _reset_combo_workspace():
         "combo_suite_analysis": None,
         "combo_suite_draft": None,
         "combo_suite_plan": None,
+        "combo_submission_id": "",
+        "combo_applied_suite_template": None,
         "combo_upload_signature": "",
         "combo_images": [],
         "combo_anchor": None,
@@ -9911,8 +10111,14 @@ def _render_combo_template_controls(type_counts):
         )
     with middle:
         if st.button("应用模板", width="stretch", key="combo_apply_template"):
-            selected_counts = copy.deepcopy(template_by_id[selected_id]["type_counts"])
+            selected_template = copy.deepcopy(template_by_id[selected_id])
+            selected_counts = copy.deepcopy(selected_template["type_counts"])
             st.session_state["combo_type_counts"] = selected_counts
+            st.session_state["combo_applied_suite_template"] = selected_template
+            global_settings = selected_template.get("global_settings", {})
+            st.session_state["combo_user_instruction"] = str(
+                global_settings.get("user_instruction") or ""
+            ).strip() if isinstance(global_settings, Mapping) else ""
             for type_key in SUITE_TYPE_KEYS:
                 st.session_state[f"combo_count_{type_key}"] = selected_counts.get(type_key, 0)
             st.rerun()
@@ -9922,11 +10128,14 @@ def _render_combo_template_controls(type_counts):
             if st.button("恢复默认", width="stretch", key="combo_restore_template"):
                 defaults = build_default_type_counts()
                 st.session_state["combo_type_counts"] = defaults
+                st.session_state["combo_applied_suite_template"] = None
+                st.session_state["combo_user_instruction"] = ""
                 for type_key in SUITE_TYPE_KEYS:
                     st.session_state[f"combo_count_{type_key}"] = defaults[type_key]
                 st.rerun()
         elif st.button("删除模板", width="stretch", key="combo_delete_template"):
             delete_personal_suite_template(selected_template["name"])
+            st.session_state["combo_applied_suite_template"] = None
             st.rerun()
 
     st.markdown("#### 套图类型与数量")
@@ -9962,7 +10171,11 @@ def _render_combo_template_controls(type_counts):
             key="combo_save_template",
         ):
             try:
-                save_personal_suite_template(template_name, selected_counts)
+                save_personal_suite_template(
+                    template_name,
+                    selected_counts,
+                    user_instruction=st.session_state.get("combo_user_instruction", ""),
+                )
                 st.success("个人模板已保存。")
             except (ValueError, OSError) as exc:
                 st.error(str(exc))
@@ -10095,7 +10308,8 @@ def _render_combo_stage_one(provider, settings):
         try:
             draft = build_suite_editor_state(
                 analysis["assets"],
-                product_identity=product_identity or product_summary,
+                product_identity=product_identity,
+                product_summary=product_summary,
                 target_language=target_language,
                 dimension_data=dimension_data,
                 selected_type_counts=type_counts,
@@ -10108,9 +10322,19 @@ def _render_combo_stage_one(provider, settings):
                     model=output_settings["model"],
                 )
                 plan = client.generate_suite_plan(draft)
+            applied_template = st.session_state.get("combo_applied_suite_template")
+            if isinstance(applied_template, Mapping):
+                applied_template = copy.deepcopy(applied_template)
+                applied_template["global_settings"] = {
+                    "user_instruction": user_instruction,
+                }
+                draft, plan = apply_suite_template_blueprint(
+                    draft, plan, applied_template
+                )
             _clear_combo_plan_widgets()
             st.session_state["combo_suite_draft"] = draft
             st.session_state["combo_suite_plan"] = plan
+            st.session_state["combo_submission_id"] = uuid.uuid4().hex
             st.session_state["combo_suite_stage"] = 2
             st.session_state["combo_image_language"] = target_language
             st.session_state["combo_anchor"] = {
@@ -10135,6 +10359,28 @@ def _render_combo_stage_two(provider):
         st.session_state["combo_suite_stage"] = 1
         return
 
+    if st.button(
+        "AI 重新规划",
+        key="combo_replan_suite",
+        help="重新生成整套计划并创建新的提交版本。",
+        icon=":material/refresh:",
+    ):
+        with st.spinner("正在重新规划整套图片..."):
+            client = create_ai_client(
+                provider,
+                model=st.session_state.get(
+                    "combo_output_model", provider.get("image_model", "")
+                ),
+            )
+            replanned = client.generate_suite_plan(draft)
+        _clear_combo_plan_widgets()
+        st.session_state["combo_suite_plan"] = replanned
+        st.session_state["combo_submission_id"] = uuid.uuid4().hex
+        st.session_state["session_tokens"] = int(
+            st.session_state.get("session_tokens", 0)
+        ) + client.get_tokens_used()
+        st.rerun()
+
     supported_types = get_supported_suite_types(draft)
     assets = plan.get("assets", [])
     asset_positions = {
@@ -10143,6 +10389,7 @@ def _render_combo_stage_two(provider):
         if isinstance(asset, Mapping)
     }
     edited_items = []
+    pending_mutation = None
     for index, original in enumerate(plan.get("plan_items", [])):
         item_id = original.get("id", f"plan-{index + 1:02d}")
         with st.expander(
@@ -10193,27 +10440,37 @@ def _render_combo_stage_two(provider):
                     key=f"combo_plan_composition_{item_id}",
                 )
 
-            allowed_references = select_reference_assets(type_key, assets, limit=3)
+            allowed_references = eligible_reference_assets(type_key, assets)
+            default_references = allowed_references[:3]
             reference_key = f"combo_plan_refs_{item_id}"
             current_references = [
                 asset_id
                 for asset_id in original.get("reference_asset_ids", [])
                 if asset_id in allowed_references
-            ] or allowed_references
+            ] or default_references
             if reference_key in st.session_state:
                 current_state_references = [
                     asset_id
                     for asset_id in st.session_state[reference_key]
                     if asset_id in allowed_references
                 ]
-                st.session_state[reference_key] = current_state_references or allowed_references
-            references = st.multiselect(
-                "引用素材（1 至 3 张）",
-                allowed_references,
-                default=current_references,
-                max_selections=3,
-                key=reference_key,
-            )
+                st.session_state[reference_key] = (
+                    current_state_references or default_references
+                )
+                references = st.multiselect(
+                    "引用素材（1 至 3 张）",
+                    allowed_references,
+                    max_selections=3,
+                    key=reference_key,
+                )
+            else:
+                references = st.multiselect(
+                    "引用素材（1 至 3 张）",
+                    allowed_references,
+                    default=current_references,
+                    max_selections=3,
+                    key=reference_key,
+                )
             if not references:
                 st.warning("至少选择一张与当前类型相关的参考图。")
             preview_columns = st.columns(3)
@@ -10233,7 +10490,7 @@ def _render_combo_stage_two(provider):
                 copy_text = st.text_input(
                     "图片内文案",
                     value=original.get("copy_text", ""),
-                    key=f"combo_plan_copy_{item_id}",
+                    key=f"combo_plan_copy_text_{item_id}",
                 )
             edited = copy.deepcopy(original)
             edited.update(
@@ -10250,6 +10507,26 @@ def _render_combo_stage_two(provider):
             )
             edited_items.append(edited)
 
+            copy_action, delete_action, _ = st.columns([1, 1, 4])
+            with copy_action:
+                if st.button(
+                    "复制",
+                    key=f"combo_plan_copy_{item_id}",
+                    help="复制此计划项",
+                    icon=":material/content_copy:",
+                    disabled=len(plan.get("plan_items", [])) >= MAX_TOTAL_IMAGES,
+                ):
+                    pending_mutation = ("copy", item_id)
+            with delete_action:
+                if st.button(
+                    "删除",
+                    key=f"combo_plan_delete_{item_id}",
+                    help="删除此计划项",
+                    icon=":material/delete:",
+                    disabled=len(plan.get("plan_items", [])) <= 1,
+                ):
+                    pending_mutation = ("delete", item_id)
+
     try:
         approved_plan = apply_suite_plan_edits(draft, edited_items)
         st.session_state["combo_suite_plan"] = approved_plan
@@ -10258,6 +10535,23 @@ def _render_combo_stage_two(provider):
         approved_plan = None
         plan_error = str(exc)
         st.error(plan_error)
+
+    if pending_mutation and approved_plan is not None:
+        action, item_id = pending_mutation
+        try:
+            draft, approved_plan = mutate_suite_plan_collection(
+                draft,
+                approved_plan,
+                action=action,
+                item_id=item_id,
+            )
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            _clear_combo_plan_widgets()
+            st.session_state["combo_suite_draft"] = draft
+            st.session_state["combo_suite_plan"] = approved_plan
+            st.rerun()
 
     st.caption(
         f"共 {draft.get('target_count', 0)} 张 · 预计 {draft.get('target_count', 0)} 次图片请求 · 1600×1600 · PNG/JPG · 单张不超过 2MB"
@@ -10282,7 +10576,12 @@ def _render_combo_stage_two(provider):
                 if item.get("type_key") in plan_counts:
                     plan_counts[item["type_key"]] += 1
             try:
-                save_personal_suite_template(template_name, plan_counts)
+                save_personal_suite_template(
+                    template_name,
+                    plan_counts,
+                    plan_items=(approved_plan or plan).get("plan_items", []),
+                    user_instruction=draft.get("user_instruction", ""),
+                )
                 st.success("当前组合已保存为个人模板。")
             except (ValueError, OSError) as exc:
                 st.error(str(exc))
