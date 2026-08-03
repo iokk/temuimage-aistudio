@@ -8118,6 +8118,18 @@ def _save_uploaded_images(files, prefix: str):
     return saved
 
 
+def _remove_submission_uploads(paths):
+    """Remove only durable uploads created by the current failed submission."""
+    upload_dir = (DATA_DIR / "task_uploads").resolve()
+    for raw_path in paths or []:
+        try:
+            path = Path(raw_path).resolve()
+            if path.parent == upload_dir and path.is_file():
+                path.unlink()
+        except (OSError, RuntimeError, ValueError):
+            continue
+
+
 SUITE_TASK_VERSION = 1
 
 
@@ -9927,9 +9939,11 @@ def consume_combo_generation_request(provider, model_key, state=None):
     suite_payload = {}
     if suite_plan is not None or suite_draft is not None:
         if not isinstance(suite_plan, Mapping) or not isinstance(suite_draft, Mapping):
+            _remove_submission_uploads(image_paths)
             return None, "套图草稿或已批准计划已丢失，请重新生成出图计划。"
         plan_assets = suite_plan.get("assets", [])
         if not isinstance(plan_assets, list) or len(plan_assets) != len(image_paths):
+            _remove_submission_uploads(image_paths)
             return None, "套图素材持久化不完整，请重新上传素材。"
         persisted_assets = [
             {"id": asset.get("id"), "path": path}
@@ -9939,6 +9953,7 @@ def consume_combo_generation_request(provider, model_key, state=None):
         try:
             reqs = build_suite_task_requests(suite_plan, persisted_assets)
         except ValueError as exc:
+            _remove_submission_uploads(image_paths)
             return None, str(exc)
         suite_payload = {
             "suite_version": SUITE_TASK_VERSION,
@@ -9951,7 +9966,7 @@ def consume_combo_generation_request(provider, model_key, state=None):
     default_title_model = resolve_default_title_vision_model(
         provider.get("title_model") or provider.get("vision_model", "")
     )
-    return create_task(
+    task, error = create_task(
         "combo",
         {
             **suite_payload,
@@ -9981,6 +9996,9 @@ def consume_combo_generation_request(provider, model_key, state=None):
             "summary": f"智能组图任务 · {len(reqs)}张",
         },
     )
+    if task is None:
+        _remove_submission_uploads(image_paths)
+    return task, error
 
 
 def _combo_file_signature(files):

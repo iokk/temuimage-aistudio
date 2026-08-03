@@ -1058,6 +1058,39 @@ class SuitePayloadTests(unittest.TestCase):
             "stable-suite-submission",
         )
 
+    def test_failed_suite_submission_removes_only_files_created_for_that_attempt(self):
+        state = {
+            "combo_generating": True,
+            "combo_submission_id": "invalid-suite-submission",
+            "combo_images": [Image.new("RGB", (8, 8), "white")],
+            "combo_suite_draft": {"target_count": 1},
+            "combo_suite_plan": {
+                "assets": [{"id": "front-1"}, {"id": "extra-1"}],
+                "plan_items": [],
+            },
+        }
+        provider = {"id": "provider-1"}
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            data_dir = Path(temporary_directory)
+            upload_dir = data_dir / "task_uploads"
+            upload_dir.mkdir(parents=True)
+            unrelated = upload_dir / "unrelated.png"
+            unrelated.write_bytes(b"keep")
+            with (
+                patch.object(app, "DATA_DIR", data_dir),
+                patch.object(app, "get_session_owner_id", return_value="owner-a"),
+            ):
+                task, error = app.consume_combo_generation_request(
+                    provider, "fallback-model", state=state
+                )
+
+            remaining = sorted(path.name for path in upload_dir.iterdir())
+
+        self.assertIsNone(task)
+        self.assertIn("持久化不完整", error)
+        self.assertEqual(remaining, ["unrelated.png"])
+
 
 class SuiteExecutionTests(unittest.TestCase):
     def _request(
