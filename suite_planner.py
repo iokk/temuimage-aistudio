@@ -130,6 +130,9 @@ _DIMENSION_VALUE_RE = re.compile(
     r"^(?:\d+(?:\.\d+)?|\.\d+)\s*(?:mm|cm|m|in|inch|inches|ft|feet)?$",
     re.IGNORECASE,
 )
+_DIMENSION_TRAILING_UNIT_RE = re.compile(
+    r"(?:mm|cm|m|in|inch|inches|ft|feet)$", re.IGNORECASE
+)
 _DIMENSION_UNITS = frozenset({"mm", "cm", "m", "in", "inch", "inches", "ft", "feet"})
 
 
@@ -386,7 +389,7 @@ def _variation_signature(value):
     return "".join(character.casefold() for character in value if character.isalnum())
 
 
-def _validated_ai_plan(deterministic_plan, assets, ai_plan):
+def _validated_ai_plan(deterministic_plan, assets, ai_plan, draft):
     candidates = _ai_plan_items(ai_plan)
     planned_items = deterministic_plan["plan_items"]
     if not isinstance(candidates, list) or len(candidates) != len(planned_items):
@@ -408,6 +411,12 @@ def _validated_ai_plan(deterministic_plan, assets, ai_plan):
             return None
         allowed_references = set(select_reference_assets(planned_item["type_key"], assets, 3))
         if not set(references).issubset(allowed_references):
+            return None
+        if (
+            planned_item["type_key"] == "dimension"
+            and not _has_valid_dimension_data(draft.get("dimension_data"))
+            and "dimension" not in _referenced_asset_roles(candidate, assets)
+        ):
             return None
         scene = _clean_text(candidate.get("scene"))
         composition = _clean_text(candidate.get("composition"))
@@ -452,7 +461,7 @@ def plan_suite(draft, ai_plan=None):
     deterministic_plan = _build_deterministic_plan(draft, assets)
     if any(not 1 <= len(item["reference_asset_ids"]) <= 3 for item in deterministic_plan["plan_items"]):
         raise ValueError("assets must provide one to three relevant references for every plan item")
-    ai_items = _validated_ai_plan(deterministic_plan, assets, ai_plan)
+    ai_items = _validated_ai_plan(deterministic_plan, assets, ai_plan, draft)
     if ai_items is None:
         return deterministic_plan
     return {
@@ -484,18 +493,23 @@ def _verified_dimension_text(draft):
         key = _clean_text(raw_key).lower().replace("-", "_").replace(" ", "_")
         if key == "unit":
             continue
-        label = key.replace("_", " ")
+        field_match = _DIMENSION_FIELD_RE.fullmatch(key)
+        label = field_match.group(1)
+        field_unit = field_match.group(2) or ""
         if isinstance(raw_value, Mapping):
             value = _clean_text(str(raw_value.get("value")))
-            unit = _clean_text(raw_value.get("unit")).lower()
+            explicit_unit = _clean_text(raw_value.get("unit")).lower()
         else:
             value = _clean_text(str(raw_value))
-            unit = shared_unit if isinstance(raw_value, (int, float)) else ""
+            explicit_unit = ""
+        unit = ""
+        if not _DIMENSION_TRAILING_UNIT_RE.search(value):
+            unit = explicit_unit or field_unit or shared_unit
         dimensions.append(" ".join(part for part in (label, value, unit) if part))
     return "; ".join(dimensions)
 
 
-def _reference_role_text(plan_item, assets):
+def _referenced_asset_roles(plan_item, assets):
     normalized_assets = normalize_assets(assets)
     role_by_id = {asset["id"]: asset["role"] for asset in normalized_assets}
     references = plan_item.get("reference_asset_ids", []) if isinstance(plan_item, Mapping) else []
@@ -505,6 +519,11 @@ def _reference_role_text(plan_item, assets):
             role = role_by_id.get(asset_id)
             if role and role not in roles:
                 roles.append(role)
+    return roles
+
+
+def _reference_role_text(plan_item, assets):
+    roles = _referenced_asset_roles(plan_item, assets)
     return ", ".join(roles) if roles else "assigned reference images"
 
 
@@ -548,6 +567,15 @@ def compose_suite_prompt(plan_item, draft, assets):
         dimensions = _verified_dimension_text(source)
         if dimensions:
             type_constraint += f" Verified dimensions: {dimensions}."
+        elif "dimension" in _referenced_asset_roles(item, assets):
+            type_constraint += (
+                " Reproduce only measurements visibly present in the selected dimension "
+                "reference images; never infer or invent values."
+            )
+        else:
+            raise ValueError(
+                "dimension plan items require verified dimension data or a selected dimension reference"
+            )
     logo_enabled = bool(source.get("logo_enabled", TEMU_STANDARD_PROFILE["default_logo_enabled"]))
     logo_requirement = (
         "Use a logo only when it is explicitly supplied in a selected reference image."

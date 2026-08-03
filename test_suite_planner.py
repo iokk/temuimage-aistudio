@@ -458,6 +458,82 @@ class SuitePromptTests(unittest.TestCase):
         self.assertEqual(item["type_key"], "dimension")
         self.assertIn("depth 8 in", item["final_prompt"])
 
+    def test_dimension_reference_is_selected_and_preserves_the_dimension_plan(self):
+        from suite_planner import finalize_suite_plan
+
+        plan = finalize_suite_plan(
+            self._draft(
+                {"dimension": 1},
+                assets=[
+                    {"id": "front-1", "path": "front.jpg", "role": "front"},
+                    {"id": "dimension-1", "path": "size.jpg", "role": "dimension"},
+                ],
+            )
+        )
+
+        item = plan["plan_items"][0]
+        self.assertEqual(item["type_key"], "dimension")
+        self.assertIn("dimension-1", item["reference_asset_ids"])
+
+    def test_dimension_reference_prompt_only_reproduces_visible_measurements(self):
+        from suite_planner import finalize_suite_plan
+
+        item = finalize_suite_plan(
+            self._draft(
+                {"dimension": 1},
+                assets=[
+                    {"id": "dimension-1", "path": "size.jpg", "role": "dimension"},
+                ],
+            )
+        )["plan_items"][0]
+
+        self.assertIn(
+            "Reproduce only measurements visibly present in the selected dimension reference",
+            item["final_prompt"],
+        )
+        self.assertIn("never infer or invent values", item["final_prompt"])
+
+    def test_ai_dimension_plan_cannot_drop_its_only_dimension_reference(self):
+        from suite_planner import finalize_suite_plan
+
+        draft = self._draft(
+            {"dimension": 1},
+            assets=[
+                {"id": "front-1", "path": "front.jpg", "role": "front"},
+                {"id": "dimension-1", "path": "size.jpg", "role": "dimension"},
+            ],
+        )
+        plan = finalize_suite_plan(
+            draft,
+            ai_plan={
+                "plan_items": [
+                    {
+                        "type_key": "dimension",
+                        "reference_asset_ids": ["front-1"],
+                        "scene": "technical studio",
+                        "composition": "measurement-led framing",
+                    }
+                ]
+            },
+        )
+
+        item = plan["plan_items"][0]
+        self.assertFalse(plan["used_ai_plan"])
+        self.assertIn("dimension-1", item["reference_asset_ids"])
+
+    def test_shared_dimension_unit_is_applied_to_scalar_string_values(self):
+        from suite_planner import finalize_suite_plan
+
+        item = finalize_suite_plan(
+            self._draft(
+                {"dimension": 1},
+                dimension_data={"unit": "cm", "width": "8"},
+            )
+        )["plan_items"][0]
+
+        self.assertEqual(item["type_key"], "dimension")
+        self.assertIn("width 8 cm", item["final_prompt"])
+
 
 if __name__ == "__main__":
     unittest.main()
