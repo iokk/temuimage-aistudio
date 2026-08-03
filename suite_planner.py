@@ -1,5 +1,7 @@
 """Pure domain rules for ecommerce standard image suites."""
 
+import math
+import re
 from collections.abc import Mapping
 from types import MappingProxyType
 
@@ -104,6 +106,16 @@ _VARIATION_SEEDS = (
     ("care focus", "simple daily setting", "contextual product view", "offset product framing"),
 )
 
+_DIMENSION_FIELD_RE = re.compile(
+    r"^(length|width|height|depth|diameter|thickness)"
+    r"(?:_(mm|cm|m|in|inch|inches|ft|feet))?$"
+)
+_DIMENSION_VALUE_RE = re.compile(
+    r"^(?:\d+(?:\.\d+)?|\.\d+)\s*(?:mm|cm|m|in|inch|inches|ft|feet)?$",
+    re.IGNORECASE,
+)
+_DIMENSION_UNITS = frozenset({"mm", "cm", "m", "in", "inch", "inches", "ft", "feet"})
+
 
 def _clean_text(value):
     return value.strip() if isinstance(value, str) else ""
@@ -181,11 +193,48 @@ def select_reference_assets(plan_type, assets, limit=3):
     return selected
 
 
+def _meaningful_dimension_value(value):
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value > 0
+    if isinstance(value, float):
+        return math.isfinite(value) and value > 0
+    if isinstance(value, str):
+        text = value.strip()
+        if not _DIMENSION_VALUE_RE.fullmatch(text):
+            return False
+        numeric = re.match(r"(?:\d+(?:\.\d+)?|\.\d+)", text)
+        return bool(numeric and float(numeric.group()) > 0)
+    if isinstance(value, Mapping):
+        if set(value) - {"value", "unit"} or "value" not in value:
+            return False
+        unit = _clean_text(value.get("unit")).lower()
+        return (not unit or unit in _DIMENSION_UNITS) and _meaningful_dimension_value(value["value"])
+    return False
+
+
+def _has_valid_dimension_data(dimension_data):
+    if not isinstance(dimension_data, Mapping) or not dimension_data:
+        return False
+
+    found_dimension = False
+    for raw_key, value in dimension_data.items():
+        key = _clean_text(raw_key).lower().replace("-", "_").replace(" ", "_")
+        if key == "unit":
+            if _clean_text(value).lower() not in _DIMENSION_UNITS:
+                return False
+            continue
+        if not _DIMENSION_FIELD_RE.fullmatch(key) or not _meaningful_dimension_value(value):
+            return False
+        found_dimension = True
+    return found_dimension
+
+
 def _has_dimension_evidence(draft, assets):
     dimension_data = draft.get("dimension_data") if isinstance(draft, Mapping) else None
-    if isinstance(dimension_data, Mapping):
-        if any(value not in (None, "", [], {}, ()) for value in dimension_data.values()):
-            return True
+    if _has_valid_dimension_data(dimension_data):
+        return True
     return bool(select_reference_assets("dimension", [asset for asset in assets if asset["role"] == "dimension"], 1))
 
 
@@ -212,9 +261,9 @@ def _fallback_type(remaining_detail_evidence, has_selling_point_evidence):
 def _variation_for(type_key, occurrence):
     theme, generic_scene, generic_shot, generic_composition = _VARIATION_SEEDS[occurrence % len(_VARIATION_SEEDS)]
     if type_key == "main-front":
-        return theme, f"pure white {generic_scene}", "front product view", generic_composition
+        return theme, f"pure white {generic_scene}", f"front {generic_shot}", generic_composition
     if type_key == "back-side":
-        return theme, f"pure white {generic_scene}", "back or side product view", generic_composition
+        return theme, f"pure white {generic_scene}", f"back or side {generic_shot}", generic_composition
     if type_key == "detail":
         return theme, generic_scene, generic_shot, generic_composition
     if type_key == "dimension":
@@ -237,13 +286,13 @@ def _safe_reference_assets(type_key, assets):
     return select_reference_assets("scene", assets)
 
 
-def _build_deterministic_plan(draft):
+def _build_deterministic_plan(draft, normalized_assets=None):
     source = draft if isinstance(draft, Mapping) else {}
     target_count = source.get("target_count", TEMU_STANDARD_PROFILE["default_count"])
     if isinstance(target_count, bool) or not isinstance(target_count, int) or not 1 <= target_count <= 10:
         target_count = TEMU_STANDARD_PROFILE["default_count"]
     counts = normalize_type_counts(source.get("selected_type_counts"), target_count)
-    assets = normalize_assets(source.get("assets"))
+    assets = normalized_assets if normalized_assets is not None else normalize_assets(source.get("assets"))
     detail_evidence = sum(asset["role"] == "detail" for asset in assets)
     has_selling_point_evidence = _has_selling_point_evidence(source)
     has_dimension_evidence = _has_dimension_evidence(source, assets)
@@ -298,7 +347,12 @@ def _build_deterministic_plan(draft):
                     "final_prompt": "",
                 }
             )
-    return {"target_count": target_count, "plan_items": plan_items, "used_ai_plan": False}
+    return {
+        "target_count": target_count,
+        "assets": [dict(asset) for asset in assets],
+        "plan_items": plan_items,
+        "used_ai_plan": False,
+    }
 
 
 def _ai_plan_items(ai_plan):
@@ -310,6 +364,10 @@ def _ai_plan_items(ai_plan):
         if isinstance(ai_plan.get(key), list):
             return ai_plan[key]
     return None
+
+
+def _variation_signature(value):
+    return "".join(character.casefold() for character in value if character.isalnum())
 
 
 def _validated_ai_plan(deterministic_plan, assets, ai_plan):
@@ -349,22 +407,41 @@ def _validated_ai_plan(deterministic_plan, assets, ai_plan):
             if value:
                 item[field] = value
         for field in ("theme", "scene", "shot", "composition"):
-            if item[field] in seen_values[item["type_key"]][field]:
+            signature = _variation_signature(item[field])
+            if not signature or signature in seen_values[item["type_key"]][field]:
                 return None
-            seen_values[item["type_key"]][field].add(item[field])
+            seen_values[item["type_key"]][field].add(signature)
         normalized_items.append(item)
     return normalized_items
 
 
+def _validated_plan_assets(draft):
+    errors = validate_suite_draft(draft)
+    if errors:
+        raise ValueError("Invalid suite draft: " + "; ".join(errors))
+
+    raw_assets = draft["assets"]
+    if any(
+        not isinstance(asset, Mapping)
+        or not (_clean_text(asset.get("id")) or _clean_text(asset.get("path") or asset.get("file_path")))
+        for asset in raw_assets
+    ):
+        raise ValueError("assets must contain resolvable reference image mappings")
+    return normalize_assets(raw_assets)
+
+
 def plan_suite(draft, ai_plan=None):
     """Build a safe suite plan, accepting AI detail only after full validation."""
-    deterministic_plan = _build_deterministic_plan(draft)
-    assets = normalize_assets(draft.get("assets") if isinstance(draft, Mapping) else None)
+    assets = _validated_plan_assets(draft)
+    deterministic_plan = _build_deterministic_plan(draft, assets)
+    if any(not 1 <= len(item["reference_asset_ids"]) <= 3 for item in deterministic_plan["plan_items"]):
+        raise ValueError("assets must provide one to three relevant references for every plan item")
     ai_items = _validated_ai_plan(deterministic_plan, assets, ai_plan)
     if ai_items is None:
         return deterministic_plan
     return {
         "target_count": deterministic_plan["target_count"],
+        "assets": deterministic_plan["assets"],
         "plan_items": ai_items,
         "used_ai_plan": True,
     }

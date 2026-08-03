@@ -216,6 +216,136 @@ class SuitePlannerRuleTests(unittest.TestCase):
             [["front-1", "detail-1"], ["detail-1"]],
         )
 
+    def test_plan_suite_rejects_empty_or_unresolvable_assets(self):
+        from suite_planner import plan_suite
+
+        for assets in (
+            [],
+            [None],
+            [{}],
+            [{"path": "package.jpg", "role": "package"}],
+        ):
+            with self.subTest(assets=assets):
+                with self.assertRaisesRegex(ValueError, "assets"):
+                    plan_suite(self._draft({"scene": 1}, assets))
+
+    def test_placeholder_whitespace_and_unknown_dimensions_are_not_evidence(self):
+        from suite_planner import plan_suite
+
+        invalid_dimension_data = (
+            {"width": "TBD"},
+            {"width": "   "},
+            {"marketing_size": 12},
+        )
+        for dimension_data in invalid_dimension_data:
+            with self.subTest(dimension_data=dimension_data):
+                item = plan_suite(
+                    self._draft({"dimension": 1}, dimension_data=dimension_data)
+                )["plan_items"][0]
+                self.assertNotEqual(item["type_key"], "dimension")
+                self.assertIn("dimension", item["replacement_reason"].lower())
+
+    def test_recognized_positive_dimensions_retain_dimension_item(self):
+        from suite_planner import plan_suite
+
+        valid_dimension_data = (
+            {"width": 12},
+            {"height_cm": "12.5 cm"},
+            {"depth": {"value": 8, "unit": "in"}},
+        )
+        for dimension_data in valid_dimension_data:
+            with self.subTest(dimension_data=dimension_data):
+                item = plan_suite(
+                    self._draft({"dimension": 1}, dimension_data=dimension_data)
+                )["plan_items"][0]
+                self.assertEqual(item["type_key"], "dimension")
+                self.assertEqual(item["replacement_reason"], "")
+
+    def test_near_duplicate_ai_variations_fall_back_to_deterministic_plan(self):
+        from suite_planner import plan_suite
+
+        assets = [
+            {"id": "detail-1", "path": "detail-1.jpg", "role": "detail"},
+            {"id": "detail-2", "path": "detail-2.jpg", "role": "detail"},
+        ]
+        ai_plan = {
+            "plan_items": [
+                {
+                    "type_key": "detail",
+                    "reference_asset_ids": ["detail-1"],
+                    "theme": "Material focus",
+                    "scene": "Studio",
+                    "shot": "Macro close-up",
+                    "composition": "Centered",
+                },
+                {
+                    "type_key": "detail",
+                    "reference_asset_ids": ["detail-2"],
+                    "theme": " material focus! ",
+                    "scene": "studio!",
+                    "shot": "macro close up.",
+                    "composition": "CENTERED.",
+                },
+            ]
+        }
+
+        plan = plan_suite(self._draft({"detail": 2}, assets), ai_plan=ai_plan)
+
+        self.assertFalse(plan["used_ai_plan"])
+
+    def test_valid_differentiated_ai_plan_is_accepted(self):
+        from suite_planner import plan_suite
+
+        assets = [
+            {"id": "detail-1", "path": "detail-1.jpg", "role": "detail"},
+            {"id": "detail-2", "path": "detail-2.jpg", "role": "detail"},
+        ]
+        ai_items = [
+            {
+                "type_key": "detail",
+                "reference_asset_ids": ["detail-1"],
+                "theme": "Material texture",
+                "scene": "Neutral tabletop studio",
+                "shot": "Macro surface close-up",
+                "composition": "Diagonal crop",
+            },
+            {
+                "type_key": "detail",
+                "reference_asset_ids": ["detail-2"],
+                "theme": "Functional construction",
+                "scene": "Soft daylight workshop",
+                "shot": "Three-quarter feature view",
+                "composition": "Offset framing",
+            },
+        ]
+
+        plan = plan_suite(
+            self._draft({"detail": 2}, assets),
+            ai_plan={"plan_items": ai_items},
+        )
+
+        self.assertTrue(plan["used_ai_plan"])
+        self.assertEqual(
+            [item["scene"] for item in plan["plan_items"]],
+            ["Neutral tabletop studio", "Soft daylight workshop"],
+        )
+
+    def test_plan_returns_normalized_assets_that_resolve_generated_ids(self):
+        from suite_planner import plan_suite
+
+        plan = plan_suite(
+            self._draft(
+                {"main-front": 1},
+                [{"path": "front.jpg", "role": "front"}],
+            )
+        )
+
+        asset_ids = {asset["id"] for asset in plan["assets"]}
+        reference_ids = set(plan["plan_items"][0]["reference_asset_ids"])
+        self.assertEqual(asset_ids, {"asset-01"})
+        self.assertEqual(reference_ids, {"asset-01"})
+        self.assertTrue(reference_ids.issubset(asset_ids))
+
 
 if __name__ == "__main__":
     unittest.main()
