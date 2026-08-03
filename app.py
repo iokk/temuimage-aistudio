@@ -8108,6 +8108,7 @@ def _validate_suite_task_snapshot(payload: dict) -> list[str]:
 
     req_by_id = {}
     asset_paths = {}
+    asset_ids_by_path = {}
     request_parts = []
     for index, req in enumerate(reqs, start=1):
         if not isinstance(req, Mapping):
@@ -8168,6 +8169,13 @@ def _validate_suite_task_snapshot(payload: dict) -> list[str]:
                 errors.append(f"套图素材 {asset_id} 的持久化路径映射冲突")
             else:
                 asset_paths[asset_id] = path
+            existing_asset_id = asset_ids_by_path.get(path)
+            if existing_asset_id is not None and existing_asset_id != asset_id:
+                errors.append(
+                    f"套图持久化路径重复映射到不同素材：{existing_asset_id}、{asset_id}"
+                )
+            else:
+                asset_ids_by_path[path] = asset_id
         request_parts.append((valid_req_id, req, reference_ids))
 
     plan_ids = set(plan_item_by_id)

@@ -228,6 +228,14 @@ class SuitePayloadTests(unittest.TestCase):
 
         self.assertTrue(any("映射冲突" in error for error in errors))
 
+    def test_snapshot_validation_rejects_different_assets_sharing_one_path(self):
+        payload = self._suite_payload()
+        payload["reqs"][1]["image_paths"][0] = "/durable/front.png"
+
+        errors = app._validate_combo_task_payload(payload)
+
+        self.assertTrue(any("路径重复映射" in error for error in errors))
+
     def test_snapshot_validation_enforces_request_identity_sets_and_retry_subsets(self):
         missing_request = self._suite_payload()
         missing_request["reqs"] = missing_request["reqs"][:1]
