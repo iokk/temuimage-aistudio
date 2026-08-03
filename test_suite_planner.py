@@ -90,5 +90,132 @@ class SuitePlannerModelTests(unittest.TestCase):
         self.assertIn("selected_type_counts must sum to target_count", errors)
 
 
+class SuitePlannerRuleTests(unittest.TestCase):
+    def _draft(self, type_counts, assets=None, **overrides):
+        draft = {
+            "target_count": sum(type_counts.values()),
+            "assets": assets
+            if assets is not None
+            else [
+                {"id": "front-1", "path": "front.jpg", "role": "front"},
+                {"id": "detail-1", "path": "detail.jpg", "role": "detail"},
+            ],
+            "selected_type_counts": type_counts,
+        }
+        draft.update(overrides)
+        return draft
+
+    def test_normalize_assets_assigns_stable_ids_and_known_roles(self):
+        from suite_planner import normalize_assets
+
+        assets = normalize_assets(
+            [
+                {"path": "front.jpg", "role": "Front", "is_primary": True},
+                {"id": "front-1", "path": "duplicate.jpg", "role": "unsupported"},
+            ]
+        )
+
+        self.assertEqual([asset["id"] for asset in assets], ["asset-01", "front-1"])
+        self.assertEqual([asset["role"] for asset in assets], ["front", "unknown"])
+        self.assertTrue(assets[0]["is_primary"])
+
+    def test_missing_back_evidence_is_safely_replaced_with_reason(self):
+        from suite_planner import plan_suite
+
+        plan = plan_suite(self._draft({"main-front": 1, "back-side": 1}))
+        items = plan["plan_items"]
+
+        self.assertEqual(len(items), 2)
+        self.assertNotIn("back-side", [item["type_key"] for item in items])
+        replacement = next(item for item in items if item["replacement_reason"])
+        self.assertIn("back", replacement["replacement_reason"].lower())
+        self.assertNotEqual(replacement["type_key"], "back-side")
+
+    def test_missing_dimension_data_replaces_dimension_with_reason(self):
+        from suite_planner import plan_suite
+
+        plan = plan_suite(self._draft({"dimension": 1}))
+        item = plan["plan_items"][0]
+
+        self.assertNotEqual(item["type_key"], "dimension")
+        self.assertIn("dimension", item["replacement_reason"].lower())
+
+    def test_insufficient_detail_evidence_does_not_invent_extra_detail_items(self):
+        from suite_planner import plan_suite
+
+        plan = plan_suite(self._draft({"detail": 3}))
+        items = plan["plan_items"]
+
+        self.assertEqual(sum(item["type_key"] == "detail" for item in items), 1)
+        self.assertEqual(len(items), 3)
+        self.assertTrue(all(item["replacement_reason"] for item in items[1:]))
+
+    def test_each_plan_item_has_one_to_three_relevant_references(self):
+        from suite_planner import plan_suite, select_reference_assets
+
+        assets = [
+            {"id": "front-1", "path": "front.jpg", "role": "front"},
+            {"id": "detail-1", "path": "detail-1.jpg", "role": "detail"},
+            {"id": "detail-2", "path": "detail-2.jpg", "role": "detail"},
+            {"id": "detail-3", "path": "detail-3.jpg", "role": "detail"},
+            {"id": "back-1", "path": "back.jpg", "role": "back"},
+        ]
+        plan = plan_suite(
+            self._draft(
+                {"main-front": 1, "back-side": 1, "detail": 3, "scene": 1},
+                assets,
+            )
+        )
+
+        for item in plan["plan_items"]:
+            self.assertGreaterEqual(len(item["reference_asset_ids"]), 1)
+            self.assertLessEqual(len(item["reference_asset_ids"]), 3)
+            self.assertEqual(
+                item["reference_asset_ids"],
+                select_reference_assets(item["type_key"], assets, limit=3),
+            )
+
+    def test_repeated_type_items_rotate_theme_shot_and_composition(self):
+        from suite_planner import plan_suite
+
+        assets = [
+            {"id": f"detail-{index}", "path": f"detail-{index}.jpg", "role": "detail"}
+            for index in range(3)
+        ]
+        items = plan_suite(self._draft({"detail": 3}, assets))["plan_items"]
+
+        for field in ("theme", "scene", "shot", "composition"):
+            self.assertEqual(len({item[field] for item in items}), 3)
+
+    def test_invalid_ai_result_falls_back_to_deterministic_safe_plan(self):
+        from suite_planner import plan_suite
+
+        draft = self._draft({"main-front": 1, "detail": 1})
+        ai_plan = {
+            "plan_items": [
+                {
+                    "type_key": "main-front",
+                    "reference_asset_ids": ["missing-asset"],
+                    "scene": "studio",
+                    "composition": "centered",
+                },
+                {
+                    "type_key": "detail",
+                    "reference_asset_ids": ["detail-1"],
+                    "scene": "",
+                    "composition": "macro",
+                },
+            ]
+        }
+
+        plan = plan_suite(draft, ai_plan=ai_plan)
+
+        self.assertFalse(plan["used_ai_plan"])
+        self.assertEqual(
+            [item["reference_asset_ids"] for item in plan["plan_items"]],
+            [["front-1", "detail-1"], ["detail-1"]],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

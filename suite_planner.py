@@ -44,6 +44,332 @@ TEMU_STANDARD_PROFILE = MappingProxyType(
 )
 
 
+ASSET_ROLES = frozenset(
+    {
+        "front",
+        "back",
+        "side",
+        "detail",
+        "dimension",
+        "package",
+        "scene",
+        "unknown",
+    }
+)
+
+_ROLE_ALIASES = {
+    "back-side": "back",
+    "rear": "back",
+    "close-up": "detail",
+    "closeup": "detail",
+    "size": "dimension",
+    "dimensions": "dimension",
+    "packaging": "package",
+}
+
+_REFERENCE_ROLES = {
+    "main-front": ("front", "unknown", "detail", "side", "back", "scene"),
+    "back-side": ("back", "side"),
+    "detail": ("detail",),
+    "scene": ("scene", "front", "side", "detail", "back", "unknown"),
+    "dimension": ("dimension", "front", "side", "detail", "back", "unknown"),
+    "selling-point": ("detail", "front", "side", "back", "unknown"),
+    "package": ("package",),
+    "compare": ("front", "side", "detail", "unknown"),
+    "steps": ("detail", "front", "side", "unknown"),
+}
+
+_TYPE_TITLES = {
+    "main-front": "Primary product view",
+    "back-side": "Back or side product view",
+    "detail": "Product detail",
+    "scene": "Product in use",
+    "dimension": "Product dimensions",
+    "selling-point": "Key selling point",
+    "package": "Package contents",
+    "compare": "Product comparison",
+    "steps": "Product steps",
+}
+
+_VARIATION_SEEDS = (
+    ("material focus", "controlled studio setting", "macro close-up", "diagonal feature framing"),
+    ("functional focus", "bright product setting", "three-quarter product view", "asymmetrical negative space"),
+    ("craftsmanship focus", "soft daylight setting", "side profile view", "vertical product framing"),
+    ("scale focus", "minimal lifestyle setting", "eye-level product view", "layered foreground framing"),
+    ("everyday use focus", "home use setting", "wide environmental view", "rule-of-thirds framing"),
+    ("finish focus", "neutral tabletop setting", "top-down product view", "centered graphic framing"),
+    ("comfort focus", "natural indoor setting", "low-angle product view", "leading-line framing"),
+    ("durability focus", "clean work setting", "overhead product view", "close crop with full feature"),
+    ("access focus", "organized storage setting", "profile product view", "balanced open-space framing"),
+    ("care focus", "simple daily setting", "contextual product view", "offset product framing"),
+)
+
+
+def _clean_text(value):
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _normalized_role(value):
+    role = _clean_text(value).lower().replace("_", "-").replace(" ", "-")
+    role = _ROLE_ALIASES.get(role, role)
+    return role if role in ASSET_ROLES else "unknown"
+
+
+def _normalized_confidence(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    return min(max(float(value), 0.0), 1.0)
+
+
+def normalize_assets(raw_assets):
+    """Return stable, role-normalized asset records without inventing evidence."""
+    if not isinstance(raw_assets, list):
+        return []
+
+    reserved_ids = {
+        _clean_text(asset.get("id"))
+        for asset in raw_assets
+        if isinstance(asset, Mapping) and _clean_text(asset.get("id"))
+    }
+    used_ids = set()
+    next_index = 1
+    normalized = []
+    for raw_asset in raw_assets:
+        if not isinstance(raw_asset, Mapping):
+            continue
+        asset_id = _clean_text(raw_asset.get("id"))
+        if not asset_id or asset_id in used_ids:
+            while f"asset-{next_index:02d}" in reserved_ids or f"asset-{next_index:02d}" in used_ids:
+                next_index += 1
+            asset_id = f"asset-{next_index:02d}"
+            next_index += 1
+        used_ids.add(asset_id)
+        quality_flags = raw_asset.get("quality_flags", [])
+        normalized.append(
+            {
+                "id": asset_id,
+                "path": _clean_text(raw_asset.get("path") or raw_asset.get("file_path")),
+                "role": _normalized_role(raw_asset.get("role")),
+                "role_confidence": _normalized_confidence(raw_asset.get("role_confidence")),
+                "is_primary": bool(raw_asset.get("is_primary", False)),
+                "quality_flags": [flag for flag in quality_flags if isinstance(flag, str)]
+                if isinstance(quality_flags, (list, tuple))
+                else [],
+                "variant_group": _clean_text(raw_asset.get("variant_group")) or "default",
+            }
+        )
+    return normalized
+
+
+def select_reference_assets(plan_type, assets, limit=3):
+    """Select up to three role-relevant asset IDs for a planned image type."""
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        limit = 3
+    limit = min(max(limit, 0), 3)
+    if not limit or plan_type not in TYPE_KEYS:
+        return []
+
+    normalized_assets = normalize_assets(assets)
+    roles = _REFERENCE_ROLES[plan_type]
+    selected = []
+    for role in roles:
+        for asset in normalized_assets:
+            if asset["role"] == role and asset["id"] not in selected:
+                selected.append(asset["id"])
+                if len(selected) == limit:
+                    return selected
+    return selected
+
+
+def _has_dimension_evidence(draft, assets):
+    dimension_data = draft.get("dimension_data") if isinstance(draft, Mapping) else None
+    if isinstance(dimension_data, Mapping):
+        if any(value not in (None, "", [], {}, ()) for value in dimension_data.values()):
+            return True
+    return bool(select_reference_assets("dimension", [asset for asset in assets if asset["role"] == "dimension"], 1))
+
+
+def _has_selling_point_evidence(draft):
+    if not isinstance(draft, Mapping):
+        return False
+    for key in ("selling_points", "selling_point", "verified_selling_points"):
+        value = draft.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+        if isinstance(value, (list, tuple)) and any(_clean_text(item) for item in value):
+            return True
+    return False
+
+
+def _fallback_type(remaining_detail_evidence, has_selling_point_evidence):
+    if remaining_detail_evidence:
+        return "detail"
+    if has_selling_point_evidence:
+        return "selling-point"
+    return "scene"
+
+
+def _variation_for(type_key, occurrence):
+    theme, generic_scene, generic_shot, generic_composition = _VARIATION_SEEDS[occurrence % len(_VARIATION_SEEDS)]
+    if type_key == "main-front":
+        return theme, f"pure white {generic_scene}", "front product view", generic_composition
+    if type_key == "back-side":
+        return theme, f"pure white {generic_scene}", "back or side product view", generic_composition
+    if type_key == "detail":
+        return theme, generic_scene, generic_shot, generic_composition
+    if type_key == "dimension":
+        return theme, f"clean technical {generic_scene}", f"orthographic {generic_shot}", f"measurement-led {generic_composition}"
+    if type_key == "selling-point":
+        return theme, generic_scene, generic_shot, generic_composition
+    if type_key == "package":
+        return theme, generic_scene, f"overhead {generic_shot}", f"organized contents {generic_composition}"
+    if type_key == "compare":
+        return theme, f"clean comparison {generic_scene}", generic_shot, generic_composition
+    if type_key == "steps":
+        return theme, f"clean instructional {generic_scene}", generic_shot, generic_composition
+    return theme, generic_scene, generic_shot, generic_composition
+
+
+def _safe_reference_assets(type_key, assets):
+    references = select_reference_assets(type_key, assets)
+    if references:
+        return references
+    return select_reference_assets("scene", assets)
+
+
+def _build_deterministic_plan(draft):
+    source = draft if isinstance(draft, Mapping) else {}
+    target_count = source.get("target_count", TEMU_STANDARD_PROFILE["default_count"])
+    if isinstance(target_count, bool) or not isinstance(target_count, int) or not 1 <= target_count <= 10:
+        target_count = TEMU_STANDARD_PROFILE["default_count"]
+    counts = normalize_type_counts(source.get("selected_type_counts"), target_count)
+    assets = normalize_assets(source.get("assets"))
+    detail_evidence = sum(asset["role"] == "detail" for asset in assets)
+    has_selling_point_evidence = _has_selling_point_evidence(source)
+    has_dimension_evidence = _has_dimension_evidence(source, assets)
+    back_replacements = counts["back-side"] if not select_reference_assets("back-side", assets, 1) else 0
+    dimension_replacements = counts["dimension"] if not has_dimension_evidence else 0
+    reserved_detail_capacity = min(detail_evidence, back_replacements + dimension_replacements)
+    native_detail_capacity = detail_evidence - reserved_detail_capacity
+    type_occurrences = {type_key: 0 for type_key in TYPE_KEYS}
+    plan_items = []
+
+    for requested_type in TYPE_KEYS:
+        for _ in range(counts[requested_type]):
+            type_key = requested_type
+            replacement_reason = ""
+            if requested_type == "back-side" and back_replacements:
+                type_key = _fallback_type(reserved_detail_capacity, has_selling_point_evidence)
+                replacement_reason = "Back or side reference evidence is missing."
+            elif requested_type == "dimension" and dimension_replacements:
+                type_key = _fallback_type(reserved_detail_capacity, has_selling_point_evidence)
+                replacement_reason = "Dimension data or a dimension reference is missing."
+            elif requested_type == "detail" and not native_detail_capacity:
+                type_key = _fallback_type(0, has_selling_point_evidence)
+                replacement_reason = "A distinct visible detail reference is missing."
+            elif requested_type == "package" and not select_reference_assets("package", assets, 1):
+                type_key = "scene"
+                replacement_reason = "Package reference evidence is missing."
+
+            if type_key == "detail":
+                if requested_type == "detail":
+                    native_detail_capacity -= 1
+                else:
+                    reserved_detail_capacity -= 1
+            occurrence = type_occurrences[type_key]
+            type_occurrences[type_key] += 1
+            theme, scene, shot, composition = _variation_for(type_key, occurrence)
+            references = _safe_reference_assets(type_key, assets)
+            plan_items.append(
+                {
+                    "id": f"plan-{len(plan_items) + 1:02d}",
+                    "order": len(plan_items) + 1,
+                    "type_key": type_key,
+                    "title": _TYPE_TITLES[type_key],
+                    "reference_asset_ids": references,
+                    "theme": theme,
+                    "scene": scene,
+                    "shot": shot,
+                    "composition": composition,
+                    "copy_enabled": False,
+                    "copy_text": "",
+                    "replacement_reason": replacement_reason,
+                    "warnings": [replacement_reason] if replacement_reason else [],
+                    "final_prompt": "",
+                }
+            )
+    return {"target_count": target_count, "plan_items": plan_items, "used_ai_plan": False}
+
+
+def _ai_plan_items(ai_plan):
+    if isinstance(ai_plan, list):
+        return ai_plan
+    if not isinstance(ai_plan, Mapping):
+        return None
+    for key in ("plan_items", "items"):
+        if isinstance(ai_plan.get(key), list):
+            return ai_plan[key]
+    return None
+
+
+def _validated_ai_plan(deterministic_plan, assets, ai_plan):
+    candidates = _ai_plan_items(ai_plan)
+    planned_items = deterministic_plan["plan_items"]
+    if not isinstance(candidates, list) or len(candidates) != len(planned_items):
+        return None
+
+    asset_ids = {asset["id"] for asset in assets}
+    normalized_items = []
+    seen_values = {type_key: {field: set() for field in ("theme", "scene", "shot", "composition")} for type_key in TYPE_KEYS}
+    for planned_item, candidate in zip(planned_items, candidates):
+        if not isinstance(candidate, Mapping) or candidate.get("type_key") != planned_item["type_key"]:
+            return None
+        references = candidate.get("reference_asset_ids")
+        if (
+            not isinstance(references, list)
+            or not 1 <= len(references) <= 3
+            or any(not isinstance(asset_id, str) or asset_id not in asset_ids for asset_id in references)
+            or len(set(references)) != len(references)
+        ):
+            return None
+        allowed_references = set(select_reference_assets(planned_item["type_key"], assets, 3))
+        if not set(references).issubset(allowed_references):
+            return None
+        scene = _clean_text(candidate.get("scene"))
+        composition = _clean_text(candidate.get("composition"))
+        if not scene or not composition:
+            return None
+
+        item = dict(planned_item)
+        item["reference_asset_ids"] = references
+        item["scene"] = scene
+        item["composition"] = composition
+        for field in ("theme", "shot"):
+            value = _clean_text(candidate.get(field))
+            if value:
+                item[field] = value
+        for field in ("theme", "scene", "shot", "composition"):
+            if item[field] in seen_values[item["type_key"]][field]:
+                return None
+            seen_values[item["type_key"]][field].add(item[field])
+        normalized_items.append(item)
+    return normalized_items
+
+
+def plan_suite(draft, ai_plan=None):
+    """Build a safe suite plan, accepting AI detail only after full validation."""
+    deterministic_plan = _build_deterministic_plan(draft)
+    assets = normalize_assets(draft.get("assets") if isinstance(draft, Mapping) else None)
+    ai_items = _validated_ai_plan(deterministic_plan, assets, ai_plan)
+    if ai_items is None:
+        return deterministic_plan
+    return {
+        "target_count": deterministic_plan["target_count"],
+        "plan_items": ai_items,
+        "used_ai_plan": True,
+    }
+
+
 def _validate_target_count(target_count):
     if isinstance(target_count, bool) or not isinstance(target_count, int):
         raise ValueError("target_count must be an integer between 1 and 10")
