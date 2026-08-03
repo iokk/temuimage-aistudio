@@ -21,6 +21,17 @@ class SuitePlannerModelTests(unittest.TestCase):
             },
         )
 
+    def test_temu_standard_profile_and_nested_counts_are_immutable(self):
+        from suite_planner import TEMU_STANDARD_PROFILE
+
+        with self.assertRaises(TypeError):
+            TEMU_STANDARD_PROFILE["default_count"] = 10
+        with self.assertRaises(TypeError):
+            TEMU_STANDARD_PROFILE["default_type_counts"]["detail"] = 1
+
+        self.assertEqual(TEMU_STANDARD_PROFILE["default_count"], 8)
+        self.assertEqual(TEMU_STANDARD_PROFILE["default_type_counts"]["detail"], 3)
+
     def test_default_counts_sum_to_requested_target_and_never_exceed_ten(self):
         from suite_planner import build_default_type_counts
 

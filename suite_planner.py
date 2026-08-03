@@ -1,6 +1,7 @@
 """Pure domain rules for ecommerce standard image suites."""
 
 from collections.abc import Mapping
+from types import MappingProxyType
 
 
 TYPE_KEYS = (
@@ -15,28 +16,32 @@ TYPE_KEYS = (
     "steps",
 )
 
-DEFAULT_TYPE_COUNTS = {
-    "main-front": 1,
-    "back-side": 1,
-    "detail": 3,
-    "scene": 1,
-    "dimension": 1,
-    "selling-point": 1,
-}
+DEFAULT_TYPE_COUNTS = MappingProxyType(
+    {
+        "main-front": 1,
+        "back-side": 1,
+        "detail": 3,
+        "scene": 1,
+        "dimension": 1,
+        "selling-point": 1,
+    }
+)
 
-TEMU_STANDARD_PROFILE = {
-    "id": "temu-standard",
-    "name": "TEMU Standard Suite",
-    "default_count": 8,
-    "max_count": 10,
-    "min_reference_count": 1,
-    "max_reference_count": 14,
-    "output_size": (1600, 1600),
-    "output_formats": ("PNG", "JPG"),
-    "max_file_size_bytes": 2 * 1024 * 1024,
-    "default_logo_enabled": False,
-    "default_type_counts": DEFAULT_TYPE_COUNTS.copy(),
-}
+TEMU_STANDARD_PROFILE = MappingProxyType(
+    {
+        "id": "temu-standard",
+        "name": "TEMU Standard Suite",
+        "default_count": 8,
+        "max_count": 10,
+        "min_reference_count": 1,
+        "max_reference_count": 14,
+        "output_size": (1600, 1600),
+        "output_formats": ("PNG", "JPG"),
+        "max_file_size_bytes": 2 * 1024 * 1024,
+        "default_logo_enabled": False,
+        "default_type_counts": DEFAULT_TYPE_COUNTS,
+    }
+)
 
 
 def _validate_target_count(target_count):
