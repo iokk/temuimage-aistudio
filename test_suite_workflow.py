@@ -253,6 +253,19 @@ class SuitePayloadTests(unittest.TestCase):
         retry_payload["reqs"] = retry_payload["reqs"][1:]
         self.assertEqual(app._validate_combo_task_payload(retry_payload), [])
 
+    def test_retry_snapshot_rejects_a_canonical_asset_path_swapped_for_another_durable_path(self):
+        retry_payload = self._suite_payload()
+        retry_payload["retry_parent_id"] = "parent-task"
+        retry_payload["reqs"] = retry_payload["reqs"][:1]
+        retry_payload["reqs"][0]["image_paths"] = ["/durable/detail.png"]
+
+        errors = app._validate_combo_task_payload(retry_payload)
+
+        self.assertTrue(any("冻结计划不一致" in error for error in errors))
+
+        retry_payload["reqs"][0]["image_paths"] = ["/durable/front.png"]
+        self.assertEqual(app._validate_combo_task_payload(retry_payload), [])
+
     def test_snapshot_validation_requires_valid_unique_plan_records(self):
         invalid_assets = self._suite_payload()
         invalid_assets["suite_plan"]["assets"] = {}
@@ -285,6 +298,25 @@ class SuitePayloadTests(unittest.TestCase):
             any(
                 "计划项 ID 重复" in error
                 for error in app._validate_combo_task_payload(duplicate_item)
+            )
+        )
+
+    def test_snapshot_validation_requires_one_unique_top_level_path_per_plan_asset(self):
+        missing_path = self._suite_payload()
+        missing_path["image_paths"] = missing_path["image_paths"][:-1]
+        duplicate_path = self._suite_payload()
+        duplicate_path["image_paths"][1] = duplicate_path["image_paths"][0]
+
+        self.assertTrue(
+            any(
+                "数量必须一致" in error
+                for error in app._validate_combo_task_payload(missing_path)
+            )
+        )
+        self.assertTrue(
+            any(
+                "必须保持唯一" in error
+                for error in app._validate_combo_task_payload(duplicate_path)
             )
         )
 
@@ -525,6 +557,50 @@ class SuiteExecutionTests(unittest.TestCase):
         final_checkpoint = execution.checkpoint.call_args.kwargs
         self.assertEqual(final_checkpoint["result_files"], result["files"])
 
+    def test_legacy_persistence_failure_still_fails_the_combo_task(self):
+        execution = Mock()
+        execution.task = {
+            "id": "legacy-persistence",
+            "type": "combo",
+            "payload": {
+                "provider_id": "provider-1",
+                "image_paths": ["reference.png"],
+                "reqs": [{"type_name": "Front hero"}],
+            },
+        }
+
+        class LegacyClient:
+            last_error = ""
+
+            def compose_image_prompt(self, *_args):
+                return "legacy composed prompt"
+
+            def generate_image(self, *_args):
+                return Image.new("RGB", (16, 16), "white")
+
+            def get_last_error(self):
+                return self.last_error
+
+        with (
+            patch.object(
+                app,
+                "get_provider_by_id",
+                return_value={"id": "provider-1", "api_key": "test-key"},
+            ),
+            patch.object(app, "get_active_provider", return_value=None),
+            patch.object(app, "load_image_paths", return_value=[object()]),
+            patch.object(app, "create_ai_client", return_value=LegacyClient()),
+            patch.object(
+                app,
+                "persist_image_for_task",
+                side_effect=RuntimeError("legacy disk write failed"),
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "legacy disk write failed"):
+                app._execute_combo_task(execution)
+
+        execution.checkpoint.assert_not_called()
+
     def test_preserves_complete_frozen_request_for_reference_generation_and_normalization_failures(self):
         secret = "opaque-suite-secret"
         reqs = [
@@ -541,7 +617,18 @@ class SuiteExecutionTests(unittest.TestCase):
         execution = self._execution(reqs)
 
         class PartiallyFailingClient:
-            last_error = ""
+            def __init__(self):
+                self._last_error = "unchanged-provider-error"
+                self.last_error_updates = []
+
+            @property
+            def last_error(self):
+                return self._last_error
+
+            @last_error.setter
+            def last_error(self, value):
+                self.last_error_updates.append(value)
+                self._last_error = value
 
             def compose_image_prompt(self, *_args):
                 raise AssertionError("suite execution must not compose prompts")
@@ -556,9 +643,10 @@ class SuiteExecutionTests(unittest.TestCase):
 
         def load_images(paths):
             if paths == ["missing.png"]:
-                raise RuntimeError(f"reference loader echoed {secret}")
+                raise RuntimeError(f"local reference timeout 504 echoed {secret}")
             return [f"loaded-{paths[0]}"]
 
+        client = PartiallyFailingClient()
         with (
             patch.object(
                 app,
@@ -567,11 +655,13 @@ class SuiteExecutionTests(unittest.TestCase):
             ),
             patch.object(app, "get_active_provider", return_value=None),
             patch.object(app, "load_image_paths", side_effect=load_images),
-            patch.object(app, "create_ai_client", return_value=PartiallyFailingClient()),
+            patch.object(app, "create_ai_client", return_value=client),
             patch.object(
                 app,
                 "normalize_suite_image",
-                side_effect=RuntimeError(f"normalizer echoed {secret}"),
+                side_effect=RuntimeError(
+                    f"local output normalization timeout 504 echoed {secret}"
+                ),
             ),
         ):
             result = app._execute_combo_task(execution)
@@ -580,6 +670,18 @@ class SuiteExecutionTests(unittest.TestCase):
         self.assertEqual(result["files"], [])
         self.assertEqual(execution.checkpoint.call_count, 3)
         self.assertEqual(len(result["item_results"]), 3)
+        self.assertEqual(
+            [item["error_type"] for item in result["item_results"]],
+            ["reference_load_error", "upstream_timeout", "output_normalization_error"],
+        )
+        self.assertEqual(
+            [item["retryable"] for item in result["item_results"]],
+            [False, True, False],
+        )
+        self.assertEqual(
+            client.last_error_updates,
+            ["请求超时，请检查网络、代理或模型响应速度。"],
+        )
         for item, req in zip(result["item_results"], reqs):
             self.assertEqual(item["status"], "error")
             self.assertEqual(item["id"], req["id"])

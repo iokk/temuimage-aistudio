@@ -4598,6 +4598,24 @@ def classify_provider_image_task_error(message: str, provider: dict) -> dict:
     return result
 
 
+def _classify_local_image_task_error(
+    message: str,
+    error_type: str,
+    fallback: str,
+    provider: dict,
+) -> dict:
+    error = _redact_sensitive_error_text(
+        message,
+        secrets=(str((provider or {}).get("api_key") or ""),),
+    )[:180]
+    return {
+        "error": error or fallback,
+        "error_type": error_type,
+        "retryable": False,
+        "retry_after_at": "",
+    }
+
+
 def failed_item_retry_wait_seconds(task: dict, now: datetime = None) -> int:
     current = now or datetime.now()
     waits = []
@@ -7917,59 +7935,93 @@ def _execute_combo_task(execution: TaskExecution):
         req_snapshot = copy.deepcopy(req)
         prompt = req.get("final_prompt", "") if is_suite_task else ""
         error_meta = None
+        img = None
         file_path = ""
         output_metadata = None
-        try:
-            item_refs = refs
-            if is_suite_task:
+        item_refs = refs
+        if is_suite_task:
+            try:
                 item_refs = load_image_paths(req.get("image_paths", []))
                 if not item_refs:
                     raise ReferenceImageLoadError(
                         "任务参考图已丢失，请重新上传"
                     )
-            else:
-                prompt = client.compose_image_prompt(
-                    anchor,
-                    req,
+            except Exception as e:
+                error_meta = _classify_local_image_task_error(
+                    str(e),
+                    "reference_load_error",
+                    "任务参考图已丢失，请重新上传",
+                    provider,
+                )
+                safe_exception = RuntimeError(error_meta["error"]).with_traceback(
+                    e.__traceback__
+                )
+                logger.error(
+                    "task combo reference loading failed (task_id=%s, item=%s)",
+                    task.get("id"),
+                    item_index,
+                    exc_info=(RuntimeError, safe_exception, e.__traceback__),
+                )
+        if error_meta is None:
+            try:
+                if not is_suite_task:
+                    prompt = client.compose_image_prompt(
+                        anchor,
+                        req,
+                        payload.get("aspect", "1:1"),
+                        payload.get("image_language", DEFAULT_TARGET_LANGUAGE),
+                    )
+                img = client.generate_image(
+                    item_refs,
+                    prompt,
                     payload.get("aspect", "1:1"),
+                    payload.get("size", "1K"),
+                    payload.get("thinking_level", "high"),
                     payload.get("image_language", DEFAULT_TARGET_LANGUAGE),
                 )
-            img = client.generate_image(
-                item_refs,
-                prompt,
-                payload.get("aspect", "1:1"),
-                payload.get("size", "1K"),
-                payload.get("thinking_level", "high"),
-                payload.get("image_language", DEFAULT_TARGET_LANGUAGE),
+            except Exception as e:
+                error_meta = classify_provider_image_task_error(str(e), provider)
+                safe_exception = RuntimeError(error_meta["error"]).with_traceback(
+                    e.__traceback__
+                )
+                logger.error(
+                    "task combo image generation failed (task_id=%s, item=%s)",
+                    task.get("id"),
+                    item_index,
+                    exc_info=(RuntimeError, safe_exception, e.__traceback__),
+                )
+                client.last_error = error_meta["error"]
+        if img and is_suite_task:
+            try:
+                stem = f"{task['id']}_{str(item_index).zfill(2)}"
+                output_metadata = normalize_suite_image(
+                    img,
+                    DATA_DIR / "task_results",
+                    stem,
+                )
+                file_path = output_metadata["path"]
+            except Exception as e:
+                error_meta = _classify_local_image_task_error(
+                    str(e),
+                    "output_normalization_error",
+                    "套图成品规范化失败",
+                    provider,
+                )
+                safe_exception = RuntimeError(error_meta["error"]).with_traceback(
+                    e.__traceback__
+                )
+                logger.error(
+                    "task combo output normalization failed (task_id=%s, item=%s)",
+                    task.get("id"),
+                    item_index,
+                    exc_info=(RuntimeError, safe_exception, e.__traceback__),
+                )
+        if img and not is_suite_task:
+            filename = (
+                f"{task['id']}_{str(item_index).zfill(2)}_"
+                f"{req.get('type_name', 'image')}.png"
             )
-            if img:
-                if is_suite_task:
-                    stem = f"{task['id']}_{str(item_index).zfill(2)}"
-                    output_metadata = normalize_suite_image(
-                        img,
-                        DATA_DIR / "task_results",
-                        stem,
-                    )
-                    file_path = output_metadata["path"]
-                else:
-                    filename = (
-                        f"{task['id']}_{str(item_index).zfill(2)}_"
-                        f"{req.get('type_name', 'image')}.png"
-                    )
-                    file_path = persist_image_for_task(img, filename)
-        except Exception as e:
-            error_meta = classify_provider_image_task_error(str(e), provider)
-            safe_exception = RuntimeError(error_meta["error"]).with_traceback(
-                e.__traceback__
-            )
-            logger.error(
-                "task combo image generation failed (task_id=%s, item=%s)",
-                task.get("id"),
-                item_index,
-                exc_info=(RuntimeError, safe_exception, e.__traceback__),
-            )
-            client.last_error = error_meta["error"]
-            img = None
+            file_path = persist_image_for_task(img, filename)
         if file_path:
             results.append(file_path)
             item_result = {
@@ -8106,6 +8158,7 @@ def _validate_suite_task_snapshot(payload: dict) -> list[str]:
 
     assets = plan.get("assets")
     asset_by_id = {}
+    ordered_asset_ids = []
     if not isinstance(assets, list):
         errors.append("suite_plan.assets 必须是有效列表")
     else:
@@ -8117,6 +8170,7 @@ def _validate_suite_task_snapshot(payload: dict) -> list[str]:
                 errors.append(f"套图素材 ID 重复：{asset_id}")
             else:
                 asset_by_id[asset_id] = asset
+                ordered_asset_ids.append(asset_id)
 
     plan_items = plan.get("plan_items")
     plan_item_by_id = {}
@@ -8139,14 +8193,35 @@ def _validate_suite_task_snapshot(payload: dict) -> list[str]:
                 errors.append(f"套图计划项 {item_id} 无效：{exc}")
 
     durable_image_paths = payload.get("image_paths")
-    if not isinstance(durable_image_paths, list) or any(
+    durable_paths_valid = isinstance(durable_image_paths, list) and not any(
         not isinstance(path, str) or not path.strip()
         for path in durable_image_paths or []
-    ):
+    )
+    if not durable_paths_valid:
         errors.append("套图任务 image_paths 必须是有效列表")
-        durable_path_set = set()
-    else:
-        durable_path_set = set(durable_image_paths)
+        durable_image_paths = []
+    durable_path_set = set(durable_image_paths)
+    if len(durable_path_set) != len(durable_image_paths):
+        errors.append("套图任务 image_paths 必须保持唯一")
+    assets_complete = isinstance(assets, list) and len(ordered_asset_ids) == len(assets)
+    if assets_complete and len(durable_image_paths) != len(ordered_asset_ids):
+        errors.append("套图素材与 image_paths 数量必须一致")
+    canonical_asset_paths = {}
+    if (
+        assets_complete
+        and durable_paths_valid
+        and len(durable_path_set) == len(durable_image_paths)
+        and len(durable_image_paths) == len(ordered_asset_ids)
+    ):
+        canonical_asset_paths = dict(zip(ordered_asset_ids, durable_image_paths))
+
+    canonical_req_by_id = {}
+    if canonical_asset_paths:
+        try:
+            canonical_reqs = build_suite_task_requests(plan, canonical_asset_paths)
+            canonical_req_by_id = {req["id"]: req for req in canonical_reqs}
+        except ValueError:
+            pass
 
     reqs = payload.get("reqs")
     if not isinstance(reqs, list) or not reqs:
@@ -8154,7 +8229,7 @@ def _validate_suite_task_snapshot(payload: dict) -> list[str]:
         return errors
 
     req_by_id = {}
-    asset_paths = {}
+    observed_asset_paths = {}
     asset_ids_by_path = {}
     request_parts = []
     for index, req in enumerate(reqs, start=1):
@@ -8211,11 +8286,14 @@ def _validate_suite_task_snapshot(payload: dict) -> list[str]:
         for asset_id, path in zip(reference_ids, reference_paths):
             if path not in durable_path_set:
                 errors.append(f"第 {index} 个套图请求引用了未持久化的参考图")
-            existing_path = asset_paths.get(asset_id)
-            if existing_path is not None and existing_path != path:
+            canonical_path = canonical_asset_paths.get(asset_id)
+            if canonical_path is not None and canonical_path != path:
+                errors.append(f"套图素材 {asset_id} 的持久化路径映射冲突")
+            observed_path = observed_asset_paths.get(asset_id)
+            if observed_path is not None and observed_path != path:
                 errors.append(f"套图素材 {asset_id} 的持久化路径映射冲突")
             else:
-                asset_paths[asset_id] = path
+                observed_asset_paths[asset_id] = path
             existing_asset_id = asset_ids_by_path.get(path)
             if existing_asset_id is not None and existing_asset_id != asset_id:
                 errors.append(
@@ -8225,7 +8303,7 @@ def _validate_suite_task_snapshot(payload: dict) -> list[str]:
                 asset_ids_by_path[path] = asset_id
         request_parts.append((valid_req_id, req, reference_ids))
 
-    plan_ids = set(plan_item_by_id)
+    plan_ids = set(canonical_req_by_id or plan_item_by_id)
     req_ids = set(req_by_id)
     if payload.get("retry_parent_id"):
         if not req_ids or not req_ids.issubset(plan_ids):
@@ -8233,27 +8311,17 @@ def _validate_suite_task_snapshot(payload: dict) -> list[str]:
     elif req_ids != plan_ids or len(reqs) != len(plan_item_by_id):
         errors.append("首次套图请求 ID 必须与计划项完整匹配")
 
-    projection_fields = (
-        "id",
-        "type_key",
-        "title",
-        "type_name",
-        "final_prompt",
-        "reference_asset_ids",
-    )
     for req_id, req, reference_ids in request_parts:
-        plan_item = plan_item_by_id.get(req_id)
-        if plan_item is None:
+        expected_req = canonical_req_by_id.get(req_id)
+        if expected_req is None:
             errors.append(f"套图请求 {req_id or 'unknown'} 与冻结计划不一致")
             continue
         if reference_ids is None:
             continue
-        try:
-            expected_req = _build_suite_task_request(plan_item, asset_paths, 1)
-        except ValueError:
-            errors.append(f"套图请求 {req_id} 与冻结计划不一致")
-            continue
-        if any(req.get(field) != expected_req[field] for field in projection_fields):
+        req_projection = dict(req)
+        if payload.get("retry_parent_id"):
+            req_projection.pop("_batch_index", None)
+        if req_projection != expected_req:
             errors.append(f"套图请求 {req_id} 与冻结计划不一致")
     return errors
 
