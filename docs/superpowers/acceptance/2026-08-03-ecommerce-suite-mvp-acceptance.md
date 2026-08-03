@@ -12,12 +12,14 @@
 - 输出统一为 1600×1600、PNG/JPG、单张不超过 2MB。
 - 默认无 LOGO，目标语言和文案由用户通过提示词控制。
 - 提交失败时仅清理本次新建的上传文件，不影响已有任务或其他文件。
+- 计划编辑、复制和删除会生成新的提交版本，避免误复用旧任务。
+- 兼容旧版个人模板列表格式，升级后模板仍可见。
 
 ## 自动化证据
 
 - `python3 -m py_compile app.py suite_planner.py suite_output.py task_engine.py task_store.py`：通过。
 - 套图、输出、工作流和失败重试专项测试：通过。
-- `python3 -m unittest discover -v`：261 项全部通过，0 失败。
+- `python3 -m unittest discover -v`：262 项全部通过，0 失败。
 - `git diff --check`：通过。
 
 ## 浏览器验收

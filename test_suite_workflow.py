@@ -12,6 +12,20 @@ import app
 
 
 class SuiteEditorStateTests(unittest.TestCase):
+    def test_legacy_personal_template_list_remains_visible_and_migrates_on_save(self):
+        legacy = [{"name": "Legacy", "type_counts": {"main-front": 1}}]
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            settings_file = Path(temporary_directory) / "settings.json"
+            with (
+                patch.object(app, "SETTINGS_FILE", settings_file),
+                patch.object(app, "get_settings", return_value={"suite_templates": legacy}),
+            ):
+                loaded = app.load_personal_suite_templates(owner_id="owner-a")
+            self.assertEqual(
+                [item["name"] for item in loaded],
+                [app.SYSTEM_SUITE_TEMPLATE["name"], "Legacy"],
+            )
+
     def _assets(self):
         return [
             {"id": "front-1", "path": "front.jpg", "role": "front"},

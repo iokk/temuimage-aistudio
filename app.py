@@ -1555,6 +1555,8 @@ def _suite_template_record(name, type_counts, plan_items=None, user_instruction=
 
 def _owner_template_records(settings, owner_id):
     suite_templates = settings.get("suite_templates", {})
+    if isinstance(suite_templates, list):
+        return suite_templates
     if not isinstance(suite_templates, Mapping):
         return []
     owners = suite_templates.get("owners", {})
@@ -1664,7 +1666,12 @@ def delete_personal_suite_template(name, owner_id=None):
         ]
         if len(remaining) == len(raw_templates):
             return False, False
-        suite_templates = copy.deepcopy(dict(settings.get("suite_templates", {})))
+        stored_templates = settings.get("suite_templates", {})
+        suite_templates = (
+            copy.deepcopy(dict(stored_templates))
+            if isinstance(stored_templates, Mapping)
+            else {}
+        )
         owners = copy.deepcopy(dict(suite_templates.get("owners", {})))
         owners[owner_id] = remaining
         suite_templates["owners"] = owners
@@ -10383,21 +10390,24 @@ def _render_combo_stage_two(provider):
         help="重新生成整套计划并创建新的提交版本。",
         icon=":material/refresh:",
     ):
-        with st.spinner("正在重新规划整套图片..."):
-            client = create_ai_client(
-                provider,
-                model=st.session_state.get(
-                    "combo_output_model", provider.get("image_model", "")
-                ),
-            )
-            replanned = client.generate_suite_plan(draft)
-        _clear_combo_plan_widgets()
-        st.session_state["combo_suite_plan"] = replanned
-        st.session_state["combo_submission_id"] = uuid.uuid4().hex
-        st.session_state["session_tokens"] = int(
-            st.session_state.get("session_tokens", 0)
-        ) + client.get_tokens_used()
-        st.rerun()
+        try:
+            with st.spinner("正在重新规划整套图片..."):
+                client = create_ai_client(
+                    provider,
+                    model=st.session_state.get(
+                        "combo_output_model", provider.get("image_model", "")
+                    ),
+                )
+                replanned = client.generate_suite_plan(draft)
+            _clear_combo_plan_widgets()
+            st.session_state["combo_suite_plan"] = replanned
+            st.session_state["combo_submission_id"] = uuid.uuid4().hex
+            st.session_state["session_tokens"] = int(
+                st.session_state.get("session_tokens", 0)
+            ) + client.get_tokens_used()
+            st.rerun()
+        except Exception as exc:
+            st.error(f"重新规划失败：{sanitize_error_message(exc)}")
 
     supported_types = get_supported_suite_types(draft)
     assets = plan.get("assets", [])
@@ -10547,6 +10557,9 @@ def _render_combo_stage_two(provider):
 
     try:
         approved_plan = apply_suite_plan_edits(draft, edited_items)
+        previous_plan = st.session_state.get("combo_suite_plan")
+        if approved_plan != previous_plan:
+            st.session_state["combo_submission_id"] = uuid.uuid4().hex
         st.session_state["combo_suite_plan"] = approved_plan
         plan_error = ""
     except ValueError as exc:
@@ -10569,6 +10582,7 @@ def _render_combo_stage_two(provider):
             _clear_combo_plan_widgets()
             st.session_state["combo_suite_draft"] = draft
             st.session_state["combo_suite_plan"] = approved_plan
+            st.session_state["combo_submission_id"] = uuid.uuid4().hex
             st.rerun()
 
     st.caption(
