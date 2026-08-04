@@ -6792,12 +6792,20 @@ def _normalize_model_catalog(entries: list) -> list:
             continue
         seen.add(model_id)
         roles = _model_roles_for_entry(model_id, methods)
+        if isinstance(entry, dict) and isinstance(entry.get("roles"), list):
+            roles = [role for role in MODEL_ROLE_KEYS if role in entry["roles"]]
+        role_overrides = None
+        if isinstance(entry, dict) and isinstance(entry.get("role_overrides"), list):
+            role_overrides = [
+                role for role in MODEL_ROLE_KEYS if role in entry["role_overrides"]
+            ]
         normalized.append(
             {
                 "id": model_id,
                 "name": str(raw_name or model_id).strip(),
                 "roles": roles,
                 "source": "upstream",
+                **({"role_overrides": role_overrides} if role_overrides is not None else {}),
             }
         )
     return sorted(normalized, key=lambda item: (item.get("name", "").lower(), item["id"]))
@@ -6807,13 +6815,37 @@ def _provider_model_catalog(provider: dict) -> list:
     return _normalize_model_catalog((provider or {}).get("model_catalog") or [])
 
 
-def _provider_model_choices(provider: dict, role: str) -> list:
-    """Return fetched models first, then compatible built-ins for old providers."""
+def _effective_model_roles(entry: dict) -> list:
+    overrides = entry.get("role_overrides")
+    roles = overrides if isinstance(overrides, list) else entry.get("roles", [])
+    return [role for role in MODEL_ROLE_KEYS if role in roles]
+
+
+def _merge_model_catalog(current: list, refreshed: list) -> list:
+    previous = {item["id"]: item for item in _normalize_model_catalog(current)}
+    merged = []
+    for item in _normalize_model_catalog(refreshed):
+        old = previous.get(item["id"], {})
+        if "role_overrides" in old:
+            item["role_overrides"] = list(old["role_overrides"])
+        merged.append(item)
+    return merged
+
+
+def _provider_model_choices(provider: dict, role: str, include_builtins: bool = False) -> list:
+    """Return upstream role choices, falling back to built-ins for legacy providers."""
     fetched = _provider_model_catalog(provider)
-    role_ids = [item["id"] for item in fetched if role in (item.get("roles") or [])]
-    fetched_ids = role_ids or [item["id"] for item in fetched]
-    builtins = list(MODELS.keys()) if role == "image" else list(TITLE_VISION_MODEL_ORDER)
-    return list(dict.fromkeys(fetched_ids + builtins))
+    if fetched:
+        choices = [item["id"] for item in fetched if role in _effective_model_roles(item)]
+        if include_builtins:
+            builtins = list(MODELS.keys()) if role == "image" else list(TITLE_VISION_MODEL_ORDER)
+            choices.extend(builtins)
+    else:
+        choices = list(MODELS.keys()) if role == "image" else list(TITLE_VISION_MODEL_ORDER)
+    assigned = str((provider or {}).get(f"{role}_model") or "").strip()
+    if assigned and assigned not in choices:
+        choices.append(assigned)
+    return choices
 
 
 def _provider_model_labels(provider: dict, role: str) -> dict:
@@ -6826,9 +6858,10 @@ def _provider_model_labels(provider: dict, role: str) -> dict:
 
 
 def render_provider_model_select(
-    label: str, provider: dict, role: str, current_value: str, key: str, allow_unset: bool = True
+    label: str, provider: dict, role: str, current_value: str, key: str,
+    allow_unset: bool = True, include_builtins: bool = False,
 ) -> str:
-    choices = _provider_model_choices(provider, role)
+    choices = _provider_model_choices(provider, role, include_builtins=include_builtins)
     labels = _provider_model_labels(provider, role)
     return render_model_select_with_custom(
         label,
@@ -7139,7 +7172,9 @@ def show_provider_settings():
                     try:
                         with st.spinner("正在读取上游模型目录…"):
                             fetched_catalog = fetch_provider_models(provider_for_fetch)
-                        p["model_catalog"] = fetched_catalog
+                        p["model_catalog"] = _merge_model_catalog(
+                            p.get("model_catalog", []), fetched_catalog
+                        )
                         p["model_catalog_updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
                         p["model_catalog_error"] = ""
                         if _key_input.strip():
@@ -7152,7 +7187,7 @@ def show_provider_settings():
                         data["providers"] = providers
                         save_providers(data)
                         st.session_state["_provider_model_notice"] = (
-                            f"「{p.get('name', '提供商')}」已加载 {len(fetched_catalog)} 个模型。"
+                            f"「{p.get('name', '提供商')}」已加载 {len(fetched_catalog)} 个上游模型。"
                         )
                         st.rerun()
                     except Exception as error:
@@ -7163,16 +7198,56 @@ def show_provider_settings():
                         save_providers(data)
                         st.error(f"模型获取失败：{p['model_catalog_error']}")
 
-            st.markdown("##### 模型绑定")
-            st.caption("绑定只对当前提供商生效；任务页会默认使用这里的选择，也可以在任务中临时切换。")
+            catalog = _provider_model_catalog(p)
+            if catalog:
+                with st.expander(f"管理模型能力 · {len(catalog)} 个上游模型", expanded=False):
+                    st.caption("系统会根据上游信息和模型名称给出建议。你的勾选优先，并会在下次同步时保留。")
+                    for model_entry in catalog:
+                        roles = set(_effective_model_roles(model_entry))
+                        label_col, text_col, vision_col, image_col = st.columns([3, 1, 1, 1])
+                        with label_col:
+                            st.markdown(f"**{model_entry.get('name') or model_entry['id']}**")
+                            st.caption(model_entry["id"])
+                        selections = {}
+                        with text_col:
+                            selections["title"] = st.checkbox(
+                                "文字", "title" in roles,
+                                key=f"model_role_title_{p['id']}_{model_entry['id']}",
+                            )
+                        with vision_col:
+                            selections["vision"] = st.checkbox(
+                                "视觉", "vision" in roles,
+                                key=f"model_role_vision_{p['id']}_{model_entry['id']}",
+                            )
+                        with image_col:
+                            selections["image"] = st.checkbox(
+                                "出图", "image" in roles,
+                                key=f"model_role_image_{p['id']}_{model_entry['id']}",
+                            )
+                        selected_roles = [role for role in MODEL_ROLE_KEYS if selections[role]]
+                        if selected_roles != _effective_model_roles(model_entry):
+                            model_entry["role_overrides"] = selected_roles
+                    p["model_catalog"] = catalog
+
+            st.markdown("##### 默认模型绑定")
+            st.caption("文字、视觉理解和图片生成分别调用。正常列表只显示该中转站返回并标记为对应能力的模型。")
+            show_compatibility = st.checkbox(
+                "显示本地兼容候选",
+                value=False,
+                key=f"prov_show_builtin_{p['id']}",
+                help="这些是 TuLite 内置候选，不代表当前中转站实际提供。仅用于兼容旧配置或手工填写模型。",
+            )
             p["title_model"] = render_provider_model_select(
-                "标题模型", p, "title", p.get("title_model", ""), key=f"prov_title_{p['id']}"
+                "文字模型", p, "title", p.get("title_model", ""), key=f"prov_title_{p['id']}",
+                include_builtins=show_compatibility,
             )
             p["vision_model"] = render_provider_model_select(
-                "视觉模型", p, "vision", p.get("vision_model", ""), key=f"prov_vision_{p['id']}"
+                "视觉模型", p, "vision", p.get("vision_model", ""), key=f"prov_vision_{p['id']}",
+                include_builtins=show_compatibility,
             )
             p["image_model"] = render_provider_model_select(
-                "出图模型", p, "image", p.get("image_model", ""), key=f"prov_image_{p['id']}"
+                "出图模型", p, "image", p.get("image_model", ""), key=f"prov_image_{p['id']}",
+                include_builtins=show_compatibility,
             )
             p["enabled"] = st.checkbox("启用此提供商", p.get("enabled", True), key=f"prov_enabled_{p['id']}")
 

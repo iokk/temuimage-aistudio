@@ -45,6 +45,49 @@ class ProviderModelCatalogTests(unittest.TestCase):
         self.assertEqual(app._provider_model_choices(provider, "title")[0], "relay-title")
         self.assertEqual(app._provider_model_choices(provider, "image")[0], "relay-image")
 
+    def test_nonempty_upstream_catalog_does_not_mix_builtin_candidates(self):
+        provider = {
+            "model_catalog": [
+                {"id": "relay-title", "name": "Relay Title", "roles": ["title"]},
+                {"id": "relay-image", "name": "Relay Image", "roles": ["image"]},
+            ]
+        }
+
+        self.assertEqual(app._provider_model_choices(provider, "title"), ["relay-title"])
+        self.assertEqual(app._provider_model_choices(provider, "image"), ["relay-image"])
+
+    def test_catalog_refresh_preserves_user_role_overrides(self):
+        current = [
+            {
+                "id": "relay-model",
+                "name": "Old name",
+                "roles": ["title"],
+                "role_overrides": ["vision"],
+            }
+        ]
+        refreshed = [
+            {"id": "relay-model", "name": "New name", "roles": ["title"]},
+        ]
+
+        merged = app._merge_model_catalog(current, refreshed)
+
+        self.assertEqual(merged[0]["name"], "New name")
+        self.assertEqual(merged[0]["role_overrides"], ["vision"])
+        self.assertEqual(app._effective_model_roles(merged[0]), ["vision"])
+
+    def test_current_assignment_remains_selectable_when_missing_from_catalog(self):
+        provider = {
+            "title_model": "removed-model",
+            "model_catalog": [
+                {"id": "relay-title", "name": "Relay Title", "roles": ["title"]},
+            ],
+        }
+
+        self.assertEqual(
+            app._provider_model_choices(provider, "title"),
+            ["relay-title", "removed-model"],
+        )
+
     def test_fetch_provider_models_uses_demo_catalog_without_network(self):
         provider = app.build_demo_provider()
         catalog = app.fetch_provider_models(provider)
