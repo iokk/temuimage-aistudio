@@ -75,7 +75,7 @@ class ProviderModelCatalogTests(unittest.TestCase):
         self.assertEqual(merged[0]["role_overrides"], ["vision"])
         self.assertEqual(app._effective_model_roles(merged[0]), ["vision"])
 
-    def test_current_assignment_remains_selectable_when_missing_from_catalog(self):
+    def test_current_assignment_is_not_selectable_when_missing_from_upstream_catalog(self):
         provider = {
             "title_model": "removed-model",
             "model_catalog": [
@@ -85,7 +85,25 @@ class ProviderModelCatalogTests(unittest.TestCase):
 
         self.assertEqual(
             app._provider_model_choices(provider, "title"),
-            ["relay-title", "removed-model"],
+            ["relay-title"],
+        )
+
+    def test_upstream_model_options_do_not_include_custom_entry(self):
+        self.assertEqual(
+            app._model_select_options(
+                ["relay-title"],
+                allow_unset=True,
+                allow_custom=False,
+            ),
+            [app.MODEL_UNSET_OPTION, "relay-title"],
+        )
+        self.assertEqual(
+            app._model_select_options(
+                [],
+                allow_unset=False,
+                allow_custom=False,
+            ),
+            [app.MODEL_UNSET_OPTION],
         )
 
     def test_binding_state_distinguishes_ready_mismatch_stale_and_unset(self):

@@ -6702,6 +6702,17 @@ MODEL_CUSTOM_OPTION = "自定义…"
 MODEL_UNSET_OPTION = "（留空，使用默认）"
 
 
+def _model_select_options(
+    catalog: list,
+    allow_unset: bool = True,
+    allow_custom: bool = True,
+) -> list:
+    options = ([MODEL_UNSET_OPTION] if allow_unset else []) + list(catalog)
+    if allow_custom:
+        options.append(MODEL_CUSTOM_OPTION)
+    return options or [MODEL_UNSET_OPTION]
+
+
 def render_model_select_with_custom(
     label: str,
     catalog: list,
@@ -6709,22 +6720,27 @@ def render_model_select_with_custom(
     key: str,
     allow_unset: bool = True,
     format_map: dict = None,
+    allow_custom: bool = True,
 ) -> str:
-    """模型名下拉选择 + 自定义输入。
+    """Render a catalog-backed selector with optional legacy custom input.
 
-    catalog 内的已知模型用 selectbox 选择；选「自定义…」时展示文本框，
-    允许中转提供商使用目录之外的模型名。返回最终模型名字符串（可为空）。
+    Once an upstream catalog exists, callers disable custom input so that
+    catalog remains the only source of selectable models.
     """
-    options = ([MODEL_UNSET_OPTION] if allow_unset else []) + list(catalog) + [
-        MODEL_CUSTOM_OPTION
-    ]
+    options = _model_select_options(
+        catalog,
+        allow_unset=allow_unset,
+        allow_custom=allow_custom,
+    )
     cur = str(current_value or "").strip()
     if not cur and allow_unset:
         idx = 0
     elif cur in catalog:
         idx = options.index(cur)
-    else:
+    elif allow_custom:
         idx = len(options) - 1
+    else:
+        idx = 0
     format_map = format_map or {}
 
     def _format_choice(value):
@@ -6880,9 +6896,10 @@ def _provider_model_choices(provider: dict, role: str, include_builtins: bool = 
             choices.extend(builtins)
     else:
         choices = list(MODELS.keys()) if role == "image" else list(TITLE_VISION_MODEL_ORDER)
-    assigned = str((provider or {}).get(f"{role}_model") or "").strip()
-    if assigned and assigned not in choices:
-        choices.append(assigned)
+    if not fetched:
+        assigned = str((provider or {}).get(f"{role}_model") or "").strip()
+        if assigned and assigned not in choices:
+            choices.append(assigned)
     return choices
 
 
@@ -6929,6 +6946,7 @@ def render_provider_model_select(
         key,
         allow_unset=allow_unset,
         format_map=labels,
+        allow_custom=not bool(_provider_model_catalog(provider)),
     )
 
 
