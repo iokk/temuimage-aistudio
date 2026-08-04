@@ -6403,6 +6403,18 @@ class OpenAIClient(GeminiClient):
             raise
 
 
+def _resolve_task_models(provider: dict, title_model=None, vision_model=None) -> dict:
+    provider = provider or {}
+    return {
+        "title_model": str(
+            title_model if title_model is not None else provider.get("title_model", "")
+        ).strip(),
+        "vision_model": str(
+            vision_model if vision_model is not None else provider.get("vision_model", "")
+        ).strip(),
+    }
+
+
 def create_ai_client(provider, model="", title_model=None, vision_model=None):
     """按提供商类型构建客户端：gemini/relay → Gemini 协议，openai → OpenAI 协议。
 
@@ -6412,16 +6424,10 @@ def create_ai_client(provider, model="", title_model=None, vision_model=None):
     provider = provider or {}
     provider_type = (provider.get("provider_type") or "gemini").strip().lower()
     image_model = (model or provider.get("image_model") or "").strip()
-    resolved_title_model = (
-        title_model if title_model is not None else provider.get("title_model", "")
-    )
-    resolved_vision_model = (
-        vision_model if vision_model is not None else provider.get("vision_model", "")
-    )
+    task_models = _resolve_task_models(provider, title_model, vision_model)
     common = dict(
         base_url=provider.get("base_url", ""),
-        title_model=resolved_title_model,
-        vision_model=resolved_vision_model,
+        **task_models,
     )
     if provider_type == "openai":
         return OpenAIClient(provider.get("api_key", ""), image_model, **common)
@@ -6736,22 +6742,23 @@ MODEL_VISION_TOKENS = (
     "vl-",
     "4o",
     "4.1",
-    "5.4",
     "gemini",
     "claude",
-    "grok",
 )
+MODEL_VIDEO_TOKENS = ("video", "veo", "sora")
 
 
 def _model_roles_for_entry(model_id: str, supported_methods=None) -> list:
     """Infer usable roles from upstream metadata, then use conservative name hints."""
     lowered = (model_id or "").lower()
     methods = {str(item).lower() for item in (supported_methods or [])}
+    if any(token in lowered for token in MODEL_VIDEO_TOKENS):
+        return []
     roles = set()
     if any("image" in method or "imagen" in method for method in methods):
         roles.add("image")
     if any(method in methods for method in ("generatecontent", "chatcompletion", "chat")):
-        roles.update(("title", "vision"))
+        roles.add("title")
     is_image_model = any(token in lowered for token in MODEL_IMAGE_TOKENS)
     if is_image_model:
         roles.add("image")
@@ -6764,7 +6771,7 @@ def _model_roles_for_entry(model_id: str, supported_methods=None) -> list:
         # Multimodal/text models can serve title generation as well as image understanding.
         roles.add("title")
     if not roles:
-        roles.update(("title", "vision"))
+        roles.add("title")
     return [role for role in MODEL_ROLE_KEYS if role in roles]
 
 
@@ -6865,7 +6872,7 @@ def _invalid_provider_model_bindings(provider: dict) -> list:
     return [
         role
         for role in MODEL_ROLE_KEYS
-        if _provider_model_binding_state(provider, role) in {"unset", "mismatch"}
+        if _provider_model_binding_state(provider, role) in {"unset", "mismatch", "stale"}
     ]
 
 
@@ -7304,6 +7311,16 @@ def show_provider_settings():
                         st.warning(binding_state_labels[state])
                     else:
                         st.error(binding_state_labels[state])
+                    current_role_choices = [
+                        item
+                        for item in _provider_model_catalog(p)
+                        if role in _effective_model_roles(item)
+                    ]
+                    if _provider_model_catalog(p) and not current_role_choices:
+                        st.caption(
+                            "该上游未返回此类模型。请先在能力分类中确认真实能力，"
+                            "或改用具备该能力的提供商。"
+                        )
 
             invalid_bindings = _invalid_provider_model_bindings(p)
             save_binding_col, binding_summary_col = st.columns([1, 2])
@@ -7492,7 +7509,7 @@ def render_title_gen_option(prefix: str, provider: dict = None):
             title_vision_model = render_provider_model_select(
                 "标题生成模型",
                 provider,
-                "vision",
+                "title",
                 default_title_vision_model,
                 key=f"{prefix}_title_vision_model",
                 allow_unset=False,
@@ -10193,8 +10210,10 @@ def consume_combo_generation_request(provider, model_key, state=None):
     else:
         reqs = state.get("combo_reqs", [])
 
-    default_title_model = resolve_default_title_vision_model(
-        provider.get("title_model") or provider.get("vision_model", "")
+    default_title_model = resolve_default_title_vision_model(provider.get("title_model", ""))
+    task_models = _resolve_task_models(
+        provider,
+        title_model=state.get("combo_title_vision_model", default_title_model),
     )
     task, error = create_task(
         "combo",
@@ -10219,10 +10238,7 @@ def consume_combo_generation_request(provider, model_key, state=None):
             "title_language": state.get(
                 "combo_title_language", DEFAULT_TARGET_LANGUAGE
             ),
-            "title_model": state.get("combo_title_vision_model", default_title_model),
-            "vision_model": state.get(
-                "combo_title_vision_model", default_title_model
-            ),
+            **task_models,
             "summary": f"智能组图任务 · {len(reqs)}张",
         },
     )
@@ -11134,6 +11150,10 @@ def show_smart_page():
             st.error(instruction_error)
             return
         image_paths = _save_uploaded_images(files or [], f"smart_{int(time.time())}")
+        task_models = _resolve_task_models(
+            provider,
+            title_model=title_vision_model,
+        )
         task, err = create_task(
             "translate" if workflow_mode == "translate" else "smart",
             {
@@ -11154,8 +11174,7 @@ def show_smart_page():
                 "title_template": title_template,
                 "template_prompt": "",
                 "title_language": title_language,
-                "title_model": title_vision_model,
-                "vision_model": title_vision_model,
+                **task_models,
                 "translation_template": translation_template,
                 "compliance_mode": compliance_mode,
                 "summary": build_smart_task_summary(
@@ -11207,13 +11226,11 @@ def show_title_page():
     title_language = DEFAULT_TARGET_LANGUAGE  # 三语标题固定输出 zh/es/fr
 
     st.markdown("### 🧠 标题生成模型")
-    default_title_vision_model = title_model or vision_model or resolve_default_title_vision_model(
-        title_model or vision_model
-    )
+    default_title_vision_model = title_model or resolve_default_title_vision_model(title_model)
     selected_title_vision_model = render_provider_model_select(
-        "选择用于识图/生成标题的模型",
+        "选择用于生成标题的文字模型",
         provider,
-        "vision",
+        "title",
         default_title_vision_model,
         key="standalone_title_vision_model",
         allow_unset=False,
@@ -11293,6 +11310,10 @@ def show_title_page():
         image_paths = _save_uploaded_images(
             uploaded_images, f"title_{int(time.time())}"
         )
+        task_models = _resolve_task_models(
+            provider,
+            title_model=selected_title_vision_model,
+        )
         task, err = create_task(
             "title",
             {
@@ -11301,8 +11322,7 @@ def show_title_page():
                 "template_prompt": final_prompt,
                 "title_language": title_language,
                 "image_paths": image_paths,
-                "title_model": selected_title_vision_model,
-                "vision_model": selected_title_vision_model,
+                **task_models,
                 "summary": "标题任务 · TEMU 三语(中/西/法)",
             },
         )

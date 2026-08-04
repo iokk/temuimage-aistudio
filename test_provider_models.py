@@ -104,7 +104,7 @@ class ProviderModelCatalogTests(unittest.TestCase):
         provider["image_model"] = ""
         self.assertEqual(app._provider_model_binding_state(provider, "image"), "unset")
 
-    def test_model_bindings_are_valid_only_when_every_role_is_ready_or_stale(self):
+    def test_model_bindings_are_valid_when_every_role_is_ready(self):
         provider = {
             "title_model": "text-model",
             "vision_model": "vision-model",
@@ -119,6 +119,60 @@ class ProviderModelCatalogTests(unittest.TestCase):
         self.assertEqual(app._invalid_provider_model_bindings(provider), [])
         provider["vision_model"] = "text-model"
         self.assertEqual(app._invalid_provider_model_bindings(provider), ["vision"])
+
+    def test_stale_binding_is_not_valid_for_new_provider_saves(self):
+        provider = {
+            "title_model": "text-model",
+            "vision_model": "model-from-another-provider",
+            "image_model": "image-model",
+            "model_catalog": [
+                {"id": "text-model", "roles": ["title"]},
+                {"id": "image-model", "roles": ["image"]},
+            ],
+        }
+
+        self.assertEqual(app._provider_model_binding_state(provider, "vision"), "stale")
+        self.assertEqual(app._invalid_provider_model_bindings(provider), ["vision"])
+
+    def test_generic_chat_and_video_generation_models_are_not_inferred_as_vision(self):
+        self.assertEqual(app._model_roles_for_entry("gpt-5.6", ["chatcompletion"]), ["title"])
+        self.assertEqual(app._model_roles_for_entry("gpt-5.4", ["chatcompletion"]), ["title"])
+        self.assertEqual(app._model_roles_for_entry("grok-4", ["chatcompletion"]), ["title"])
+        self.assertEqual(app._model_roles_for_entry("grok-imagine-video", []), [])
+
+    def test_explicit_multimodal_model_is_inferred_as_title_and_vision(self):
+        self.assertEqual(
+            app._model_roles_for_entry("vendor-vision-pro", ["chatcompletion"]),
+            ["title", "vision"],
+        )
+
+    def test_task_model_resolution_keeps_title_and_vision_bindings_separate(self):
+        provider = {
+            "title_model": "default-text",
+            "vision_model": "default-vision",
+        }
+
+        self.assertEqual(
+            app._resolve_task_models(provider, title_model="task-text"),
+            {
+                "title_model": "task-text",
+                "vision_model": "default-vision",
+            },
+        )
+
+    def test_task_model_resolution_uses_each_provider_default(self):
+        provider = {
+            "title_model": "default-text",
+            "vision_model": "default-vision",
+        }
+
+        self.assertEqual(
+            app._resolve_task_models(provider),
+            {
+                "title_model": "default-text",
+                "vision_model": "default-vision",
+            },
+        )
 
     def test_fetch_provider_models_uses_demo_catalog_without_network(self):
         provider = app.build_demo_provider()
