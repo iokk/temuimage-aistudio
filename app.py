@@ -3350,6 +3350,37 @@ def list_tasks_for_display():
     )
 
 
+def count_active_tasks_for_display() -> int:
+    """Count the current workspace's unfinished tasks (for auto-refresh)."""
+    try:
+        return sum(
+            1
+            for task in list_tasks_for_display()
+            if task.get("status") in {"queued", "running"}
+        )
+    except Exception:
+        logger.exception("统计进行中任务失败")
+        return 0
+
+
+AUTO_REFRESH_SECONDS = 3
+
+
+def maybe_auto_refresh_for_tasks() -> None:
+    """Re-run the page while this session still has unfinished tasks.
+
+    Placed at the very end of the page render so the user sees a fully drawn
+    page before the sleep. Disabled when the user opts out, so long-running
+    form input is never interrupted.
+    """
+    if not st.session_state.get("auto_refresh_tasks", True):
+        return
+    if count_active_tasks_for_display() <= 0:
+        return
+    time.sleep(AUTO_REFRESH_SECONDS)
+    st.rerun()
+
+
 def list_tasks_for_display_page(page=1, page_size=20, statuses=None):
     return TASK_REPOSITORY.list_page(
         page=page,
@@ -9427,6 +9458,14 @@ def render_task_center():
     completed_records = [r for r in records if r.get("status") == "done"]
     if queued or running:
         st.caption(f"运行中 {running} · 排队中 {queued}")
+        st.session_state.setdefault("auto_refresh_tasks", True)
+        if st.session_state["auto_refresh_tasks"]:
+            st.caption(f"⏳ 任务进行中，页面每 {AUTO_REFRESH_SECONDS} 秒自动刷新")
+        st.checkbox(
+            "自动刷新",
+            key="auto_refresh_tasks",
+            help="关闭后需手动刷新查看任务进度；填写长表单时可临时关闭。",
+        )
     elif completed_records:
         st.caption(f"当前无活动任务 · 已完成 {len(completed_records)}")
     else:
@@ -11390,6 +11429,7 @@ def main_app():
         show_settings_center()
 
     show_footer()
+    maybe_auto_refresh_for_tasks()
 
 
 def require_access_password() -> None:

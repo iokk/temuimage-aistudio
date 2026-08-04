@@ -140,3 +140,40 @@ curl --fail http://127.0.0.1:8501/_stcore/health
 ```
 
 如需回滚，切换到 `CHANGELOG.md` 中最近的已验收标签，恢复升级前的整个 `data/` 备份并重新构建。不要只复制 `tasks.sqlite3`，SQLite 的 WAL/SHM 文件和项目文件必须保持同一备份时点。
+
+## 数据备份
+
+仓库自带 `backup.sh`，把整个 `data/` 打包到 `backups/tulite-data-<时间戳>.tar.gz`，自动保留最近 10 份。
+
+```bash
+./backup.sh              # 备份到 ./backups
+./backup.sh /mnt/nas/tulite   # 备份到指定目录
+```
+
+脚本行为：
+
+- **任务库取一致性快照**。`tasks.sqlite3` 通过 SQLite 官方 backup API 导出（优先 `sqlite3` 命令，无则用 `python3` 的 `sqlite3` 模块），因此**服务运行中也能安全备份**，不会存到写入一半的事务。归档里不含 `-wal` / `-shm`，恢复时无需额外处理。
+- **排除 `data/logs/`**。体积大且可重建。
+- **包含 `data/.secret_key`**，归档权限为 `600`。
+
+> ⚠️ `data/.secret_key` 是加密存储的 API Key 的唯一解密密钥。备份中缺了它，恢复后所有已保存的 API Key 都无法解密，只能重新录入。同时也正因为归档含密钥，**不要把 `backups/` 提交到仓库或放进公开可读的目录**（`.gitignore` 已排除）。若用 `XIAOBAITU_SECRET_KEY` 环境变量托管密钥，请另行妥善保存该变量值。
+
+定时备份，每天凌晨 3 点：
+
+```bash
+crontab -e
+# 加入一行（换成你的实际路径）
+0 3 * * * cd /path/to/tulite && ./backup.sh >> /var/log/tulite-backup.log 2>&1
+```
+
+Docker 部署时在宿主机上对挂载出来的 `data/` 目录执行即可，无需进入容器。
+
+恢复：
+
+```bash
+docker compose down          # 或停止 streamlit 进程
+tar -xzf backups/tulite-data-20260804-030000.tar.gz -C /path/to/tulite
+docker compose up -d
+```
+
+恢复务必在服务停止时进行，并整份覆盖，不要只挑单个文件。

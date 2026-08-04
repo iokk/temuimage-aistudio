@@ -68,6 +68,14 @@ cp .env.example .env
 docker compose up -d
 ```
 
+备份数据（服务运行中也可执行，任务库取一致性快照）：
+
+```bash
+./backup.sh
+```
+
+保留最近 10 份到 `backups/`。归档含 `data/.secret_key`，勿公开存放。详见 [DEPLOYMENT.md 的数据备份章节](DEPLOYMENT.md#数据备份)。
+
 ## 目录结构
 
 ```

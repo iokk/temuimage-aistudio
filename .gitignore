@@ -12,6 +12,10 @@ venv/
 data/
 .env
 
+# 备份归档（backup.sh 产物，含密钥，绝不入库）
+backups/
+*.tar.gz
+
 # Desktop / web build artifacts
 desktop-app/node_modules/
 desktop-app/.vite/
@@ -23,6 +27,8 @@ build/
 .playwright-cli/
 .sisyphus/
 .ruff_cache/
+.omx/
+.superpowers/
 
 # IDE
 .idea/
