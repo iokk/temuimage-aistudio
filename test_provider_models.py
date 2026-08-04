@@ -88,6 +88,38 @@ class ProviderModelCatalogTests(unittest.TestCase):
             ["relay-title", "removed-model"],
         )
 
+    def test_binding_state_distinguishes_ready_mismatch_stale_and_unset(self):
+        provider = {
+            "title_model": "text-model",
+            "vision_model": "text-model",
+            "image_model": "removed-image",
+            "model_catalog": [
+                {"id": "text-model", "name": "Text", "roles": ["title"]},
+            ],
+        }
+
+        self.assertEqual(app._provider_model_binding_state(provider, "title"), "ready")
+        self.assertEqual(app._provider_model_binding_state(provider, "vision"), "mismatch")
+        self.assertEqual(app._provider_model_binding_state(provider, "image"), "stale")
+        provider["image_model"] = ""
+        self.assertEqual(app._provider_model_binding_state(provider, "image"), "unset")
+
+    def test_model_bindings_are_valid_only_when_every_role_is_ready_or_stale(self):
+        provider = {
+            "title_model": "text-model",
+            "vision_model": "vision-model",
+            "image_model": "image-model",
+            "model_catalog": [
+                {"id": "text-model", "roles": ["title"]},
+                {"id": "vision-model", "roles": ["vision"]},
+                {"id": "image-model", "roles": ["image"]},
+            ],
+        }
+
+        self.assertEqual(app._invalid_provider_model_bindings(provider), [])
+        provider["vision_model"] = "text-model"
+        self.assertEqual(app._invalid_provider_model_bindings(provider), ["vision"])
+
     def test_fetch_provider_models_uses_demo_catalog_without_network(self):
         provider = app.build_demo_provider()
         catalog = app.fetch_provider_models(provider)

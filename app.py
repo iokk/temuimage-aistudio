@@ -6848,6 +6848,27 @@ def _provider_model_choices(provider: dict, role: str, include_builtins: bool = 
     return choices
 
 
+def _provider_model_binding_state(provider: dict, role: str) -> str:
+    selected = str((provider or {}).get(f"{role}_model") or "").strip()
+    if not selected:
+        return "unset"
+    catalog = _provider_model_catalog(provider)
+    if not catalog:
+        return "ready"
+    entry = next((item for item in catalog if item["id"] == selected), None)
+    if entry is None:
+        return "stale"
+    return "ready" if role in _effective_model_roles(entry) else "mismatch"
+
+
+def _invalid_provider_model_bindings(provider: dict) -> list:
+    return [
+        role
+        for role in MODEL_ROLE_KEYS
+        if _provider_model_binding_state(provider, role) in {"unset", "mismatch"}
+    ]
+
+
 def _provider_model_labels(provider: dict, role: str) -> dict:
     labels = {}
     builtins = MODELS if role == "image" else TITLE_VISION_MODELS
@@ -7229,26 +7250,81 @@ def show_provider_settings():
                             model_entry["role_overrides"] = selected_roles
                     p["model_catalog"] = catalog
 
+                    if st.button(
+                        "保存能力分类",
+                        key=f"prov_save_roles_{p['id']}",
+                        type="primary",
+                        width="stretch",
+                    ):
+                        data["providers"] = providers
+                        save_providers(data)
+                        st.session_state["_provider_model_notice"] = "模型能力分类已保存。"
+                        st.rerun()
+
             st.markdown("##### 默认模型绑定")
-            st.caption("文字、视觉理解和图片生成分别调用。正常列表只显示该中转站返回并标记为对应能力的模型。")
-            show_compatibility = st.checkbox(
-                "显示本地兼容候选",
-                value=False,
-                key=f"prov_show_builtin_{p['id']}",
-                help="这些是 TuLite 内置候选，不代表当前中转站实际提供。仅用于兼容旧配置或手工填写模型。",
+            binding_head, compatibility_col = st.columns([3, 1])
+            with binding_head:
+                st.caption("为三类任务各指定一个默认模型。绑定状态会在保存前校验。")
+            with compatibility_col:
+                show_compatibility = st.toggle(
+                    "兼容候选",
+                    value=False,
+                    key=f"prov_show_builtin_{p['id']}",
+                    help="显示 TuLite 内置候选；它们不代表当前中转站实际提供。",
+                )
+
+            binding_columns = st.columns(3)
+            binding_specs = (
+                ("title", "文字模型", "标题、提示词和纯文本分析"),
+                ("vision", "视觉模型", "商品图片理解和素材分析"),
+                ("image", "出图模型", "文生图、图生图和图片翻译"),
             )
-            p["title_model"] = render_provider_model_select(
-                "文字模型", p, "title", p.get("title_model", ""), key=f"prov_title_{p['id']}",
-                include_builtins=show_compatibility,
-            )
-            p["vision_model"] = render_provider_model_select(
-                "视觉模型", p, "vision", p.get("vision_model", ""), key=f"prov_vision_{p['id']}",
-                include_builtins=show_compatibility,
-            )
-            p["image_model"] = render_provider_model_select(
-                "出图模型", p, "image", p.get("image_model", ""), key=f"prov_image_{p['id']}",
-                include_builtins=show_compatibility,
-            )
+            binding_state_labels = {
+                "ready": "已就绪",
+                "stale": "目录中暂未返回，保留旧绑定",
+                "mismatch": "能力不匹配，请重新选择",
+                "unset": "尚未绑定",
+            }
+            for column, (role, label, description) in zip(binding_columns, binding_specs):
+                with column:
+                    st.markdown(f"**{label}**")
+                    st.caption(description)
+                    p[f"{role}_model"] = render_provider_model_select(
+                        "选择模型",
+                        p,
+                        role,
+                        p.get(f"{role}_model", ""),
+                        key=f"prov_{role}_{p['id']}",
+                        include_builtins=show_compatibility,
+                    )
+                    state = _provider_model_binding_state(p, role)
+                    if state == "ready":
+                        st.success(binding_state_labels[state])
+                    elif state == "stale":
+                        st.warning(binding_state_labels[state])
+                    else:
+                        st.error(binding_state_labels[state])
+
+            invalid_bindings = _invalid_provider_model_bindings(p)
+            save_binding_col, binding_summary_col = st.columns([1, 2])
+            with save_binding_col:
+                if st.button(
+                    "保存默认模型",
+                    key=f"prov_save_bindings_{p['id']}",
+                    type="primary",
+                    width="stretch",
+                    disabled=bool(invalid_bindings),
+                ):
+                    data["providers"] = providers
+                    save_providers(data)
+                    st.session_state["_provider_model_notice"] = "默认模型绑定已保存。"
+                    st.rerun()
+            with binding_summary_col:
+                if invalid_bindings:
+                    invalid_labels = [MODEL_ROLE_LABELS[role] for role in invalid_bindings]
+                    st.caption("请先完成：" + "、".join(invalid_labels))
+                else:
+                    st.caption("后续新任务将使用以上默认模型；已提交任务不会改变。")
             p["enabled"] = st.checkbox("启用此提供商", p.get("enabled", True), key=f"prov_enabled_{p['id']}")
 
             if provider_active_tasks:
