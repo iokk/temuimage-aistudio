@@ -5,6 +5,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -35,6 +36,31 @@ def copy_explicit_python_files(dockerfile: Path, image_root: Path) -> None:
 
 
 class DeploymentManifestTests(unittest.TestCase):
+    def test_release_package_contains_only_committed_non_runtime_files(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_path = Path(temporary_directory) / "release.tar.gz"
+            result = subprocess.run(
+                [
+                    "/bin/bash",
+                    "scripts/build-release.sh",
+                    str(output_path),
+                ],
+                cwd=REPOSITORY_ROOT,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with tarfile.open(output_path, "r:gz") as archive:
+                members = {member.name for member in archive.getmembers()}
+
+            self.assertIn("tulite/app.py", members)
+            forbidden_parts = {".env", "data", ".superpowers", ".secret_key"}
+            for member in members:
+                relative_parts = Path(member).parts[1:]
+                self.assertTrue(forbidden_parts.isdisjoint(relative_parts), member)
+                self.assertFalse(member.endswith(".log"), member)
+
     def test_dockerfiles_copy_suite_runtime_modules(self):
         required_sources = {"suite_planner.py", "suite_output.py"}
 

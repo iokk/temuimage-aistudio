@@ -33,6 +33,14 @@ docker compose up -d
 
 使用仓库根目录的 `docker-compose.yml`，或 `deploy/1panel/docker-compose.yml` 作为专用 Compose 文件。
 
+生产环境上传前，使用发布脚本生成只包含 Git 已提交源文件的压缩包：
+
+```bash
+./scripts/build-release.sh
+```
+
+默认输出为 `dist/tulite-release.tar.gz`。发布包不会包含本地 `.env`、`data/`、日志、密钥或 `.superpowers/`；服务器现有 `.env` 与持久化数据应原地保留，不要用本地文件覆盖。
+
 服务器目录建议：
 
 ```bash
